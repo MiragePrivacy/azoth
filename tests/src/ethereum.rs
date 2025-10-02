@@ -141,10 +141,18 @@ fn create_config_with_transforms(
 
 #[tokio::test]
 async fn test_function_dispatch_only() -> Result<()> {
+    // Initialize tracing subscriber for this test
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+
     let seed = Seed::generate();
 
     println!("Testing FunctionDispatcher only (no additional transforms)");
 
+    // Step 2: Apply transformation
+    println!("Step 2: Applying FunctionDispatcher transform...");
     let config = create_config_with_transforms(vec![], seed);
     let result = obfuscate_bytecode(ESCROW_CONTRACT_BYTECODE, config)
         .await
