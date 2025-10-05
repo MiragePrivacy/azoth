@@ -1364,6 +1364,8 @@ dependencies = [
  "color-eyre",
  "heimdall-disassembler",
  "hex",
+ "hex-literal",
+ "paste",
  "petgraph",
  "rand 0.9.2",
  "revm",
@@ -2782,6 +2784,12 @@ checksum = "5313b072ce3c597065a808dbf612c4c8e8590bdbf8b579508bf7a762c5eae6cd"
 dependencies = [
  "arrayvec",
 ]
+
+[[package]]
+name = "hex-literal"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bcaaec4551594c969335c98c903c1397853d4198408ea609190f420500f6be71"
 
 [[package]]
 name = "hmac"

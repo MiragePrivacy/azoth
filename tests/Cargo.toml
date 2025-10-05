@@ -20,3 +20,5 @@ petgraph.workspace = true
 rand.workspace = true
 color-eyre = "0.6"
 revm.workspace = true
+paste.workspace = true
+hex-literal.workspace = true

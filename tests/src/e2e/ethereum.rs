@@ -1,15 +1,4 @@
-//! End to end ethereum tests.
-//!
-//! Test variations of obfuscation options:
-//!   - Function dispatch only (all options off)
-//!   - Each transformation type enabled
-//!   - Each combination of 2 transformations
-//!   - All options enabled
-//!
-//! Each test case should assert that the contract is deployable on the anvil instance
-//! TODO: use a wrapper around alloy transactions to call obfuscated selectors after deploying
-
-use azoth_core::decoder;
+use super::{mock_token_bytecode, prepare_escrow_bytecode, MOCK_TOKEN_ADDR, ESCROW_CONTRACT_BYTECODE};
 use azoth_transform::jump_address_transformer::JumpAddressTransformer;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use azoth_transform::opaque_predicate::OpaquePredicate;
@@ -18,7 +7,6 @@ use azoth_transform::{PassConfig, Transform};
 use azoth_utils::seed::Seed;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
-use hex;
 use revm::bytecode::Bytecode;
 use revm::context::result::{ExecutionResult, Output};
 use revm::context::TxEnv;
@@ -27,53 +15,27 @@ use revm::primitives::{Address, Bytes, TxKind, U256};
 use revm::state::AccountInfo;
 use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
 
-const ESCROW_CONTRACT_BYTECODE: &str =
-    include_str!("../../examples/escrow-bytecode/artifacts/bytecode.hex");
-
 /// Deploy bytecode and verify it executes without reverting
 fn deploy_and_verify_contract_revm(bytecode_hex: &str, name: &str) -> Result<(Address, u64)> {
-    let normalized_hex = decoder::normalize_hex_string(bytecode_hex)
-        .map_err(|e| eyre!("Failed to normalize bytecode for {}: {}", name, e))?;
-
-    let mut bytecode_bytes = hex::decode(&normalized_hex)
-        .map_err(|e| eyre!("Failed to decode bytecode for {}: {}", name, e))?;
-
-    if bytecode_bytes.is_empty() {
-        return Err(eyre!("Empty bytecode for {}", name));
-    }
-
-    // Mock token that returns true for any call
-    let token_addr = Address::from([0x11; 20]);
-    let mock_token_code = Bytes::from_static(&[
-        0x60, 0x01, 0x60, 0x00, 0x52, // PUSH1 1, PUSH1 0, MSTORE
-        0x60, 0x20, 0x60, 0x00, 0xf3, // PUSH1 32, PUSH1 0, RETURN
-    ]);
-
-    let mut db = InMemoryDB::default();
-    db.insert_account_info(
-        token_addr,
-        AccountInfo {
-            balance: U256::ZERO,
-            nonce: 1,
-            code_hash: revm::primitives::KECCAK_EMPTY,
-            code: Some(Bytecode::new_raw(mock_token_code)),
-        },
-    );
-
-    // ABI-encode constructor args: (address,address,uint256,uint256,uint256)
-    let recipient = Address::from([0x22; 20]);
-    bytecode_bytes.extend_from_slice(&[0; 12]); // pad token address
-    bytecode_bytes.extend_from_slice(token_addr.as_slice());
-    bytecode_bytes.extend_from_slice(&[0; 12]); // pad recipient
-    bytecode_bytes.extend_from_slice(recipient.as_slice());
-    bytecode_bytes.extend_from_slice(&[0; 32]); // expectedAmount = 0
-    bytecode_bytes.extend_from_slice(&[0; 32]); // currentRewardAmount = 0
-    bytecode_bytes.extend_from_slice(&[0; 32]); // currentPaymentAmount = 0
+    // Prepare bytecode with constructor arguments
+    let bytecode_bytes = prepare_escrow_bytecode(bytecode_hex)?;
 
     println!(
         "Testing {} contract deployment ({} bytes)",
         name,
         bytecode_bytes.len()
+    );
+
+    // Setup EVM with mock token
+    let mut db = InMemoryDB::default();
+    db.insert_account_info(
+        MOCK_TOKEN_ADDR,
+        AccountInfo {
+            balance: U256::ZERO,
+            nonce: 1,
+            code_hash: revm::primitives::KECCAK_EMPTY,
+            code: Some(Bytecode::new_raw(mock_token_bytecode())),
+        },
     );
 
     let mut evm = Context::mainnet().with_db(db).build_mainnet();
