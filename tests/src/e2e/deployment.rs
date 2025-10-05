@@ -1,4 +1,6 @@
-use super::{mock_token_bytecode, prepare_escrow_bytecode, MOCK_TOKEN_ADDR, ESCROW_CONTRACT_BYTECODE};
+use super::{
+    mock_token_bytecode, prepare_bytecode, ESCROW_CONTRACT_BYTECODE, MOCK_TOKEN_ADDR,
+};
 use azoth_transform::jump_address_transformer::JumpAddressTransformer;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use azoth_transform::opaque_predicate::OpaquePredicate;
@@ -18,7 +20,7 @@ use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
 /// Deploy bytecode and verify it executes without reverting
 fn deploy_and_verify_contract_revm(bytecode_hex: &str, name: &str) -> Result<(Address, u64)> {
     // Prepare bytecode with constructor arguments
-    let bytecode_bytes = prepare_escrow_bytecode(bytecode_hex)?;
+    let bytecode_bytes = prepare_bytecode(bytecode_hex)?;
 
     println!(
         "Testing {} contract deployment ({} bytes)",

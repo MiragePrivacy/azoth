@@ -39,7 +39,7 @@ pub const ESCROW_CONTRACT_BYTECODE: &str =
 
 /// Prepare escrow contract bytecode with constructor arguments
 #[allow(dead_code)]
-pub fn prepare_escrow_bytecode(base_bytecode: &str) -> Result<Bytes> {
+pub fn prepare_bytecode(base_bytecode: &str) -> Result<Bytes> {
     let normalized_hex = azoth_core::decoder::normalize_hex_string(base_bytecode)
         .map_err(|e| eyre!("Failed to normalize bytecode: {}", e))?;
 
@@ -75,7 +75,7 @@ macro_rules! define_contract_selectors {
             // Generate const selectors
             $(
                 #[allow(dead_code)]
-                pub const [<$contract:upper _ $fn_name:upper>]: Selector = 
+                pub const [<$contract:upper _ $fn_name:upper>]: Selector =
                     Selector::new(hex_literal::hex!($selector));
             )*
 
@@ -94,7 +94,7 @@ macro_rules! define_contract_selectors {
                     selector_mapping: &HashMap<u32, Vec<u8>>
                 ) -> Result<Self, String> {
                     let mut mappings = Self::default();
-                    
+
                     for (&original_u32, token) in selector_mapping {
                         if token.len() != 4 {
                             return Err(format!(
@@ -103,9 +103,9 @@ macro_rules! define_contract_selectors {
                                 original_u32
                             ));
                         }
-                        
+
                         let obfuscated = Selector::from_slice(token);
-                        
+
                         match original_u32 {
                             $(
                                 _ if original_u32 == u32::from_be_bytes([<$contract:upper _ $fn_name:upper>].0) => {
@@ -115,7 +115,7 @@ macro_rules! define_contract_selectors {
                             _ => continue,
                         }
                     }
-                    
+
                     mappings.validate()?;
                     Ok(mappings)
                 }
@@ -216,7 +216,7 @@ define_contract_selectors!(Escrow {
     bond: "9940686e",
     request_cancellation: "81972d00",
     resume: "046f7da2",
-    collect: "e5225381",
+    collect: "ede7f6a3",
     is_bonded: "cb766a56",
     withdraw: "3ccfd60b",
     current_reward_amount: "5a4fd645",
@@ -234,7 +234,7 @@ define_contract_selectors!(Escrow {
 impl EscrowMappings {
     fn validate(&self) -> Result<(), String> {
         let mut missing = Vec::new();
-        
+
         if self.bond == Selector::ZERO {
             missing.push("bond");
         }
@@ -244,14 +244,14 @@ impl EscrowMappings {
         if self.collect == Selector::ZERO {
             missing.push("collect");
         }
-        
+
         if !missing.is_empty() {
             return Err(format!(
                 "Missing critical selector mappings: {}",
                 missing.join(", ")
             ));
         }
-        
+
         Ok(())
     }
 }
@@ -263,6 +263,7 @@ impl_calldata_builders!(ObfuscatedCaller for EscrowMappings {
     fn collect_call_data() -> collect;
     fn withdraw_call_data() -> withdraw;
     fn fund_call_data() -> fund;
+    fn funded_call_data() -> funded;
 });
 
 /// Build standard (non-obfuscated) calldata for comparison tests
@@ -274,7 +275,7 @@ pub fn build_standard_calldata(selector: Selector, args: &[u8]) -> Bytes {
 }
 
 #[cfg(test)]
-mod ethereum;
+mod deployment;
 
 #[cfg(test)]
 mod function_calls;
