@@ -1,6 +1,4 @@
-use super::{
-    mock_token_bytecode, prepare_bytecode, ESCROW_CONTRACT_BYTECODE, MOCK_TOKEN_ADDR,
-};
+use super::{mock_token_bytecode, prepare_bytecode, ESCROW_CONTRACT_BYTECODE, MOCK_TOKEN_ADDR};
 use azoth_transform::jump_address_transformer::JumpAddressTransformer;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use azoth_transform::opaque_predicate::OpaquePredicate;

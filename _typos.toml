@@ -1,0 +1,3 @@
+[default.extend-words]
+# function selectors (4-byte hex strings)
+ede = "ede"
