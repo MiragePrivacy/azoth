@@ -10,7 +10,7 @@ This guide will help you get started. Don't let this guide intimidate you - it's
 
 ## Conduct
 
-The Azoth project adheres to the [Rust Code of Conduct][https://github.com/rust-lang/rust/blob/master/CODE_OF_CONDUCT.md]. This describes the _minimum_ behavior expected from all contributors. Instances of violations of the Code of Conduct can be reported by contacting the project team at [g4titan1@gmail.com](mailto:g4titan1@gmail.com).
+The Azoth project adheres to the [Rust Code of Conduct](https://github.com/rust-lang/rust/blob/master/CODE_OF_CONDUCT.md). This describes the minimum behavior expected from all contributors. Instances of violations of the Code of Conduct can be reported by contacting the project team at [g4titan1@gmail.com](mailto:g4titan1@gmail.com).
 
 
 ## Getting Started with Azoth
@@ -26,7 +26,7 @@ Since Azoth is in active development, the best way to get started is to:
 
 For any issue, there are fundamentally three ways to contribute:
 
-1. **Opening issues for discussion**: If you've discovered a bug, have a feature request, or want to discuss obfuscation techniques, you can create a new issue in the [Azoth issue tracker][https://github.com/MiragePrivacy/Azoth/issues/].
+1. **Opening issues for discussion**: If you've discovered a bug, have a feature request, or want to discuss obfuscation techniques, you can create a new issue in the [Azoth issue tracker](https://github.com/MiragePrivacy/Azoth/issues/).
 
 2. **Helping to triage issues**: Provide test cases, suggest solutions, or help categorize issues with appropriate labels.
 

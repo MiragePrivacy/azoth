@@ -14,42 +14,52 @@ Azoth is a research-grade toolchain for Ethereum smart-contract obfuscation. The
 
 ## Architecture
 
-This is a Rust workspace with four main crates:
+This is a Rust workspace with six main crates:
 
-- **`crates/core/`**: Core functionality including bytecode loader, detector, stripper, and IR/CFG generation
-- **`crates/analysis/`**: Analysis utilities including dominators, metrics, and pattern mining
-- **`crates/transforms/`**: Obfuscation passes (opaque predicates, shuffling, stack noise)
-- **`crates/cli/`**: Command-line interface (`azoth` binary)
+- **`crates/core/`**: Core functionality including bytecode decoder, encoder, section detector, bytecode stripper, and CFG-IR generation. The detection module includes section isolation (`detection/sections.rs`) and dispatcher pattern detection (`detection/dispatcher.rs`)
+- **`crates/analysis/`**: Analysis utilities for measuring bytecode complexity and obfuscation quality through comprehensive metrics
+- **`crates/transforms/`**: Obfuscation passes including opaque predicates, control flow shuffling, function dispatcher obfuscation, and jump address transformation. The `obfuscator.rs` module orchestrates all transforms
+- **`crates/verification/`**: Formal verification engine providing mathematical proofs of semantic equivalence using Z3 SMT solver, plus practical testing with REVM. Supports multiple verification levels and generates cryptographic certificates
+- **`crates/utils/`**: Shared utilities including deterministic seed generation and error types
+- **`crates/cli/`**: Command-line interface (`azoth` binary) with subcommands for decode, strip, cfg, and obfuscate
+
+### Additional Workspace Members
+- **`tests/`**: Workspace-level integration and end-to-end tests organized by component (core, transforms, analysis, verification, e2e)
+- **`examples/`**: Example contracts including escrow bytecode for testing and benchmarking
 
 ## Development Requirements
 
-**Important**: This project requires Rust edition 2024, which needs nightly toolchain:
+**Important**: This project uses Rust edition 2021 and standard stable toolchain:
 ```bash
-rustup toolchain install nightly
-rustup default nightly
+cargo build
 ```
 
 ## Common Commands
 
 ### Build and Test
+
+The project uses custom cargo aliases defined in `.cargo/config.toml`:
+
 ```bash
-# Build the project (requires nightly Rust)
+# Build all packages with release optimizations
+cargo bb
+
+# Run clippy on all packages (warnings treated as errors)
+cargo cc
+
+# Run all tests using cargo-nextest
+cargo tt
+
+# Standard cargo commands also work
 cargo build
-
-# Run tests
 cargo test
-
-# Run specific test
-cargo test test_name
-
-# Run end-to-end tests
-cargo test --test e2e_erc20
-
-# Format code
 cargo fmt
-
-# Check for issues
 cargo clippy
+```
+
+**Note**: This project uses `cargo-nextest` as the test runner. Install it with:
+```bash
+cargo install cargo-nextest
 ```
 
 ### CLI Usage
@@ -57,16 +67,22 @@ cargo clippy
 # Build CLI binary
 cargo build --bin azoth
 
-# Run CLI commands
+# Decode bytecode to annotated assembly
 cargo run --bin azoth -- decode <bytecode>
+
+# Strip init/auxdata, output runtime hex
 cargo run --bin azoth -- strip <bytecode>
+
+# Generate and visualize CFG-IR
 cargo run --bin azoth -- cfg <bytecode>
+
+# Apply obfuscation transforms
 cargo run --bin azoth -- obfuscate <bytecode>
 ```
 
 ### Input Formats
 - Hex string: `0x608060405234801561001057600080fd5b50...`
-- File path: `@path/to/bytecode.hex`
+- File path: `path/to/bytecode.hex`
 
 ## Code Style and Documentation Standards
 
@@ -74,13 +90,13 @@ cargo run --bin azoth -- obfuscate <bytecode>
 The project follows strict Rust coding standards to ensure maintainability and consistency across the codebase.
 
 **Formatting and Structure:**
-- Uses rustfmt with custom configuration (see `rustfmt.toml`)
+- Standard rustfmt configuration
 - Maximum line width of 100 characters
-- Rust edition 2024 features enabled throughout
+- Rust edition 2021
 - Consistent indentation and spacing enforced by automated tools
 
 **Documentation Requirements:**
-All public APIs must include comprehensive rustdoc documentation. This is not optional and will be enforced during code review.
+All public APIs must include comprehensive rustdoc documentation. This is enforced by the `missing-docs` lint at the workspace level.
 
 **Required Documentation Elements:**
 - Module-level documentation explaining the purpose and scope of functionality
@@ -114,8 +130,6 @@ Write documentation in clear, professional prose rather than fragmented bullet p
 ///   bytecode sequence. These instructions must be validated and properly formatted.
 /// * `sections` - Detected bytecode sections that define the boundaries between
 ///   initialization code, runtime code, and auxiliary data.
-/// * `bytecode` - The raw bytecode bytes used for cross-validation and metadata
-///   extraction during the CFG construction process.
 /// * `clean_report` - Stripping report containing PC mappings and section information
 ///   required for proper reassembly after obfuscation transforms.
 ///
@@ -138,25 +152,24 @@ Write documentation in clear, professional prose rather than fragmented bullet p
 ///
 /// ```rust
 /// use azoth_core::cfg_ir::build_cfg_ir;
-/// 
-/// let (instructions, info, _) = decode_bytecode("0x6001600155", false).await?;
-/// let sections = locate_sections(&bytecode, &instructions, &info)?;
-/// let (clean_runtime, report) = strip_bytecode(&bytecode, &sections)?;
-/// 
-/// let cfg_bundle = build_cfg_ir(&instructions, &sections, &bytecode, report)?;
+///
+/// let (instructions, _, _, bytes) = decode_bytecode("0x6001600155", false).await?;
+/// let sections = locate_sections(&bytes, &instructions)?;
+/// let (_, report) = strip_bytecode(&bytes, &sections)?;
+///
+/// let cfg_bundle = build_cfg_ir(&instructions, &sections, report)?;
 /// println!("CFG contains {} blocks", cfg_bundle.cfg.node_count());
 /// ```
 pub fn build_cfg_ir(
     instructions: &[Instruction],
-    sections: &[Section], 
-    bytecode: &[u8],
+    sections: &[Section],
     clean_report: CleanReport,
 ) -> Result<CfgIrBundle, CfgIrError>
 ```
 
 This documentation style provides comprehensive information while maintaining readability and professional presentation. Avoid excessive use of bullet points or fragmented lists in favor of coherent explanatory prose.
 
-## Key Data Structures
+## Key Modules and Data Structures
 
 - **CFG IR**: Control Flow Graph intermediate representation in `crates/core/src/cfg_ir.rs`
 - **Opcodes**: EVM opcode definitions and utilities in `crates/core/src/opcode.rs`
@@ -223,6 +236,8 @@ When creating GitHub issues, always assign appropriate labels to ensure proper c
 - `component:core` - Issues related to core bytecode processing
 - `component:transforms` - Obfuscation transform implementations
 - `component:analysis` - Metrics and analytical functionality
+- `component:verification` - Formal verification and testing
+- `component:utils` - Shared utilities and helpers
 - `component:cli` - Command-line interface and user experience
 - `component:tests` - Testing infrastructure and test cases
 
@@ -262,6 +277,22 @@ All changes must go through code review before merging to master. The review pro
 
 ## Testing
 
-- Unit tests are located alongside source files
-- End-to-end tests in `crates/cli/tests/`
-- Test data includes ERC20 token examples in `examples/erc20/`
+Located in `tests/` workspace directory, organized by component:
+  - `tests/src/core/`
+  - `tests/src/transforms/`
+  - `tests/src/analysis/`
+  - `tests/src/verification/`
+  - `tests/src/e2e/`
+
+### Test Data
+- **`examples/escrow-bytecode/`**: Real-world escrow contract bytecode for integration testing
+- **`examples/src/main.rs`**: Example usage and demonstration code
+
+### Running Tests
+```bash
+# Run all tests with nextest (recommended)
+cargo tt
+
+# Run specific test suite
+cargo nextest run --test e2e
+```
