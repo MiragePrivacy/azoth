@@ -1,7 +1,6 @@
 mod analysis;
 mod core;
-#[cfg(test)]
-mod ethereum;
+mod e2e;
 #[cfg(test)]
 mod seed;
 mod transforms;
