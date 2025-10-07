@@ -1,5 +1,5 @@
-use crate::errors::SeedError;
-use rand::{RngCore, SeedableRng};
+use crate::result::Error;
+use rand::{RngCore, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
@@ -19,13 +19,13 @@ impl Seed {
     }
 
     /// Create from hex string (with or without 0x prefix)
-    pub fn from_hex(hex: &str) -> Result<Self, SeedError> {
+    pub fn from_hex(hex: &str) -> Result<Self, Error> {
         let hex = hex.strip_prefix("0x").unwrap_or(hex);
         if hex.len() != 64 {
-            return Err(SeedError::InvalidLength(hex.len()));
+            return Err(Error::InvalidSeedLength(hex.len()));
         }
 
-        let bytes = hex::decode(hex).map_err(|_| SeedError::InvalidHex)?;
+        let bytes = hex::decode(hex).map_err(|_| Error::InvalidSeedHex)?;
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&bytes);
         Ok(Self { inner: seed })
@@ -41,7 +41,7 @@ impl Seed {
     ///
     /// Basically, it uses whatever bytes are already stored in that Seed, regardless of how those
     /// bytes were created (randomly via generate(), from hex, from legacy u64, etc.).
-    pub fn create_deterministic_rng(&self) -> rand::rngs::StdRng {
+    pub fn create_deterministic_rng(&self) -> StdRng {
         // Hash the seed to create RNG seed
         let mut hasher = Sha3_256::new();
         hasher.update(b"AZOTH_BYTECODE_OBFUSCATION");
@@ -53,7 +53,7 @@ impl Seed {
         seed_bytes.copy_from_slice(&seed_hash[..8]);
         let rng_seed = u64::from_le_bytes(seed_bytes);
 
-        rand::rngs::StdRng::seed_from_u64(rng_seed)
+        StdRng::seed_from_u64(rng_seed)
     }
 
     /// Get a hash of this seed for integrity/identification purposes

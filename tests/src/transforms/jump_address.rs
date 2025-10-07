@@ -1,6 +1,7 @@
+use azoth_core::process_bytecode_to_cfg;
+use azoth_core::seed::Seed;
 use azoth_transform::jump_address_transformer::JumpAddressTransformer;
 use azoth_transform::{PassConfig, Transform};
-use azoth_utils::seed::Seed;
 
 #[tokio::test]
 async fn test_jump_address_transformer() {
@@ -10,9 +11,7 @@ async fn test_jump_address_transformer() {
 
     // Simple bytecode with a conditional jump
     let bytecode = "0x60085760015b00"; // PUSH1 0x08, JUMPI, PUSH1 0x01, JUMPDEST, STOP
-    let mut cfg_ir = azoth_core::process_bytecode_to_cfg_only(bytecode, false)
-        .await
-        .unwrap();
+    let (mut cfg_ir, _, _, _) = process_bytecode_to_cfg(bytecode, false).await.unwrap();
 
     // Count instructions before transformation
     let mut instruction_count_before = 0;

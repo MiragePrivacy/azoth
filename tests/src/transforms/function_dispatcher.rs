@@ -1,11 +1,11 @@
 use azoth_core::decoder;
 use azoth_core::detection;
 use azoth_core::detection::FunctionSelector;
+use azoth_core::seed::Seed;
 use azoth_transform::function_dispatcher::FunctionDispatcher;
 use azoth_transform::obfuscator::obfuscate_bytecode;
 use azoth_transform::obfuscator::ObfuscationConfig;
 use azoth_transform::PassConfig;
-use azoth_utils::seed::Seed;
 
 #[tokio::test]
 async fn test_token_dispatcher_obfuscation() {

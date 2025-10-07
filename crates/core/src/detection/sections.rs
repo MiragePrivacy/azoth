@@ -1,7 +1,7 @@
 use crate::Opcode;
 use crate::decoder::Instruction;
 use crate::is_terminal_opcode;
-use azoth_utils::errors::DetectError;
+use crate::result::Error;
 use serde::{Deserialize, Serialize};
 
 /// Represents the type of a bytecode section.
@@ -42,10 +42,7 @@ impl Section {
 }
 
 /// Locates all non-overlapping, offset-ordered sections in the bytecode.
-pub fn locate_sections(
-    bytes: &[u8],
-    instructions: &[Instruction],
-) -> Result<Vec<Section>, DetectError> {
+pub fn locate_sections(bytes: &[u8], instructions: &[Instruction]) -> Result<Vec<Section>, Error> {
     let mut sections = Vec::new();
     let total_len = bytes.len();
 
@@ -309,7 +306,7 @@ fn detect_codecopy_return_simple(instructions: &[Instruction]) -> Option<(usize,
 }
 
 /// Validates sections for overlaps, gaps, and bounds
-pub fn validate_sections(sections: &[Section], total_len: usize) -> Result<(), DetectError> {
+pub fn validate_sections(sections: &[Section], total_len: usize) -> Result<(), Error> {
     let mut current_offset = 0;
     for section in sections.iter() {
         tracing::debug!(
@@ -321,19 +318,19 @@ pub fn validate_sections(sections: &[Section], total_len: usize) -> Result<(), D
         );
 
         if section.offset < current_offset {
-            return Err(DetectError::Overlap(section.offset));
+            return Err(Error::SectionOverlap(section.offset));
         }
         if section.offset > current_offset {
-            return Err(DetectError::Gap(current_offset));
+            return Err(Error::SectionGap(current_offset));
         }
         if section.end() > total_len {
-            return Err(DetectError::OutOfBounds(section.end()));
+            return Err(Error::SectionOutOfBounds(section.end()));
         }
         current_offset = section.end();
     }
 
     if current_offset != total_len {
-        return Err(DetectError::Gap(current_offset));
+        return Err(Error::SectionGap(current_offset));
     }
 
     Ok(())

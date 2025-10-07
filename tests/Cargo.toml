@@ -8,7 +8,6 @@ azoth-core.workspace = true
 azoth-transform.workspace = true
 azoth-analysis.workspace = true
 azoth-verification.workspace = true
-azoth-utils.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 tracing.workspace = true

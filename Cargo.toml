@@ -47,7 +47,6 @@ azoth-core = { version = "0.1.0", path = "crates/core" }
 azoth-cli = { version = "0.1.0", path = "crates/cli" }
 azoth-analysis = { version = "0.1.0", path = "crates/analysis" }
 azoth-transform = { version = "0.1.0", path = "crates/transforms" }
-azoth-utils = { version = "0.1.0", path = "crates/utils" }
 azoth-verification = { version = "0.1.0", path = "crates/verification" }
 
 # Ethereum

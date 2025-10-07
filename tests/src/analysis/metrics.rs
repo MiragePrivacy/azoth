@@ -2,8 +2,7 @@ use azoth_analysis::{
     collect_metrics, compare,
     metrics::{dom_overlap, dominator_pairs},
 };
-use azoth_core::{cfg_ir, decoder, detection, strip};
-use azoth_utils::errors::DecodeError;
+use azoth_core::{cfg_ir, decoder, detection, result::Error, strip};
 use petgraph::graph::NodeIndex;
 
 /// Tests metrics computation for a simple bytecode with linear control flow.
@@ -93,7 +92,7 @@ async fn test_collect_metrics_empty_input() {
     let err = decoder::decode_bytecode("0x", false)
         .await
         .expect_err("empty blob must fail to decode");
-    assert!(matches!(err, DecodeError::Parse { .. }));
+    assert!(matches!(err, Error::ParseError { .. }));
 }
 
 /// Tests metrics computation for a CFG with no body blocks.
@@ -182,7 +181,7 @@ async fn test_dominator_computation() {
         .with_max_level(tracing::Level::DEBUG)
         .init();
     let bytecode = "0x6000600157600256"; // PUSH1 0x00, PUSH1 0x01, JUMPI, PUSH1 0x02, JUMP
-    let cfg_ir = azoth_core::process_bytecode_to_cfg_only(bytecode, false)
+    let (cfg_ir, _, _, _) = azoth_core::process_bytecode_to_cfg(bytecode, false)
         .await
         .unwrap();
 

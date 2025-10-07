@@ -8,9 +8,9 @@ use super::{
     mock_token_bytecode, prepare_bytecode, EscrowMappings, ObfuscatedCaller,
     ESCROW_CONTRACT_BYTECODE, MOCK_TOKEN_ADDR,
 };
+use azoth_core::seed::Seed;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use azoth_transform::PassConfig;
-use azoth_utils::seed::Seed;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use revm::bytecode::Bytecode;

@@ -1,8 +1,8 @@
+use crate::Result;
 use crate::{PassConfig, Transform};
 use azoth_analysis::{collect_metrics, compare};
 use azoth_core::cfg_ir::CfgIrBundle;
-use azoth_utils::errors::TransformError;
-use azoth_utils::seed::Seed;
+use azoth_core::seed::Seed;
 use tracing::info;
 
 /// Trait for running a sequence of obfuscation transforms on a CFG IR.
@@ -13,7 +13,7 @@ pub trait Pass {
         passes: &[Box<dyn Transform>],
         cfg: &PassConfig,
         seed: &Seed,
-    ) -> Result<(), TransformError>;
+    ) -> Result<()>;
 }
 
 /// Default implementation of the Pass trait.
@@ -26,7 +26,7 @@ impl Pass for DefaultPass {
         passes: &[Box<dyn Transform>],
         config: &PassConfig,
         seed: &Seed,
-    ) -> Result<(), TransformError> {
+    ) -> Result<()> {
         let mut rng = seed.create_deterministic_rng();
 
         for pass in passes {

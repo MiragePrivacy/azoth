@@ -1,9 +1,9 @@
+use crate::{Error, Result};
 use crate::{PassConfig, Transform};
 use azoth_core::cfg_ir::{Block, CfgIrBundle};
 use azoth_core::decoder::Instruction;
 use azoth_core::detection::{detect_function_dispatcher, DispatcherInfo, FunctionSelector};
 use azoth_core::Opcode;
-use azoth_utils::errors::TransformError;
 use rand::{rngs::StdRng, Rng};
 use sha3::{Digest, Keccak256};
 use std::collections::{HashMap, HashSet};
@@ -71,7 +71,7 @@ impl FunctionDispatcher {
         &self,
         selectors: &[FunctionSelector],
         rng: &mut StdRng,
-    ) -> Result<HashMap<u32, Vec<u8>>, TransformError> {
+    ) -> Result<HashMap<u32, Vec<u8>>> {
         let mut mapping = HashMap::new();
         let mut used_tokens = HashSet::new();
 
@@ -93,7 +93,7 @@ impl FunctionDispatcher {
             }
 
             if attempt >= 100 {
-                return Err(TransformError::Generic(
+                return Err(Error::Generic(
                     "Could not generate unique token after 100 attempts".to_string(),
                 ));
             }
@@ -118,7 +118,7 @@ impl FunctionDispatcher {
         &self,
         max_token_size: usize,
         rng: &mut StdRng,
-    ) -> Result<Vec<Instruction>, TransformError> {
+    ) -> Result<Vec<Instruction>> {
         let mut instructions = Vec::new();
 
         // Phase 1: Disguised calldata offset calculation (always results in 0x00)
@@ -267,7 +267,7 @@ impl FunctionDispatcher {
         selectors: &[FunctionSelector],
         mapping: &HashMap<u32, Vec<u8>>,
         rng: &mut StdRng,
-    ) -> Result<(Vec<Instruction>, usize), TransformError> {
+    ) -> Result<(Vec<Instruction>, usize)> {
         let mut instructions = Vec::new();
         let max_stack_needed = 3;
 
@@ -327,7 +327,7 @@ impl FunctionDispatcher {
         &self,
         token: &[u8],
         target_address: u64,
-    ) -> Result<Vec<Instruction>, TransformError> {
+    ) -> Result<Vec<Instruction>> {
         let mut comparison = vec![self.create_instruction(Opcode::DUP(1), None)?];
 
         // Push token with appropriate size
@@ -360,7 +360,7 @@ impl FunctionDispatcher {
         &self,
         ir: &mut CfgIrBundle,
         mapping: &HashMap<u32, Vec<u8>>,
-    ) -> Result<(), TransformError> {
+    ) -> Result<()> {
         for node_idx in ir.cfg.node_indices().collect::<Vec<_>>() {
             if let Block::Body { instructions, .. } = &mut ir.cfg[node_idx] {
                 let mut i = 0;
@@ -415,11 +415,7 @@ impl FunctionDispatcher {
     }
 
     /// Creates a safe instruction with proper opcode validation
-    pub fn create_instruction(
-        &self,
-        opcode: Opcode,
-        imm: Option<String>,
-    ) -> Result<Instruction, TransformError> {
+    pub fn create_instruction(&self, opcode: Opcode, imm: Option<String>) -> Result<Instruction> {
         Ok(Instruction {
             pc: 0, // Will be set during PC reindexing
             op: opcode,
@@ -432,7 +428,7 @@ impl FunctionDispatcher {
         &self,
         value: u64,
         target_bytes: Option<usize>,
-    ) -> Result<Instruction, TransformError> {
+    ) -> Result<Instruction> {
         let bytes_needed = if value == 0 {
             1
         } else {
@@ -464,7 +460,7 @@ impl Transform for FunctionDispatcher {
         "FunctionDispatcher"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool, TransformError> {
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
         debug!("=== FunctionDispatcher Transform Start ===");
 
         // Find the runtime section
@@ -589,7 +585,7 @@ impl Transform for FunctionDispatcher {
                 .iter()
                 .max_by_key(|(_, &count)| count)
                 .ok_or_else(|| {
-                    TransformError::Generic(
+                    Error::Generic(
                         "dispatcher: no valid base candidates found from JUMPDEST voting".into(),
                     )
                 })?;
@@ -637,7 +633,7 @@ impl Transform for FunctionDispatcher {
                     .iter()
                     .map(|(sel, t, abs)| format!("0x{:08x}->0x{:x} (abs: 0x{:x})", sel, t, abs))
                     .collect();
-                return Err(TransformError::Generic(format!(
+                return Err(Error::Generic(format!(
                     "dispatcher: base {:#x} doesn't achieve full coverage. Failed targets: [{}]",
                     best_base,
                     failures_summary.join(", ")
@@ -779,14 +775,15 @@ impl Transform for FunctionDispatcher {
             // Update CFG structure and addresses
             let region_start = first_block_start_pc;
             ir.update_jump_targets(size_delta, region_start, None)
-                .map_err(TransformError::CoreError)?;
+                .map_err(|e| Error::CoreError(e.to_string()))?;
 
-            ir.reindex_pcs().map_err(TransformError::CoreError)?;
+            ir.reindex_pcs()
+                .map_err(|e| Error::CoreError(e.to_string()))?;
 
             // Rebuild edges for all affected blocks
             for (block_idx, _, _) in &affected_blocks {
                 ir.rebuild_edges_for_block(*block_idx)
-                    .map_err(TransformError::CoreError)?;
+                    .map_err(|e| Error::CoreError(e.to_string()))?;
             }
 
             // Store the mapping in the CFG bundle

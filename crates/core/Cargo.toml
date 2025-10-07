@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-azoth-utils = { path = "../utils" }
+eot.workspace = true
 hex.workspace = true
 heimdall.workspace = true
+petgraph.workspace = true
+rand.workspace = true
 serde.workspace = true
 sha3.workspace = true
 thiserror.workspace = true
 tiny-keccak.workspace = true
 tracing.workspace = true
-petgraph.workspace = true
-eot.workspace = true

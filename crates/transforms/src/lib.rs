@@ -3,20 +3,58 @@ pub mod jump_address_transformer;
 pub mod obfuscator;
 pub mod opaque_predicate;
 pub mod pass;
+pub mod result;
 pub mod shuffle;
 
 use azoth_core::cfg_ir::CfgIrBundle;
 use azoth_core::Opcode;
-use azoth_utils::errors::TransformError;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
+
+use azoth_analysis::Error as MetricsError;
+use thiserror::Error;
+
+/// Transform error type encompassing all transform module errors.
+#[derive(Debug, Error)]
+pub enum Error {
+    /// Core operation failed.
+    #[error("core operation failed: {0}")]
+    CoreError(String),
+
+    /// Instruction encoding failed.
+    #[error("instruction encoding failed: {0}")]
+    EncodingError(String),
+
+    /// Generic error.
+    #[error("generic error: {0}")]
+    Generic(String),
+
+    /// Invalid jump target.
+    #[error("invalid jump target: {0}")]
+    InvalidJumpTarget(usize),
+
+    /// Metrics computation failed.
+    #[error("metrics computation failed: {0}")]
+    Metrics(#[from] MetricsError),
+
+    /// Bytecode size exceeds maximum allowed delta.
+    #[error("bytecode size exceeds maximum allowed delta")]
+    SizeLimitExceeded,
+
+    /// Stack depth exceeds maximum limit of 1024.
+    #[error("stack depth exceeds maximum limit of 1024")]
+    StackOverflow,
+}
+
+/// Transform result type
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Trait for bytecode obfuscation transforms.
 pub trait Transform: Send + Sync {
     /// Returns the transform's name for logging and identification.
     fn name(&self) -> &'static str;
     /// Applies the transform to the CFG IR, returning whether changes were made.
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool, TransformError>;
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool>;
 }
 
 /// Configuration for transform passes.

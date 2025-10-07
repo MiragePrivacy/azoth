@@ -1,21 +1,7 @@
-/// Module for stripping EVM bytecode to extract the runtime blob and prepare it for
-/// obfuscation.
-///
-/// This module implements the second step of BOSC preprocessing by isolating the runtime
-/// bytecode, recording removal details, preserving library placeholders, and providing
-/// utilities for re-mapping and reassembly. It aligns with Wroblewski’s focus on measuring
-/// obfuscation potency against the true runtime and BOSC’s gas efficiency considerations.
-///
-/// # Usage
-/// ```rust,ignore
-/// let bytes = hex::decode("60016002a165627a7a72").unwrap();
-/// let sections = detection::locate_sections(&bytes, &vec![], &DecodeInfo { byte_length: bytes.len(), keccak_hash: [0; 32], source: SourceType::HexString }).unwrap();
-/// let (clean_runtime, report) = strip_bytecode(&bytes, &sections).unwrap();
-/// let rebuilt = report.reassemble(&clean_runtime).unwrap();
-/// assert_eq!(bytes, rebuilt);
-/// ```
+//! Module for stripping EVM bytecode to extract the runtime blob and prepare it for
+//! obfuscation.
 use crate::detection::{Section, SectionKind};
-use azoth_utils::errors::StripError;
+use crate::result::Error;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 
@@ -65,10 +51,7 @@ pub struct CleanReport {
 ///
 /// # Returns
 /// A tuple of (clean_runtime_bytes, cleanup_report)
-pub fn strip_bytecode(
-    bytes: &[u8],
-    sections: &[Section],
-) -> Result<(Vec<u8>, CleanReport), StripError> {
+pub fn strip_bytecode(bytes: &[u8], sections: &[Section]) -> Result<(Vec<u8>, CleanReport), Error> {
     let mut clean_runtime = Vec::new();
     let mut report = CleanReport {
         removed: Vec::new(),
@@ -118,7 +101,7 @@ pub fn strip_bytecode(
 
     // Validation
     if clean_runtime.is_empty() {
-        return Err(StripError::NoRuntimeFound);
+        return Err(Error::NoRuntimeFound);
     }
 
     // Set final metadata

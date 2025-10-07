@@ -1,8 +1,8 @@
 use crate::Transform;
+use crate::{Error, Result};
 use azoth_core::cfg_ir::{Block, CfgIrBundle};
 use azoth_core::decoder::Instruction;
 use azoth_core::Opcode;
-use azoth_utils::errors::TransformError;
 use rand::{rngs::StdRng, seq::SliceRandom};
 use std::collections::HashMap;
 use tracing::debug;
@@ -14,7 +14,7 @@ impl Transform for Shuffle {
         "Shuffle"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool, TransformError> {
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
         let mut blocks: Vec<(usize, &Block)> = ir
             .cfg
             .node_indices()
@@ -63,14 +63,15 @@ impl Transform for Shuffle {
                         if let Some(new_target) = pc_map.get(&old_target) {
                             instr.imm = Some(format!("{new_target:x}"));
                         } else {
-                            return Err(TransformError::InvalidJumpTarget(old_target));
+                            return Err(Error::InvalidJumpTarget(old_target));
                         }
                     }
                 }
             }
         }
 
-        ir.replace_body(new_instrs, &[])?;
+        ir.replace_body(new_instrs, &[])
+            .map_err(|e| Error::CoreError(e.to_string()))?;
         Ok(true)
     }
 }

@@ -40,7 +40,7 @@ pub const ESCROW_CONTRACT_BYTECODE: &str =
 /// Prepare escrow contract bytecode with constructor arguments
 #[allow(dead_code)]
 pub fn prepare_bytecode(base_bytecode: &str) -> Result<Bytes> {
-    let normalized_hex = azoth_core::decoder::normalize_hex_string(base_bytecode)
+    let normalized_hex = azoth_core::normalize_hex_string(base_bytecode)
         .map_err(|e| eyre!("Failed to normalize bytecode: {}", e))?;
 
     let mut bytecode_bytes =

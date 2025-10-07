@@ -1,15 +1,9 @@
+//! Module for encoding EVM instructions into bytecode and reassembling bytecode with
+//! non-runtime sections.
 use crate::Opcode;
-/// Module for encoding EVM instructions into bytecode and reassembling bytecode with
-/// non-runtime sections.
-///
-/// This module provides functionality to convert a sequence of decoded EVM instructions into
-/// their corresponding bytecode representation, handling opcodes and immediate data. It also
-/// supports reassembling the runtime bytecode with non-runtime sections (e.g., init code,
-/// auxdata) using a `CleanReport` from the `strip` module. The encoding process ensures
-/// compatibility with the opcodes defined in the `opcode` module.
 use crate::decoder::Instruction;
+use crate::result::Error;
 use crate::strip::CleanReport;
-use azoth_utils::errors::EncodeError;
 use hex;
 
 /// Encodes a sequence of EVM instructions into bytecode.
@@ -20,7 +14,7 @@ use hex;
 /// * `bytecode` - Reference bytecode to extract unknown opcode bytes from using PC.
 ///
 /// # Returns
-/// A `Result` containing the encoded bytecode as a `Vec<u8>` or an `EncodeError` if encoding fails.
+/// A `Result` containing the encoded bytecode as a `Vec<u8>` or an `Error` if encoding fails.
 ///
 /// # Examples
 /// ```rust,ignore
@@ -33,7 +27,7 @@ use hex;
 /// let bytes = encode(&[ins], &[0x60, 0xaa]).unwrap();
 /// assert_eq!(bytes, vec![0x60, 0xaa]);
 /// ```
-pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, EncodeError> {
+pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::with_capacity(instructions.len() * 3);
     let mut unknown_count = 0;
 
@@ -114,7 +108,7 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
                         n,
                         imm_bytes.len()
                     );
-                    return Err(EncodeError::InvalidImmediate(format!(
+                    return Err(Error::InvalidImmediate(format!(
                         "PUSH{} requires {}-byte immediate, got {} bytes at pc={}",
                         n,
                         n,
@@ -126,7 +120,7 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
                 tracing::debug!("Added {} immediate bytes for {}", imm_bytes.len(), opcode);
             } else {
                 tracing::error!("Missing immediate for {} at pc={}", opcode, ins.pc);
-                return Err(EncodeError::InvalidImmediate(format!(
+                return Err(Error::InvalidImmediate(format!(
                     "PUSH{} missing immediate at pc={}",
                     n, ins.pc
                 )));

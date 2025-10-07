@@ -1,7 +1,7 @@
 use crate::function_dispatcher::FunctionDispatcher;
 use crate::{PassConfig, Transform};
+use azoth_core::seed::Seed;
 use azoth_core::{cfg_ir, decoder, detection, encoder, process_bytecode_to_cfg, Opcode};
-use azoth_utils::seed::Seed;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};

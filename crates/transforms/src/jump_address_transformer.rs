@@ -1,8 +1,8 @@
+use crate::{Error, Result};
 use crate::{PassConfig, Transform};
 use azoth_core::cfg_ir::{Block, CfgIrBundle};
 use azoth_core::decoder::Instruction;
 use azoth_core::Opcode;
-use azoth_utils::errors::TransformError;
 use petgraph::graph::NodeIndex;
 use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, Rng};
@@ -69,7 +69,7 @@ impl Transform for JumpAddressTransformer {
         "JumpAddressTransformer"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool, TransformError> {
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
         debug!("=== JumpAddressTransformer Transform Start ===");
 
         let mut changed = false;
@@ -246,7 +246,8 @@ impl Transform for JumpAddressTransformer {
                 total_transformed
             );
             debug!("Reindexing PCs...");
-            ir.reindex_pcs().map_err(TransformError::CoreError)?;
+            ir.reindex_pcs()
+                .map_err(|e| Error::CoreError(e.to_string()))?;
             debug!("=== JumpAddressTransformer Transform Complete ===");
         }
 

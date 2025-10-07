@@ -24,7 +24,6 @@ eot.workspace = true
 
 # azoth
 azoth-core.workspace = true
-azoth-utils.workspace = true
 
 [features]
 default = ["formal-verification"]

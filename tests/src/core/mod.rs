@@ -7,4 +7,6 @@ mod detection;
 #[cfg(test)]
 mod encoder;
 #[cfg(test)]
+mod seed;
+#[cfg(test)]
 mod strip;

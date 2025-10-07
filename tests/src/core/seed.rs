@@ -1,4 +1,4 @@
-use azoth_utils::seed::Seed;
+use azoth_core::seed::Seed;
 use rand::RngCore;
 
 #[test]

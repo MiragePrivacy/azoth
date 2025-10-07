@@ -1,8 +1,8 @@
+use crate::{Error, Result};
 use crate::{PassConfig, Transform};
 use azoth_core::cfg_ir::{Block, CfgIrBundle, EdgeType};
 use azoth_core::decoder::Instruction;
 use azoth_core::Opcode;
-use azoth_utils::errors::TransformError;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use rand::prelude::SliceRandom;
@@ -36,7 +36,7 @@ impl Transform for OpaquePredicate {
         "OpaquePredicate"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool, TransformError> {
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
         debug!("=== OpaquePredicate Transform Start ===");
 
         let mut changed = false;
@@ -216,7 +216,8 @@ impl Transform for OpaquePredicate {
         if changed {
             debug!("Inserted {} opaque predicates", predicate_count);
             debug!("Reindexing PCs...");
-            ir.reindex_pcs().map_err(TransformError::CoreError)?;
+            ir.reindex_pcs()
+                .map_err(|e| Error::CoreError(e.to_string()))?;
             debug!("=== OpaquePredicate Transform Complete ===");
         }
         Ok(changed)

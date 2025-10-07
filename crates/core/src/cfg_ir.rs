@@ -10,7 +10,7 @@ use crate::Opcode;
 use crate::decoder::Instruction;
 use crate::detection::Section;
 use crate::is_terminal_opcode;
-use azoth_utils::errors::CfgIrError;
+use crate::result::Error;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
@@ -96,7 +96,7 @@ pub struct CfgIrBundle {
 /// * `clean_report` - Report from `strip.rs` for reassembly.
 ///
 /// # Returns
-/// A `Result` containing the `CfgIrBundle` or a `CfgIrError` if construction fails.
+/// A `Result` containing the `CfgIrBundle` or a `Error` if construction fails.
 ///
 /// # Examples
 /// ```rust,ignore
@@ -108,7 +108,7 @@ pub fn build_cfg_ir(
     instructions: &[Instruction],
     sections: &[Section],
     clean_report: crate::strip::CleanReport,
-) -> Result<CfgIrBundle, CfgIrError> {
+) -> Result<CfgIrBundle, Error> {
     tracing::debug!(
         "Starting CFG-IR construction with {} instructions",
         instructions.len()
@@ -152,12 +152,12 @@ impl CfgIrBundle {
     /// * `sections` - Detected sections for the new bytecode.
     ///
     /// # Returns
-    /// A `Result` indicating success or a `CfgIrError` if rebuilding fails.
+    /// A `Result` indicating success or a `Error` if rebuilding fails.
     pub fn replace_body(
         &mut self,
         instructions: Vec<Instruction>,
         sections: &[Section],
-    ) -> Result<(), CfgIrError> {
+    ) -> Result<(), Error> {
         let clean_report = self.clean_report.clone();
         let selector_mapping = self.selector_mapping.clone(); // Preserve mapping
         let new_bundle = build_cfg_ir(&instructions, sections, clean_report)?;
@@ -172,7 +172,7 @@ impl CfgIrBundle {
     }
 }
 
-fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, CfgIrError> {
+fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
     let mut blocks = Vec::new();
     let mut cur_block = Block::Body {
         start_pc: 0,
@@ -290,7 +290,7 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, CfgIrError> 
             orphaned_jumpdests.len(),
             orphaned_jumpdests
         );
-        return Err(CfgIrError::InvalidBlockStructure(format!(
+        return Err(Error::InvalidBlockStructure(format!(
             "JUMPDESTs not aligned with block starts: {:?}",
             orphaned_jumpdests
         )));
@@ -303,7 +303,7 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, CfgIrError> 
     );
 
     if blocks.is_empty() {
-        return Err(CfgIrError::NoEntryBlock);
+        return Err(Error::NoEntryBlock);
     }
 
     Ok(blocks)
@@ -315,7 +315,7 @@ type BuildEdgesResult = Result<
         Vec<(NodeIndex, NodeIndex, EdgeType)>,
         HashMap<usize, NodeIndex>,
     ),
-    CfgIrError,
+    Error,
 >;
 
 /// Builds edges between blocks based on control flow.
@@ -330,7 +330,7 @@ type BuildEdgesResult = Result<
 /// * `cfg` - The CFG graph to populate with nodes and edges.
 ///
 /// # Returns
-/// A `Result` containing a tuple of edge definitions and a PC-to-block mapping, or a `CfgIrError`.
+/// A `Result` containing a tuple of edge definitions and a PC-to-block mapping, or a `Error`.
 fn build_edges(
     blocks: &[Block],
     _instructions: &[Instruction],
@@ -508,12 +508,12 @@ fn extract_jump_target_from_block(instructions: &[Instruction]) -> Option<usize>
 /// * `instructions` - Decoded EVM instructions.
 ///
 /// # Returns
-/// A `Result` indicating success or a `CfgIrError` if SSA assignment fails.
+/// A `Result` indicating success or a `Error` if SSA assignment fails.
 fn assign_ssa_values(
     cfg: &mut DiGraph<Block, EdgeType>,
     _pc_to_block: &HashMap<usize, NodeIndex>,
     _instructions: &[Instruction],
-) -> Result<(), CfgIrError> {
+) -> Result<(), Error> {
     let mut value_id = 0;
 
     for node in cfg.node_indices() {
@@ -574,8 +574,8 @@ impl CfgIrBundle {
     /// Should be called after any transform that changes instruction sequences.
     ///
     /// # Returns
-    /// A `Result` indicating success or a `CfgIrError` if reindexing fails.
-    pub fn reindex_pcs(&mut self) -> Result<(), CfgIrError> {
+    /// A `Result` indicating success or a `Error` if reindexing fails.
+    pub fn reindex_pcs(&mut self) -> Result<(), Error> {
         tracing::debug!(
             "Starting PC reindexing for {} blocks",
             self.cfg.node_count()
@@ -648,8 +648,8 @@ impl CfgIrBundle {
     /// * `node_idx` - The block whose edges need rebuilding
     ///
     /// # Returns
-    /// A `Result` indicating success or a `CfgIrError` if edge rebuilding fails.
-    pub fn rebuild_edges_for_block(&mut self, node_idx: NodeIndex) -> Result<(), CfgIrError> {
+    /// A `Result` indicating success or a `Error` if edge rebuilding fails.
+    pub fn rebuild_edges_for_block(&mut self, node_idx: NodeIndex) -> Result<(), Error> {
         tracing::debug!("Rebuilding edges for block {}", node_idx.index());
 
         // Remove all outgoing edges from this block
@@ -772,13 +772,13 @@ impl CfgIrBundle {
     /// * `pc_mapping` - Optional direct PC mapping for targets within changed regions
     ///
     /// # Returns
-    /// A `Result` indicating success or a `CfgIrError` if target updates fail.
+    /// A `Result` indicating success or a `Error` if target updates fail.
     pub fn update_jump_targets(
         &mut self,
         pc_offset: isize,
         region_start: usize,
         pc_mapping: Option<&HashMap<usize, usize>>,
-    ) -> Result<(), CfgIrError> {
+    ) -> Result<(), Error> {
         tracing::debug!(
             "Updating jump targets: offset={:+}, region_start=0x{:x}",
             pc_offset,
@@ -906,7 +906,7 @@ impl CfgIrBundle {
     }
 
     /// Patches PUSH immediate values that target jump destinations after PC reindexing.
-    fn patch_jump_immediates(&mut self) -> Result<(), CfgIrError> {
+    fn patch_jump_immediates(&mut self) -> Result<(), Error> {
         tracing::debug!("Patching jump immediates after PC reindexing");
 
         // First, collect all the target mappings to avoid borrowing conflicts

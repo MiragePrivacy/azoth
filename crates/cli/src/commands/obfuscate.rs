@@ -1,15 +1,15 @@
+use crate::commands::ObfuscateError;
 /// Module for the `obfuscate` subcommand, which applies obfuscation transforms to EVM
 /// bytecode.
 ///
 /// This module processes input bytecode and uses the unified obfuscation pipeline
 /// from azoth-transform to apply transforms and output obfuscated bytecode.
 use async_trait::async_trait;
+use azoth_core::seed::Seed;
 use azoth_transform::obfuscator::{
     create_gas_report, obfuscate_bytecode, print_obfuscation_analysis, ObfuscationConfig,
 };
 use azoth_transform::{PassConfig, Transform};
-use azoth_utils::errors::ObfuscateError;
-use azoth_utils::seed::Seed;
 use clap::Args;
 use std::error::Error;
 use std::fs;

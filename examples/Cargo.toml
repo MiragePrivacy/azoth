@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 azoth-core.workspace = true
 azoth-transform.workspace = true
-azoth-utils.workspace = true
 chrono.workspace = true
 hex.workspace = true
 serde_json.workspace = true

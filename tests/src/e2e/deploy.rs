@@ -1,10 +1,10 @@
 use super::{mock_token_bytecode, prepare_bytecode, ESCROW_CONTRACT_BYTECODE, MOCK_TOKEN_ADDR};
+use azoth_core::seed::Seed;
 use azoth_transform::jump_address_transformer::JumpAddressTransformer;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use azoth_transform::opaque_predicate::OpaquePredicate;
 use azoth_transform::shuffle::Shuffle;
 use azoth_transform::{PassConfig, Transform};
-use azoth_utils::seed::Seed;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use revm::bytecode::Bytecode;

@@ -1,3 +1,4 @@
+use crate::{Error, Result};
 /// Module for computing analytical metrics to evaluate EVM bytecode obfuscation transforms.
 ///
 /// Implements a minimal set of metrics quantified by bytecode size, control flow complexity,
@@ -14,7 +15,6 @@
 /// ```
 use azoth_core::cfg_ir::{Block, CfgIrBundle, EdgeType};
 use azoth_core::strip::CleanReport;
-use azoth_utils::errors::MetricsError;
 use petgraph::{
     algo::dominators::simple_fast,
     graph::{DiGraph, NodeIndex},
@@ -59,9 +59,9 @@ pub struct Metrics {
 ///
 /// # Returns
 /// A `Metrics` struct with computed metrics, or an error if the CFG is invalid.
-pub fn collect_metrics(ir: &CfgIrBundle, report: &CleanReport) -> Result<Metrics, MetricsError> {
+pub fn collect_metrics(ir: &CfgIrBundle, report: &CleanReport) -> Result<Metrics> {
     if ir.cfg.node_count() < 2 {
-        return Err(MetricsError::EmptyCfg);
+        return Err(Error::EmptyCfg);
     }
 
     let (doms, post_doms) = dominator_pairs(&ir.cfg);
@@ -73,7 +73,7 @@ pub fn collect_metrics(ir: &CfgIrBundle, report: &CleanReport) -> Result<Metrics
         .filter(|&n| matches!(ir.cfg[n], Block::Body { .. }))
         .count();
     if block_cnt == 0 {
-        return Err(MetricsError::NoBodyBlocks);
+        return Err(Error::NoBodyBlocks);
     }
 
     let max_stack_peak = max_stack_per_block(ir).values().max().copied().unwrap_or(0);

@@ -1,8 +1,8 @@
 //! Mirage Privacy Protocol - Obfuscation Workflow
 
+use azoth_core::seed::Seed;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig, ObfuscationResult};
 use azoth_transform::PassConfig;
-use azoth_utils::seed::Seed;
 use serde_json::json;
 use std::fs;
 
