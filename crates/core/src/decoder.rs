@@ -13,8 +13,8 @@ use tiny_keccak::{Hasher, Keccak};
 pub struct Instruction {
     /// the instruction's program counter (in bytes)
     pub pc: usize,
-    /// Opcode name - the mnemonic (e.g. "PUSH1", "ADD")
-    pub opcode: String,
+    /// Parsed opcode enum
+    pub op: Opcode,
     /// any immediate data (hex string without 0x), if present
     pub imm: Option<String>,
 }
@@ -217,9 +217,41 @@ pub fn parse_assembly(asm: &str) -> Result<Vec<Instruction>, DecodeError> {
             });
         }
 
+        // Parse opcode once during decoding for efficient access
+        let parsed_opcode = Opcode::from_str(opcode).unwrap_or_else(|_| {
+            // Try to extract byte value from UNKNOWN_0x?? format
+            if let Some(hex_part) = opcode.strip_prefix("UNKNOWN_0x")
+                && let Ok(byte_val) = u8::from_str_radix(hex_part, 16)
+            {
+                tracing::debug!(
+                    "Unknown opcode '{}' at PC 0x{:x}, storing as UNKNOWN(0x{:02x})",
+                    opcode,
+                    pc,
+                    byte_val
+                );
+                return Opcode::UNKNOWN(byte_val);
+            }
+
+            // For generic "unknown" or other unrecognized opcodes, use INVALID as a placeholder.
+            //
+            // Note: INVALID here does NOT mean the opcode is actually 0xFE (the INVALID opcode).
+            // It's used as a marker for "we don't know what byte this is from the disassembly alone".
+            // The encoder will recover the actual byte value from the original bytecode using the PC.
+            // This is the least-bad choice when heimdall gives us "unknown" without a hex byte value.
+            //
+            // If we can't recover the byte during encoding (e.g., PC out of bounds), the instruction
+            // will be skipped rather than encoded as 0xFE.
+            tracing::warn!(
+                "Unrecognized opcode '{}' at PC 0x{:x}, using INVALID as placeholder (byte will be recovered from original during encode)",
+                opcode,
+                pc
+            );
+            Opcode::INVALID
+        });
+
         instructions.push(Instruction {
             pc,
-            opcode: opcode.to_string(),
+            op: parsed_opcode,
             imm,
         });
     }
@@ -230,25 +262,23 @@ impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // pc: six-digit hex, opcode left-padded to 8 chars, then optional imm
         if let Some(imm) = &self.imm {
-            write!(f, "{:06x}  {:<8} {}", self.pc, self.opcode, imm)
+            write!(f, "{:06x}  {:<8} {}", self.pc, self.op, imm)
         } else {
-            write!(f, "{:06x}  {}", self.pc, self.opcode)
+            write!(f, "{:06x}  {}", self.pc, self.op)
         }
     }
 }
 
 impl Instruction {
     /// Returns the number of bytes this instruction occupies in bytecode.
-    ///
-    /// This version includes validation and handles edge cases.
     #[inline]
     pub fn byte_size(&self) -> usize {
-        match Opcode::from_str(&self.opcode) {
+        match self.op {
             // Handle PUSH0 specifically (introduced in Shanghai fork)
-            Ok(Opcode::PUSH0) => 1, // PUSH0 has no immediate data
+            Opcode::PUSH0 => 1, // PUSH0 has no immediate data
 
             // Handle PUSH1-PUSH32
-            Ok(Opcode::PUSH(n)) => 1 + n as usize, // opcode byte + immediate bytes
+            Opcode::PUSH(n) => 1 + n as usize, // opcode byte + immediate bytes
 
             // All other EVM instructions (valid or unknown) are single-byte
             _ => 1,

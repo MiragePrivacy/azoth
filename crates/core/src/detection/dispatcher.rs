@@ -12,7 +12,6 @@
 
 use crate::Opcode;
 use crate::decoder::Instruction;
-use std::str::FromStr;
 
 /// Represents a detected function dispatcher with its selectors and metadata.
 ///
@@ -141,17 +140,7 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
 
     for i in (extraction_start + extraction_len)..instructions.len() {
         let instr = &instructions[i];
-
-        // Parse opcode string to Opcode enum for type-safe matching
-        let opcode = match Opcode::from_str(&instr.opcode) {
-            Ok(op) => op,
-            Err(_) => {
-                // Unknown opcode, treat as stack-clearing operation
-                stack.clear();
-                prev_opcode = None;
-                continue;
-            }
-        };
+        let opcode = instr.op;
 
         match opcode {
             Opcode::PUSH(_) | Opcode::PUSH0 => {
@@ -343,31 +332,26 @@ fn is_extraction_pattern(instrs: &[Instruction]) -> bool {
         return false;
     }
 
-    // Helper to check opcode safely
-    let check_opcode = |instr: &Instruction, expected: Opcode| -> bool {
-        Opcode::from_str(&instr.opcode).ok() == Some(expected)
-    };
-
     // Newer pattern: CALLDATALOAD PUSH1 0xE0 SHR
-    if check_opcode(&instrs[0], Opcode::CALLDATALOAD)
-        && check_opcode(&instrs[1], Opcode::PUSH(1))
+    if instrs[0].op == Opcode::CALLDATALOAD
+        && instrs[1].op == Opcode::PUSH(1)
         && instrs[1].imm.as_deref() == Some("e0")
-        && check_opcode(&instrs[2], Opcode::SHR)
+        && instrs[2].op == Opcode::SHR
     {
         return true;
     }
 
     // Standard pattern: [PUSH1 0x00 | PUSH0] CALLDATALOAD PUSH1 0xE0 SHR
     if instrs.len() >= 4 {
-        let first_valid = (check_opcode(&instrs[0], Opcode::PUSH(1))
+        let first_valid = (instrs[0].op == Opcode::PUSH(1)
             && instrs[0].imm.as_deref() == Some("00"))
-            || check_opcode(&instrs[0], Opcode::PUSH0);
+            || instrs[0].op == Opcode::PUSH0;
 
         if first_valid
-            && check_opcode(&instrs[1], Opcode::CALLDATALOAD)
-            && check_opcode(&instrs[2], Opcode::PUSH(1))
+            && instrs[1].op == Opcode::CALLDATALOAD
+            && instrs[2].op == Opcode::PUSH(1)
             && instrs[2].imm.as_deref() == Some("e0")
-            && check_opcode(&instrs[3], Opcode::SHR)
+            && instrs[3].op == Opcode::SHR
         {
             return true;
         }
@@ -394,14 +378,9 @@ fn get_pattern_length(instrs: &[Instruction]) -> Option<usize> {
         return None;
     }
 
-    // Helper to check opcode safely
-    let check_opcode = |instr: &Instruction, expected: Opcode| -> bool {
-        Opcode::from_str(&instr.opcode).ok() == Some(expected)
-    };
-
     // Newer pattern: 3 instructions (CALLDATALOAD PUSH1 0xE0 SHR)
-    if check_opcode(&instrs[0], Opcode::CALLDATALOAD)
-        && check_opcode(&instrs[1], Opcode::PUSH(1))
+    if instrs[0].op == Opcode::CALLDATALOAD
+        && instrs[1].op == Opcode::PUSH(1)
         && instrs[1].imm.as_deref() == Some("e0")
     {
         return Some(3);
@@ -409,11 +388,11 @@ fn get_pattern_length(instrs: &[Instruction]) -> Option<usize> {
 
     // Standard pattern: 4 instructions ([PUSH1 0x00 | PUSH0] CALLDATALOAD ...)
     if instrs.len() >= 4 {
-        let first_valid = (check_opcode(&instrs[0], Opcode::PUSH(1))
+        let first_valid = (instrs[0].op == Opcode::PUSH(1)
             && instrs[0].imm.as_deref() == Some("00"))
-            || check_opcode(&instrs[0], Opcode::PUSH0);
+            || instrs[0].op == Opcode::PUSH0;
 
-        if first_valid && check_opcode(&instrs[1], Opcode::CALLDATALOAD) {
+        if first_valid && instrs[1].op == Opcode::CALLDATALOAD {
             return Some(4);
         }
     }

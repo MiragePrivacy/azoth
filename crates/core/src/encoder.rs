@@ -11,36 +11,29 @@ use crate::decoder::Instruction;
 use crate::strip::CleanReport;
 use azoth_utils::errors::EncodeError;
 use hex;
-use std::str::FromStr;
 
 /// Encodes a sequence of EVM instructions into bytecode.
 ///
 /// # Arguments
 /// * `instructions` - A slice of `Instruction` structs, each containing an opcode and optional
 ///   immediate data.
-/// * `original_bytecode` - Optional original bytecode to extract unknown bytes from using PC.
+/// * `bytecode` - Reference bytecode to extract unknown opcode bytes from using PC.
 ///
 /// # Returns
 /// A `Result` containing the encoded bytecode as a `Vec<u8>` or an `EncodeError` if encoding fails.
 ///
 /// # Examples
 /// ```rust,ignore
+/// use azoth_core::Opcode;
 /// let ins = Instruction {
 ///     pc: 0,
-///     opcode: "PUSH1".to_string(),
+///     op: Opcode::PUSH(1),
 ///     imm: Some("aa".to_string()),
 /// };
-/// let bytes = encode(&[ins]).unwrap();
+/// let bytes = encode(&[ins], &[0x60, 0xaa]).unwrap();
 /// assert_eq!(bytes, vec![0x60, 0xaa]);
 /// ```
-pub fn encode(instructions: &[Instruction]) -> Result<Vec<u8>, EncodeError> {
-    encode_with_original(instructions, None)
-}
-
-pub fn encode_with_original(
-    instructions: &[Instruction],
-    original_bytecode: Option<&[u8]>,
-) -> Result<Vec<u8>, EncodeError> {
+pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, EncodeError> {
     let mut bytes = Vec::with_capacity(instructions.len() * 3);
     let mut unknown_count = 0;
 
@@ -48,91 +41,56 @@ pub fn encode_with_original(
         tracing::debug!(
             "Encoding instruction: pc={}, opcode='{}', imm={:?}",
             ins.pc,
-            ins.opcode,
+            ins.op,
             ins.imm
         );
 
-        // Handle unknown opcodes by preserving them as raw bytes from the original bytecode
-        if ins.opcode == "unknown" || ins.opcode.starts_with("UNKNOWN_") {
+        // Handle INVALID opcodes by attempting to preserve the original byte.
+        //
+        // Note: INVALID here is often a placeholder from the decoder, not the actual 0xFE opcode.
+        // When heimdall outputs "unknown" without a hex byte, the decoder uses INVALID as a marker.
+        // We recover the actual byte value from the original bytecode using PC, or skip if unavailable.
+        if matches!(ins.op, Opcode::INVALID) {
             unknown_count += 1;
+            tracing::warn!("Encoding INVALID opcode at pc={}", ins.pc);
 
-            // For "unknown", try to get the byte from original bytecode using PC
-            if ins.opcode == "unknown" {
-                tracing::warn!("Preserving unknown opcode at pc={}", ins.pc);
+            // First try immediate data (might contain the original byte value)
+            if let Some(imm) = &ins.imm
+                && let Ok(byte_val) = u8::from_str_radix(imm, 16)
+            {
+                bytes.push(byte_val);
+                tracing::debug!(
+                    "Preserved INVALID opcode from immediate as byte 0x{:02x}",
+                    byte_val
+                );
+                continue;
+            }
 
-                // First try immediate data
-                if let Some(imm) = &ins.imm
-                    && let Ok(byte_val) = u8::from_str_radix(imm, 16)
-                {
-                    bytes.push(byte_val);
-                    tracing::debug!(
-                        "Preserved unknown opcode from immediate as byte 0x{:02x}",
-                        byte_val
-                    );
-                    continue;
-                }
-
-                // Then try original bytecode lookup
-                if let Some(original) = original_bytecode
-                    && ins.pc < original.len()
-                {
-                    let byte_val = original[ins.pc];
-                    bytes.push(byte_val);
-                    tracing::debug!(
-                        "Preserved unknown opcode from original bytecode as byte 0x{:02x} at pc={}",
-                        byte_val,
-                        ins.pc
-                    );
-                    continue;
-                }
-
-                // Last resort: skip with warning (controversial but prevents total failure)
-                tracing::error!(
-                    "Cannot determine byte value for unknown opcode at pc={}, skipping (this may break functionality)",
+            // Then try bytecode lookup
+            if ins.pc < bytecode.len() {
+                let byte_val = bytecode[ins.pc];
+                bytes.push(byte_val);
+                tracing::debug!(
+                    "Preserved INVALID opcode from bytecode as byte 0x{:02x} at pc={}",
+                    byte_val,
                     ins.pc
                 );
-                continue; // Skip this instruction instead of failing
+                continue;
             }
 
-            // For "UNKNOWN_0x??" format, extract the hex value
-            if let Some(hex_part) = ins.opcode.strip_prefix("UNKNOWN_0x") {
-                if let Ok(byte_val) = u8::from_str_radix(hex_part, 16) {
-                    bytes.push(byte_val);
-                    tracing::debug!(
-                        "Preserved unknown opcode {} as byte 0x{:02x}",
-                        ins.opcode,
-                        byte_val
-                    );
-                    continue;
-                } else {
-                    return Err(EncodeError::UnsupportedOpcode(format!(
-                        "Invalid unknown opcode format: {}",
-                        ins.opcode
-                    )));
-                }
-            }
-
-            // If we reach here, it's an unhandled unknown format
-            return Err(EncodeError::UnsupportedOpcode(format!(
-                "Unhandled unknown opcode format: {}",
-                ins.opcode
-            )));
+            // Last resort: SKIP the instruction (cannot determine byte value)
+            tracing::error!(
+                "Cannot determine byte value for INVALID opcode at pc={}, skipping (this may break functionality)",
+                ins.pc
+            );
+            continue; // Skip this instruction instead of encoding 0xFE
         }
 
-        // Parse opcode from string using EOT's unified interface
-        let opcode = Opcode::from_str(&ins.opcode).map_err(|e| {
-            tracing::error!(
-                "Failed to parse opcode '{}' at pc={}: {:?}",
-                ins.opcode,
-                ins.pc,
-                e
-            );
-            EncodeError::UnsupportedOpcode(format!("opcode '{}' at pc={}", ins.opcode, ins.pc))
-        })?;
+        let opcode = ins.op;
 
         tracing::debug!(
-            "Successfully parsed opcode '{}' -> byte 0x{:02x}",
-            ins.opcode,
+            "Encoding opcode '{}' -> byte 0x{:02x}",
+            opcode,
             opcode.to_byte()
         );
         bytes.push(opcode.to_byte());
@@ -144,7 +102,7 @@ pub fn encode_with_original(
                     tracing::error!(
                         "Failed to decode immediate '{}' for {} at pc={}: {:?}",
                         imm,
-                        ins.opcode,
+                        opcode,
                         ins.pc,
                         e
                     );
@@ -152,7 +110,7 @@ pub fn encode_with_original(
                 if imm_bytes.len() != n as usize {
                     tracing::error!(
                         "Invalid immediate length for {}: expected {} bytes, got {} bytes",
-                        ins.opcode,
+                        opcode,
                         n,
                         imm_bytes.len()
                     );
@@ -165,13 +123,9 @@ pub fn encode_with_original(
                     )));
                 }
                 bytes.extend_from_slice(&imm_bytes);
-                tracing::debug!(
-                    "Added {} immediate bytes for {}",
-                    imm_bytes.len(),
-                    ins.opcode
-                );
+                tracing::debug!("Added {} immediate bytes for {}", imm_bytes.len(), opcode);
             } else {
-                tracing::error!("Missing immediate for {} at pc={}", ins.opcode, ins.pc);
+                tracing::error!("Missing immediate for {} at pc={}", opcode, ins.pc);
                 return Err(EncodeError::InvalidImmediate(format!(
                     "PUSH{} missing immediate at pc={}",
                     n, ins.pc

@@ -79,13 +79,3 @@ fn test_split_jump_target() {
     assert!(part1 < target, "First part should be less than target");
     assert!(part1 > 0, "First part should be greater than 0");
 }
-
-#[test]
-fn test_push_opcode_sizing() {
-    let config = PassConfig::default();
-    let transformer = JumpAddressTransformer::new(config);
-
-    assert_eq!(transformer.get_push_opcode_for_value(0x42), "PUSH1");
-    assert_eq!(transformer.get_push_opcode_for_value(0x1234), "PUSH2");
-    assert_eq!(transformer.get_push_opcode_for_value(0x123456), "PUSH3");
-}

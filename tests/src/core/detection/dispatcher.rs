@@ -50,18 +50,17 @@ async fn test_dispatcher_detection() {
     tracing::debug!("Runtime instructions count: {}", runtime_instructions.len());
     tracing::debug!("First 20 runtime instructions:");
     for (i, instr) in runtime_instructions.iter().take(20).enumerate() {
-        tracing::debug!("  {}: PC={} {} {:?}", i, instr.pc, instr.opcode, instr.imm);
+        tracing::debug!("  {}: PC={} {} {:?}", i, instr.pc, instr.op, instr.imm);
     }
 
-    // Let's also look for the dispatcher pattern manually in the runtime
     tracing::debug!("Looking for dispatcher pattern in runtime instructions...");
     for (i, window) in runtime_instructions.windows(4).enumerate() {
-        if window[0].opcode == "PUSH1"
+        if window[0].op == azoth_core::Opcode::PUSH(1)
             && window[0].imm.as_deref() == Some("00")
-            && window[1].opcode == "CALLDATALOAD"
-            && window[2].opcode == "PUSH1"
+            && window[1].op == azoth_core::Opcode::CALLDATALOAD
+            && window[2].op == azoth_core::Opcode::PUSH(1)
             && window[2].imm.as_deref() == Some("e0")
-            && window[3].opcode == "SHR"
+            && window[3].op == azoth_core::Opcode::SHR
         {
             tracing::debug!(
                 "Found dispatcher extraction pattern at runtime instruction {}",
@@ -71,7 +70,6 @@ async fn test_dispatcher_detection() {
         }
     }
 
-    // Let's also check what's at the REAL start of runtime based on bytecode analysis
     tracing::debug!(
         "Checking for dispatcher in actual runtime bytecode starting from PC {}",
         runtime_start_pc
@@ -120,18 +118,18 @@ async fn test_dispatcher_detection() {
     tracing::debug!("Runtime instructions count: {}", runtime_instructions.len());
     tracing::debug!("First 20 runtime instructions:");
     for (i, instr) in runtime_instructions.iter().take(20).enumerate() {
-        tracing::debug!("  {}: PC={} {} {:?}", i, instr.pc, instr.opcode, instr.imm);
+        tracing::debug!("  {}: PC={} {} {:?}", i, instr.pc, instr.op, instr.imm);
     }
 
     // Let's also look for the dispatcher pattern manually
     tracing::debug!("Looking for dispatcher pattern in runtime instructions...");
     for (i, window) in runtime_instructions.windows(4).enumerate() {
-        if window[0].opcode == "PUSH1"
+        if window[0].op == azoth_core::Opcode::PUSH(1)
             && window[0].imm.as_deref() == Some("00")
-            && window[1].opcode == "CALLDATALOAD"
-            && window[2].opcode == "PUSH1"
+            && window[1].op == azoth_core::Opcode::CALLDATALOAD
+            && window[2].op == azoth_core::Opcode::PUSH(1)
             && window[2].imm.as_deref() == Some("e0")
-            && window[3].opcode == "SHR"
+            && window[3].op == azoth_core::Opcode::SHR
         {
             tracing::debug!(
                 "Found dispatcher extraction pattern at runtime instruction {}",
@@ -255,7 +253,7 @@ async fn test_dispatcher_detection() {
             // Debug: Let's examine the first few runtime instructions to see what we're missing
             tracing::error!("Debug: First 20 runtime instructions:");
             for (i, instr) in runtime_instructions.iter().take(20).enumerate() {
-                tracing::error!("  {}: PC={} {} {:?}", i, instr.pc, instr.opcode, instr.imm);
+                tracing::error!("  {}: PC={} {} {:?}", i, instr.pc, instr.op, instr.imm);
             }
 
             panic!("Failed to detect function dispatcher in runtime instructions");

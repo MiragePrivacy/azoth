@@ -15,7 +15,6 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 
 /// Represents a node in the Control Flow Graph (CFG).
 ///
@@ -184,7 +183,7 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, CfgIrError> 
     // Collect all JUMPDEST locations from bytecode
     let jumpdest_pcs: HashSet<usize> = instructions
         .iter()
-        .filter(|i| matches!(Opcode::from_str(&i.opcode), Ok(Opcode::JUMPDEST)))
+        .filter(|i| matches!(i.op, Opcode::JUMPDEST))
         .map(|i| i.pc)
         .collect();
 
@@ -195,16 +194,7 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, CfgIrError> 
     );
 
     for instr in instructions {
-        let opcode = match Opcode::from_str(&instr.opcode) {
-            Ok(op) => op,
-            Err(_) => {
-                // Unknown opcode, add to current block and continue
-                if let Block::Body { instructions, .. } = &mut cur_block {
-                    instructions.push(instr.clone());
-                }
-                continue;
-            }
-        };
+        let opcode = instr.op;
 
         // always start new block at JUMPDEST, even if current is empty
         if matches!(opcode, Opcode::JUMPDEST) {
@@ -241,7 +231,7 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, CfgIrError> 
 
         // terminate both JUMP and JUMPI end blocks
         let is_branch = matches!(opcode, Opcode::JUMP | Opcode::JUMPI);
-        let is_terminal = is_terminal_opcode(&instr.opcode);
+        let is_terminal = is_terminal_opcode(opcode);
 
         if is_branch || is_terminal {
             let finished = std::mem::replace(
@@ -256,7 +246,7 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, CfgIrError> 
             if let Block::Body { start_pc, .. } = &finished {
                 tracing::debug!(
                     "Sealed block ending with {} at pc={:#x} (block start={:#x})",
-                    instr.opcode,
+                    instr.op,
                     instr.pc,
                     start_pc
                 );
@@ -400,9 +390,9 @@ fn build_edges(
 
             let last_instr = &instructions[instructions.len() - 1];
 
-            let last_opcode = Opcode::from_str(&last_instr.opcode).ok();
+            let last_opcode = last_instr.op;
             match last_opcode {
-                Some(Opcode::JUMP) => {
+                Opcode::JUMP => {
                     // C) Extract target from [PUSHx imm][JUMP] pattern
                     if let Some(target_pc) = extract_jump_target_from_block(instructions) {
                         if let Some(&target_idx) = node_map.get(&target_pc) {
@@ -425,7 +415,7 @@ fn build_edges(
                     // No fallthrough for unconditional jump
                     continue;
                 }
-                Some(Opcode::JUMPI) => {
+                Opcode::JUMPI => {
                     // C) Extract target from [PUSHx imm][JUMPI] pattern
                     if let Some(target_pc) = extract_jump_target_from_block(instructions)
                         && let Some(&target_idx) = node_map.get(&target_pc)
@@ -454,7 +444,7 @@ fn build_edges(
                         );
                     }
                 }
-                _ if is_terminal_opcode(&last_instr.opcode) => {
+                _ if is_terminal_opcode(last_opcode) => {
                     let exit_idx = NodeIndex::new(cfg.node_count() - 1);
                     edges.push((start_idx, exit_idx, EdgeType::Fallthrough));
                 }
@@ -489,14 +479,14 @@ fn extract_jump_target_from_block(instructions: &[Instruction]) -> Option<usize>
     let last_idx = instructions.len() - 1;
     let jump_instr = &instructions[last_idx];
 
-    let jump_opcode = Opcode::from_str(&jump_instr.opcode).ok()?;
+    let jump_opcode = jump_instr.op;
     if !matches!(jump_opcode, Opcode::JUMP | Opcode::JUMPI) {
         return None;
     }
 
     // Look for preceding PUSH
     let push_instr = &instructions[last_idx - 1];
-    let push_opcode = Opcode::from_str(&push_instr.opcode).ok()?;
+    let push_opcode = push_instr.op;
     if matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0)
         && let Some(imm) = &push_instr.imm
     {
@@ -535,18 +525,17 @@ fn assign_ssa_values(
 
         if let Block::Body { instructions, .. } = block {
             for instr in instructions {
-                tracing::debug!("Processing opcode {} at pc={}", instr.opcode, instr.pc);
-                if let Ok(opcode) = Opcode::from_str(&instr.opcode) {
-                    if matches!(opcode, Opcode::PUSH(_) | Opcode::PUSH0 | Opcode::DUP(_)) {
-                        cur_depth += 1;
-                    } else if matches!(opcode, Opcode::POP) && stack.pop().is_some() {
-                        cur_depth = cur_depth.saturating_sub(1);
-                    }
-                    if matches!(opcode, Opcode::PUSH(_) | Opcode::PUSH0) {
-                        stack.push(ValueId(value_id));
-                        ssa_map.insert(instr.pc, ValueId(value_id));
-                        value_id += 1;
-                    }
+                tracing::debug!("Processing opcode {} at pc={}", instr.op, instr.pc);
+                let opcode = instr.op;
+                if matches!(opcode, Opcode::PUSH(_) | Opcode::PUSH0 | Opcode::DUP(_)) {
+                    cur_depth += 1;
+                } else if matches!(opcode, Opcode::POP) && stack.pop().is_some() {
+                    cur_depth = cur_depth.saturating_sub(1);
+                }
+                if matches!(opcode, Opcode::PUSH(_) | Opcode::PUSH0) {
+                    stack.push(ValueId(value_id));
+                    ssa_map.insert(instr.pc, ValueId(value_id));
+                    value_id += 1;
                 }
                 max_stack = max_stack.max(cur_depth);
             }
@@ -679,9 +668,9 @@ impl CfgIrBundle {
             let last_instr = instructions.last();
 
             if let Some(last_instr) = last_instr {
-                let last_opcode = Opcode::from_str(&last_instr.opcode).ok();
+                let last_opcode = last_instr.op;
                 match last_opcode {
-                    Some(Opcode::JUMP) => {
+                    Opcode::JUMP => {
                         // Unconditional jump - find target and create Jump edge
                         if let Some(target_pc) = self.extract_jump_target(instructions) {
                             if let Some(&target_idx) = self.pc_to_block.get(&target_pc) {
@@ -700,7 +689,7 @@ impl CfgIrBundle {
                             }
                         }
                     }
-                    Some(Opcode::JUMPI) => {
+                    Opcode::JUMPI => {
                         // Conditional jump - create both true and false branches
                         if let Some(target_pc) = self.extract_jump_target(instructions)
                             && let Some(&target_idx) = self.pc_to_block.get(&target_pc)
@@ -736,7 +725,7 @@ impl CfgIrBundle {
                         }
                     }
                     // Use centralized helper for terminal opcodes
-                    _ if is_terminal_opcode(&last_instr.opcode) => {
+                    _ if is_terminal_opcode(last_opcode) => {
                         // Terminal instructions - connect to Exit node
                         let exit_idx = self.find_exit_node();
                         self.cfg.add_edge(node_idx, exit_idx, EdgeType::Fallthrough);
@@ -800,10 +789,10 @@ impl CfgIrBundle {
             if let Block::Body { instructions, .. } = &mut self.cfg[node_idx] {
                 for i in 0..instructions.len().saturating_sub(1) {
                     // Look for PUSH followed by JUMP/JUMPI
-                    let push_opcode = Opcode::from_str(&instructions[i].opcode).ok();
-                    let next_opcode = Opcode::from_str(&instructions[i + 1].opcode).ok();
-                    if matches!(push_opcode, Some(Opcode::PUSH(_) | Opcode::PUSH0))
-                        && matches!(next_opcode, Some(Opcode::JUMP | Opcode::JUMPI))
+                    let push_opcode = instructions[i].op;
+                    let next_opcode = instructions[i + 1].op;
+                    if matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0)
+                        && matches!(next_opcode, Opcode::JUMP | Opcode::JUMPI)
                         && let Some(imm) = &instructions[i].imm
                         && let Ok(old_target) = usize::from_str_radix(imm, 16)
                     {
@@ -839,7 +828,7 @@ impl CfgIrBundle {
                             };
                             let push_size = bytes_needed.clamp(1, 32);
 
-                            instructions[i].opcode = format!("PUSH{push_size}");
+                            instructions[i].op = Opcode::PUSH(push_size as u8);
                             instructions[i].imm =
                                 Some(format!("{:0width$x}", new_target, width = push_size * 2));
 
@@ -866,12 +855,12 @@ impl CfgIrBundle {
         let last_idx = instructions.len() - 1;
         let jump_instr = &instructions[last_idx];
 
-        let jump_opcode = Opcode::from_str(&jump_instr.opcode).ok()?;
+        let jump_opcode = jump_instr.op;
         if matches!(jump_opcode, Opcode::JUMP | Opcode::JUMPI) {
             // Look for preceding PUSH instruction
             if last_idx > 0 {
                 let push_instr = &instructions[last_idx - 1];
-                let push_opcode = Opcode::from_str(&push_instr.opcode).ok()?;
+                let push_opcode = push_instr.op;
                 if matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0)
                     && let Some(imm) = &push_instr.imm
                 {
@@ -938,10 +927,10 @@ impl CfgIrBundle {
             if let Block::Body { instructions, .. } = &mut self.cfg[node_idx] {
                 for i in 0..instructions.len().saturating_sub(1) {
                     // Look for PUSH followed by JUMP/JUMPI
-                    let push_opcode = Opcode::from_str(&instructions[i].opcode).ok();
-                    let next_opcode = Opcode::from_str(&instructions[i + 1].opcode).ok();
-                    if matches!(push_opcode, Some(Opcode::PUSH(_) | Opcode::PUSH0))
-                        && matches!(next_opcode, Some(Opcode::JUMP | Opcode::JUMPI))
+                    let push_opcode = instructions[i].op;
+                    let next_opcode = instructions[i + 1].op;
+                    if matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0)
+                        && matches!(next_opcode, Opcode::JUMP | Opcode::JUMPI)
                         && let Some(imm) = &instructions[i].imm
                         && let Ok(old_target) = usize::from_str_radix(imm, 16)
                     {
@@ -957,7 +946,7 @@ impl CfgIrBundle {
                             };
                             let push_size = bytes_needed.clamp(1, 32);
 
-                            instructions[i].opcode = format!("PUSH{push_size}");
+                            instructions[i].op = Opcode::PUSH(push_size as u8);
                             instructions[i].imm =
                                 Some(format!("{:0width$x}", new_target, width = push_size * 2));
 

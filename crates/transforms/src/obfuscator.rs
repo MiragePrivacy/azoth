@@ -1,6 +1,6 @@
 use crate::function_dispatcher::FunctionDispatcher;
 use crate::{PassConfig, Transform};
-use azoth_core::{cfg_ir, decoder, detection, encoder, process_bytecode_to_cfg};
+use azoth_core::{cfg_ir, decoder, detection, encoder, process_bytecode_to_cfg, Opcode};
 use azoth_utils::seed::Seed;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -279,12 +279,8 @@ pub async fn obfuscate_bytecode(
         all_instructions.len()
     );
 
-    // Step 6: Encode back to bytecode
-    let obfuscated_bytes = if config.preserve_unknown_opcodes {
-        encoder::encode_with_original(&all_instructions, Some(&bytes))?
-    } else {
-        encoder::encode(&all_instructions)?
-    };
+    // Step 6: Encode back to bytecode (always with original for unknown opcode preservation)
+    let obfuscated_bytes = encoder::encode(&all_instructions, &bytes)?;
 
     tracing::debug!("  Encoded to {} bytes", obfuscated_bytes.len());
 
@@ -377,9 +373,9 @@ fn analyze_instructions(instructions: &[decoder::Instruction]) -> (usize, usize,
     let mut unknown_types = HashSet::new();
 
     for instr in instructions {
-        if instr.opcode == "unknown" || instr.opcode.starts_with("UNKNOWN_") {
+        if matches!(instr.op, Opcode::INVALID | Opcode::UNKNOWN(_)) {
             unknown_count += 1;
-            unknown_types.insert(instr.opcode.clone());
+            unknown_types.insert(format!("{}", instr.op));
         }
     }
 

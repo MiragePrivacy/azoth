@@ -366,10 +366,10 @@ impl FunctionDispatcher {
                 let mut i = 0;
                 while i < instructions.len().saturating_sub(1) {
                     // Look for PUSH4 <selector> followed by CALL variants
-                    if instructions[i].opcode == "PUSH4"
+                    if instructions[i].op == Opcode::PUSH(4)
                         && matches!(
-                            instructions[i + 1].opcode.as_str(),
-                            "CALL" | "DELEGATECALL" | "STATICCALL"
+                            instructions[i + 1].op,
+                            Opcode::CALL | Opcode::DELEGATECALL | Opcode::STATICCALL
                         )
                     {
                         if let Some(imm) = &instructions[i].imm {
@@ -422,7 +422,7 @@ impl FunctionDispatcher {
     ) -> Result<Instruction, TransformError> {
         Ok(Instruction {
             pc: 0, // Will be set during PC reindexing
-            opcode: opcode.to_string(),
+            op: opcode,
             imm,
         })
     }
@@ -450,20 +450,10 @@ impl FunctionDispatcher {
     fn estimate_bytecode_size(&self, instructions: &[Instruction]) -> usize {
         instructions
             .iter()
-            .map(|instr| {
-                if instr.opcode.starts_with("PUSH") {
-                    if let Some(Ok(push_size)) = instr
-                        .opcode
-                        .strip_prefix("PUSH")
-                        .map(|s| s.parse::<usize>())
-                    {
-                        1 + push_size
-                    } else {
-                        1
-                    }
-                } else {
-                    1
-                }
+            .map(|instr| match instr.op {
+                Opcode::PUSH(n) => 1 + n as usize,
+                Opcode::PUSH0 => 1,
+                _ => 1,
             })
             .sum()
     }
@@ -564,7 +554,7 @@ impl Transform for FunctionDispatcher {
             // Step 1: Collect all JUMPDEST PCs from runtime instructions
             let jumpdests: HashSet<u32> = all_instructions
                 .iter()
-                .filter(|ins| ins.opcode == "JUMPDEST")
+                .filter(|ins| ins.op == Opcode::JUMPDEST)
                 .map(|ins| ins.pc as u32)
                 .collect();
 

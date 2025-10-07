@@ -26,7 +26,7 @@ async fn test_token_dispatcher_obfuscation() {
         println!(
             "  [{}] {} {}",
             i,
-            instr.opcode,
+            instr.op,
             instr.imm.as_deref().unwrap_or("")
         );
     }
@@ -91,7 +91,7 @@ async fn test_token_dispatcher_obfuscation() {
         println!(
             "  [{}] {} {}",
             i,
-            instr.opcode,
+            instr.op,
             instr.imm.as_deref().unwrap_or("")
         );
     }

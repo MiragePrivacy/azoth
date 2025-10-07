@@ -32,8 +32,8 @@ impl JumpAddressTransformer {
                 (instructions.get(i), instructions.get(i + 1))
             {
                 // Look for PUSH followed by JUMP or JUMPI
-                if push_instr.opcode.starts_with("PUSH")
-                    && (jump_instr.opcode == "JUMP" || jump_instr.opcode == "JUMPI")
+                if matches!(push_instr.op, Opcode::PUSH(_) | Opcode::PUSH0)
+                    && matches!(jump_instr.op, Opcode::JUMP | Opcode::JUMPI)
                 {
                     patterns.push(i);
                 }
@@ -56,17 +56,6 @@ impl JumpAddressTransformer {
         let part2 = target - split_point;
 
         (part1, part2)
-    }
-
-    /// Determines the appropriate PUSH opcode size for a value
-    pub fn get_push_opcode_for_value(&self, value: u64) -> String {
-        let bytes_needed = if value == 0 {
-            1
-        } else {
-            (64 - value.leading_zeros()).div_ceil(8) as usize
-        };
-
-        format!("PUSH{}", bytes_needed.max(1))
     }
 
     /// Formats a value as hex string with appropriate padding
@@ -194,35 +183,33 @@ impl Transform for JumpAddressTransformer {
                             if let Ok(target) = u64::from_str_radix(target_hex, 16) {
                                 let (part1, part2) = self.split_jump_target(target, rng);
 
-                                // Determine opcode sizes
-                                let part1_opcode = self.get_push_opcode_for_value(part1);
-                                let part2_opcode = self.get_push_opcode_for_value(part2);
-
                                 // Calculate byte sizes for formatting
-                                let part1_bytes = part1_opcode
-                                    .strip_prefix("PUSH")
-                                    .and_then(|s| s.parse::<usize>().ok())
-                                    .unwrap_or(1);
-                                let part2_bytes = part2_opcode
-                                    .strip_prefix("PUSH")
-                                    .and_then(|s| s.parse::<usize>().ok())
-                                    .unwrap_or(1);
+                                let part1_bytes = if part1 == 0 {
+                                    1
+                                } else {
+                                    (64 - part1.leading_zeros()).div_ceil(8) as usize
+                                };
+                                let part2_bytes = if part2 == 0 {
+                                    1
+                                } else {
+                                    (64 - part2.leading_zeros()).div_ceil(8) as usize
+                                };
 
                                 // Create new instruction sequence
                                 let new_instructions = vec![
                                     Instruction {
                                         pc: push_instr.pc,
-                                        opcode: part1_opcode,
+                                        op: Opcode::PUSH(part1_bytes as u8),
                                         imm: Some(self.format_hex_value(part1, part1_bytes)),
                                     },
                                     Instruction {
                                         pc: push_instr.pc + part1_bytes + 1,
-                                        opcode: part2_opcode,
+                                        op: Opcode::PUSH(part2_bytes as u8),
                                         imm: Some(self.format_hex_value(part2, part2_bytes)),
                                     },
                                     Instruction {
                                         pc: push_instr.pc + part1_bytes + part2_bytes + 2,
-                                        opcode: Opcode::ADD.to_string(),
+                                        op: Opcode::ADD,
                                         imm: None,
                                     },
                                 ];

@@ -27,16 +27,7 @@ impl OpaquePredicate {
     }
 
     fn is_non_terminal(&self, instr: &Instruction) -> bool {
-        !Opcode::is_control_flow(&match instr.opcode.as_str() {
-            "STOP" => Opcode::STOP,
-            "RETURN" => Opcode::RETURN,
-            "REVERT" => Opcode::REVERT,
-            "SELFDESTRUCT" => Opcode::SELFDESTRUCT,
-            "INVALID" => Opcode::INVALID,
-            "JUMP" => Opcode::JUMP,
-            "JUMPI" => Opcode::JUMPI,
-            _ => Opcode::UNKNOWN(0),
-        })
+        !Opcode::is_control_flow(&instr.op)
     }
 }
 
@@ -111,7 +102,7 @@ impl Transform for OpaquePredicate {
                 start_pc: true_start_pc,
                 instructions: vec![Instruction {
                     pc: true_start_pc,
-                    opcode: Opcode::JUMPDEST.to_string(),
+                    op: Opcode::JUMPDEST,
                     imm: None,
                 }],
                 max_stack: 0,
@@ -122,17 +113,17 @@ impl Transform for OpaquePredicate {
                 instructions: vec![
                     Instruction {
                         pc: false_start_pc,
-                        opcode: Opcode::JUMPDEST.to_string(),
+                        op: Opcode::JUMPDEST,
                         imm: None,
                     },
                     Instruction {
                         pc: false_start_pc + 1,
-                        opcode: Opcode::PUSH(1).to_string(),
+                        op: Opcode::PUSH(1),
                         imm: Some("00".to_string()),
                     },
                     Instruction {
                         pc: false_start_pc + 2,
-                        opcode: Opcode::JUMP.to_string(),
+                        op: Opcode::JUMP,
                         imm: Some(
                             original_fallthrough
                                 .map(|n| {
@@ -166,37 +157,37 @@ impl Transform for OpaquePredicate {
                 instructions.extend(vec![
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::PUSH(32).to_string(),
+                        op: Opcode::PUSH(32),
                         imm: Some(constant_hex.clone()),
                     },
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::PUSH(32).to_string(),
+                        op: Opcode::PUSH(32),
                         imm: Some(constant_hex),
                     },
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::EQ.to_string(),
+                        op: Opcode::EQ,
                         imm: None,
                     },
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::PUSH(2).to_string(),
+                        op: Opcode::PUSH(2),
                         imm: Some(format!("{true_start_pc:x}")),
                     },
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::JUMPI.to_string(),
+                        op: Opcode::JUMPI,
                         imm: None,
                     },
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::JUMPDEST.to_string(),
+                        op: Opcode::JUMPDEST,
                         imm: None,
                     },
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::JUMP.to_string(),
+                        op: Opcode::JUMP,
                         imm: Some(format!("{false_start_pc:x}")),
                     },
                 ]);

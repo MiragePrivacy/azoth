@@ -11,7 +11,6 @@ use azoth_core::{cfg_ir, decoder, detection, strip, Opcode};
 use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::str::FromStr;
 use tracing;
 
 /// Stack value for symbolic execution
@@ -382,35 +381,20 @@ impl SemanticAnalyzer {
                     entry_points.insert(selector, *start_pc);
                 }
 
-                // Convert string opcodes to Opcode enum
-                let opcodes: Result<Vec<Opcode>, _> = instructions
-                    .iter()
-                    .map(|i| {
-                        Opcode::from_str(&i.opcode).map_err(|_| {
-                            VerificationError::BytecodeAnalysis(format!(
-                                "Invalid opcode: {} at pc={}",
-                                i.opcode, i.pc
-                            ))
-                        })
-                    })
-                    .collect();
-
-                let opcodes = opcodes?;
+                // Extract opcodes from instructions
+                let opcodes: Vec<Opcode> = instructions.iter().map(|i| i.op).collect();
 
                 // Determine block type using enum comparison
                 let block_type = if instructions.is_empty() {
                     BlockType::Normal
                 } else {
-                    match Opcode::from_str(&instructions.last().unwrap().opcode) {
-                        Ok(Opcode::RETURN) => BlockType::Return,
-                        Ok(Opcode::REVERT) => BlockType::Error,
-                        Ok(Opcode::JUMP) => BlockType::Jump,
-                        Ok(Opcode::JUMPI) => BlockType::Branch,
+                    match instructions.last().unwrap().op {
+                        Opcode::RETURN => BlockType::Return,
+                        Opcode::REVERT => BlockType::Error,
+                        Opcode::JUMP => BlockType::Jump,
+                        Opcode::JUMPI => BlockType::Branch,
                         _ => {
-                            if let Ok(Opcode::JUMPDEST) = instructions
-                                .first()
-                                .map(|i| Opcode::from_str(&i.opcode))
-                                .unwrap_or(Err(Opcode::INVALID.to_string()))
+                            if matches!(instructions.first().map(|i| i.op), Some(Opcode::JUMPDEST))
                             {
                                 BlockType::Entry
                             } else {
@@ -579,8 +563,8 @@ impl SemanticAnalyzer {
                 for instruction in instructions {
                     self.update_stack(&mut stack, instruction);
 
-                    match instruction.opcode.as_str() {
-                        "SLOAD" => {
+                    match instruction.op {
+                        Opcode::SLOAD => {
                             if let Some(slot) = stack.last().cloned() {
                                 self.storage_accesses.push(StorageAccess {
                                     pc: instruction.pc,
@@ -591,7 +575,7 @@ impl SemanticAnalyzer {
                                 });
                             }
                         }
-                        "SSTORE" => {
+                        Opcode::SSTORE => {
                             if stack.len() >= 2 {
                                 let slot = stack[stack.len() - 1].clone();
                                 let value = stack[stack.len() - 2].clone();
@@ -740,8 +724,8 @@ impl SemanticAnalyzer {
     }
 
     fn update_stack(&self, stack: &mut Vec<StackValue>, instruction: &Instruction) {
-        match instruction.opcode.as_str() {
-            opcode if opcode.starts_with("PUSH") => {
+        match instruction.op {
+            Opcode::PUSH(_) | Opcode::PUSH0 => {
                 if let Some(imm) = &instruction.imm {
                     if let Ok(value) = u64::from_str_radix(imm, 16) {
                         stack.push(StackValue::Concrete(value));
@@ -750,7 +734,7 @@ impl SemanticAnalyzer {
                     }
                 }
             }
-            "CALLDATALOAD" => {
+            Opcode::CALLDATALOAD => {
                 if !stack.is_empty() {
                     let offset = stack.pop().unwrap();
                     stack.push(StackValue::Symbolic(format!(
@@ -759,7 +743,7 @@ impl SemanticAnalyzer {
                     )));
                 }
             }
-            "ADD" => {
+            Opcode::ADD => {
                 if stack.len() >= 2 {
                     let b = stack.pop().unwrap();
                     let a = stack.pop().unwrap();
@@ -769,7 +753,7 @@ impl SemanticAnalyzer {
                     });
                 }
             }
-            "POP" => {
+            Opcode::POP => {
                 stack.pop();
             }
             _ => {}
@@ -807,17 +791,15 @@ impl SemanticAnalyzer {
                 self.cfg_bundle.cfg.node_weight(node_idx)
             {
                 for instruction in instructions {
-                    if let Ok(opcode) = Opcode::from_str(&instruction.opcode) {
-                        match opcode {
-                            Opcode::DELEGATECALL => {
-                                is_proxy = true;
-                                is_upgradeable = true;
-                            }
-                            Opcode::CALLER => {
-                                access_control = AccessControlType::Owner;
-                            }
-                            _ => {}
+                    match instruction.op {
+                        Opcode::DELEGATECALL => {
+                            is_proxy = true;
+                            is_upgradeable = true;
                         }
+                        Opcode::CALLER => {
+                            access_control = AccessControlType::Owner;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -846,7 +828,7 @@ impl SemanticAnalyzer {
                 self.cfg_bundle.cfg.node_weight(node_idx)
             {
                 for instruction in instructions {
-                    if let Ok(Opcode::SSTORE) = Opcode::from_str(&instruction.opcode) {
+                    if instruction.op == Opcode::SSTORE {
                         modifications.push(StateModification {
                             storage_slot: 0, // TODO: Requires proper stack analysis
                             modification_type: ModificationType::Assignment,
@@ -872,28 +854,27 @@ impl SemanticAnalyzer {
                 self.cfg_bundle.cfg.node_weight(node_idx)
             {
                 for instruction in instructions {
-                    // Parse opcode to enum for gas calculation
-                    if let Ok(opcode) = Opcode::from_str(&instruction.opcode) {
-                        base_cost += self.get_instruction_gas_cost(&opcode);
+                    // Calculate gas cost for each opcode
+                    let opcode = instruction.op;
+                    base_cost += self.get_instruction_gas_cost(&opcode);
 
-                        match opcode {
-                            Opcode::SSTORE => {
-                                variable_costs.push(VariableGasCost {
-                                    factor: GasCostFactor::StorageOperations,
-                                    cost_per_unit: 20000,
-                                });
-                            }
-                            Opcode::CALL
-                            | Opcode::CALLCODE
-                            | Opcode::DELEGATECALL
-                            | Opcode::STATICCALL => {
-                                variable_costs.push(VariableGasCost {
-                                    factor: GasCostFactor::ExternalCalls,
-                                    cost_per_unit: 2300,
-                                });
-                            }
-                            _ => {}
+                    match opcode {
+                        Opcode::SSTORE => {
+                            variable_costs.push(VariableGasCost {
+                                factor: GasCostFactor::StorageOperations,
+                                cost_per_unit: 20000,
+                            });
                         }
+                        Opcode::CALL
+                        | Opcode::CALLCODE
+                        | Opcode::DELEGATECALL
+                        | Opcode::STATICCALL => {
+                            variable_costs.push(VariableGasCost {
+                                factor: GasCostFactor::ExternalCalls,
+                                cost_per_unit: 2300,
+                            });
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -919,12 +900,10 @@ impl SemanticAnalyzer {
                     self.cfg_bundle.cfg.node_weight(node_idx)
                 {
                     for instruction in instructions {
-                        if let Ok(opcode) = Opcode::from_str(&instruction.opcode) {
-                            match opcode {
-                                Opcode::SSTORE => has_state_change = true,
-                                Opcode::CALLVALUE => is_payable = true,
-                                _ => {}
-                            }
+                        match instruction.op {
+                            Opcode::SSTORE => has_state_change = true,
+                            Opcode::CALLVALUE => is_payable = true,
+                            _ => {}
                         }
                     }
                 }
@@ -1069,7 +1048,7 @@ impl SemanticAnalyzer {
         instructions: &[Instruction],
     ) -> Option<[u8; 4]> {
         for instruction in instructions {
-            if let Ok(Opcode::PUSH(4)) = Opcode::from_str(&instruction.opcode) {
+            if instruction.op == Opcode::PUSH(4) {
                 if let Some(imm) = &instruction.imm {
                     if let Ok(bytes) = hex::decode(imm) {
                         if bytes.len() == 4 {
@@ -1150,10 +1129,8 @@ impl SemanticAnalyzer {
                 self.cfg_bundle.cfg.node_weight(node_idx)
             {
                 for inst in instructions {
-                    if let Ok(Opcode::PUSH(4)) = Opcode::from_str(&inst.opcode) {
-                        if inst.imm.as_ref() == Some(&selector_hex) {
-                            return true;
-                        }
+                    if inst.op == Opcode::PUSH(4) && inst.imm.as_ref() == Some(&selector_hex) {
+                        return true;
                     }
                 }
             }
@@ -1167,9 +1144,9 @@ impl SemanticAnalyzer {
                 self.cfg_bundle.cfg.node_weight(node_idx)
             {
                 if instructions.windows(10).any(|window| {
-                    window.iter().any(|inst| inst.opcode == "CALLDATALOAD")
-                        && window.iter().any(|inst| inst.opcode == "KECCAK256")
-                        && window.iter().any(|inst| inst.opcode == "SLOAD")
+                    window.iter().any(|inst| inst.op == Opcode::CALLDATALOAD)
+                        && window.iter().any(|inst| inst.op == Opcode::KECCAK256)
+                        && window.iter().any(|inst| inst.op == Opcode::SLOAD)
                 }) {
                     return true;
                 }
@@ -1184,10 +1161,10 @@ impl SemanticAnalyzer {
                 self.cfg_bundle.cfg.node_weight(node_idx)
             {
                 if instructions.windows(5).any(|window| {
-                    window.iter().any(|inst| inst.opcode == "CALLER")
+                    window.iter().any(|inst| inst.op == Opcode::CALLER)
                         && window
                             .iter()
-                            .any(|inst| matches!(inst.opcode.as_str(), "SLOAD" | "SSTORE"))
+                            .any(|inst| matches!(inst.op, Opcode::SLOAD | Opcode::SSTORE))
                 }) {
                     return true;
                 }
@@ -1203,9 +1180,9 @@ impl SemanticAnalyzer {
             {
                 if instructions.windows(3).any(|window| {
                     window.len() == 3
-                        && window[0].opcode == "SLOAD"
-                        && window[1].opcode == "ISZERO"
-                        && window[2].opcode == "JUMPI"
+                        && window[0].op == Opcode::SLOAD
+                        && window[1].op == Opcode::ISZERO
+                        && window[2].op == Opcode::JUMPI
                 }) {
                     return true;
                 }
@@ -1248,7 +1225,7 @@ pub mod tests {
 
         let instructions = vec![Instruction {
             pc: 0,
-            opcode: "PUSH4".to_string(),
+            op: Opcode::PUSH(4),
             imm: Some("12345678".to_string()),
         }];
 
@@ -1266,7 +1243,7 @@ pub mod tests {
         // Create a block with the transfer function selector
         let instructions = vec![Instruction {
             pc: 0,
-            opcode: "PUSH4".to_string(),
+            op: Opcode::PUSH(4),
             imm: Some("a9059cbb".to_string()), // transfer selector
         }];
 
@@ -1312,7 +1289,7 @@ pub mod tests {
         // Test function selector extraction from instructions directly
         let instructions = vec![Instruction {
             pc: 0,
-            opcode: "PUSH4".to_string(),
+            op: Opcode::PUSH(4),
             imm: Some("a9059cbb".to_string()),
         }];
 

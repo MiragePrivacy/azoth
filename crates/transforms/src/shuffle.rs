@@ -57,7 +57,7 @@ impl Transform for Shuffle {
         }
 
         for instr in &mut new_instrs {
-            if instr.opcode == "JUMP" || instr.opcode == "JUMPI" {
+            if matches!(instr.op, Opcode::JUMP | Opcode::JUMPI) {
                 if let Some(imm) = &instr.imm {
                     if let Ok(old_target) = usize::from_str_radix(imm, 16) {
                         if let Some(new_target) = pc_map.get(&old_target) {
@@ -77,8 +77,10 @@ impl Transform for Shuffle {
 
 impl Shuffle {
     fn instruction_size(&self, instr: &Instruction) -> usize {
-        let (_opcode, imm_size) =
-            crate::parse_push_opcode(instr.opcode.as_str()).unwrap_or((Opcode::UNKNOWN(0), 0));
-        1 + imm_size
+        match instr.op {
+            Opcode::PUSH(n) => 1 + n as usize,
+            Opcode::PUSH0 => 1,
+            _ => 1,
+        }
     }
 }
