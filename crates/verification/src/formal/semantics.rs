@@ -925,8 +925,9 @@ impl SemanticAnalyzer {
                 PatternType::ERC20Token => {
                     invariants
                         .push("(= (sum-all-balances state) (total-supply state))".to_string());
-                    invariants
-                        .push("(forall ((address Address)) (>= (balance address state) 0))".to_string());
+                    invariants.push(
+                        "(forall ((address Address)) (>= (balance address state) 0))".to_string(),
+                    );
                 }
                 PatternType::Ownable => {
                     invariants.push(

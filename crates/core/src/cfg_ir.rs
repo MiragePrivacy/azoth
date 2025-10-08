@@ -7,12 +7,12 @@
 //! bytecode structure, ensuring accurate block splitting and edge construction based on
 //! control flow opcodes.
 
+use crate::Opcode;
 use crate::decoder::Instruction;
 use crate::detection::Section;
-use crate::strip::CleanReport;
 use crate::is_terminal_opcode;
-use crate::Opcode;
 use crate::result::Error;
+use crate::strip::CleanReport;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
@@ -519,7 +519,11 @@ fn assign_ssa_values(
 
         if let Block::Body { instructions, .. } = block {
             for instruction in instructions {
-                tracing::debug!("Processing opcode {} at pc={}", instruction.op, instruction.pc);
+                tracing::debug!(
+                    "Processing opcode {} at pc={}",
+                    instruction.op,
+                    instruction.pc
+                );
                 let opcode = instruction.op;
                 if matches!(opcode, Opcode::PUSH(_) | Opcode::PUSH0 | Opcode::DUP(_)) {
                     cur_depth += 1;

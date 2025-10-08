@@ -146,7 +146,8 @@ pub async fn obfuscate_bytecode(
         let runtime_instructions: Vec<_> = instructions
             .iter()
             .filter(|instruction| {
-                instruction.pc >= runtime_sec.offset && instruction.pc < runtime_sec.offset + runtime_sec.len
+                instruction.pc >= runtime_sec.offset
+                    && instruction.pc < runtime_sec.offset + runtime_sec.len
             })
             .cloned()
             .collect();

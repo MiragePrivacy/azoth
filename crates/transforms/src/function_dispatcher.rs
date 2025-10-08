@@ -631,7 +631,9 @@ impl Transform for FunctionDispatcher {
             if !failed.is_empty() {
                 let failures_summary: Vec<_> = failed
                     .iter()
-                    .map(|(selector, t, abs)| format!("0x{:08x}->0x{:x} (abs: 0x{:x})", selector, t, abs))
+                    .map(|(selector, t, abs)| {
+                        format!("0x{:08x}->0x{:x} (abs: 0x{:x})", selector, t, abs)
+                    })
                     .collect();
                 return Err(Error::Generic(format!(
                     "dispatcher: base {:#x} doesn't achieve full coverage. Failed targets: [{}]",

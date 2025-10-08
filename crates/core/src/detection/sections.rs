@@ -271,7 +271,9 @@ fn detect_deployment_fallback(
 /// Simple CODECOPY + RETURN detection
 fn detect_codecopy_return_simple(instructions: &[Instruction]) -> Option<(usize, usize)> {
     // Find first CODECOPY
-    let codecopy_idx = instructions.iter().position(|instruction| instruction.op == Opcode::CODECOPY)?;
+    let codecopy_idx = instructions
+        .iter()
+        .position(|instruction| instruction.op == Opcode::CODECOPY)?;
 
     // Find RETURN after CODECOPY (within reasonable distance)
     let return_idx = instructions[codecopy_idx..]
@@ -286,8 +288,10 @@ fn detect_codecopy_return_simple(instructions: &[Instruction]) -> Option<(usize,
     let mut runtime_start = init_end; // fallback
 
     for instruction in (0..codecopy_idx).rev().take(10) {
-        if matches!(instructions[instruction].op, Opcode::PUSH(_) | Opcode::PUSH0)
-            && let Some(immediate) = &instructions[instruction].imm
+        if matches!(
+            instructions[instruction].op,
+            Opcode::PUSH(_) | Opcode::PUSH0
+        ) && let Some(immediate) = &instructions[instruction].imm
             && let Ok(value) = usize::from_str_radix(immediate, 16)
             && value > init_end
             && value < 100000
@@ -483,8 +487,10 @@ fn detect_codecopy_return_pattern(instructions: &[Instruction]) -> Option<(usize
 
     // Look backwards from CODECOPY for PUSH instructions
     for instruction in (0..codecopy_idx).rev().take(10) {
-        if matches!(instructions[instruction].op, Opcode::PUSH(_) | Opcode::PUSH0)
-            && let Some(immediate) = &instructions[instruction].imm
+        if matches!(
+            instructions[instruction].op,
+            Opcode::PUSH(_) | Opcode::PUSH0
+        ) && let Some(immediate) = &instructions[instruction].imm
             && let Ok(value) = usize::from_str_radix(immediate, 16)
         {
             if runtime_len.is_none() && value > 0 && value < 100000 {
