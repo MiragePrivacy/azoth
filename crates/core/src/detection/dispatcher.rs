@@ -62,7 +62,7 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
     let mut selectors = Vec::new();
     let mut stack: Vec<StackValue> = Vec::with_capacity(32); // EVM stack max depth
     let mut current_selector: Option<(u32, usize)> = None;
-    let mut prev_opcode: Option<Opcode> = None;
+    let mut previous_opcode: Option<Opcode> = None;
 
     tracing::debug!(
         "Starting stack tracking from instruction {}",
@@ -76,14 +76,14 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
 
         match opcode {
             Opcode::PUSH(_) | Opcode::PUSH0 => {
-                if let Some(imm) = &instr.imm
-                    && let Ok(value) = u64::from_str_radix(imm, 16)
+                if let Some(immediate) = &instr.imm
+                    && let Ok(value) = u64::from_str_radix(immediate, 16)
                 {
                     stack.push(StackValue::Const {
                         addr: value as usize,
                         def_pc: instr.pc,
                     });
-                    prev_opcode = Some(opcode);
+                    previous_opcode = Some(opcode);
                     continue;
                 }
                 stack.push(StackValue::Unknown);
@@ -98,17 +98,17 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
 
             Opcode::EQ => {
                 // Check if preceded by PUSH4 (selector)
-                if let Some(Opcode::PUSH(4)) = prev_opcode
+                if let Some(Opcode::PUSH(4)) = previous_opcode
                     && i > 0
                 {
-                    let prev_instr = &instructions[i - 1];
-                    if let Some(sel_hex) = &prev_instr.imm
-                        && let Ok(sel) = u32::from_str_radix(sel_hex, 16)
+                    let previous_instruction = &instructions[i - 1];
+                    if let Some(immediate) = &previous_instruction.imm
+                        && let Ok(selector) = u32::from_str_radix(immediate, 16)
                     {
-                        current_selector = Some((sel, i - 1));
+                        current_selector = Some((selector, i - 1));
                         tracing::debug!(
                             "Found selector candidate 0x{:08x} at instruction {}",
-                            sel,
+                            selector,
                             i - 1
                         );
                     }
@@ -128,18 +128,18 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
                     let target_val = stack[stack.len() - 1];
                     stack.truncate(stack.len() - 2);
 
-                    if let StackValue::Const { addr, def_pc } = target_val
-                        && let Some((sel, sel_idx)) = current_selector
+                    if let StackValue::Const { addr: address, def_pc } = target_val
+                        && let Some((selector, sel_idx)) = current_selector
                     {
                         selectors.push(FunctionSelector {
-                            selector: sel,
-                            target_address: addr as u64,
+                            selector,
+                            target_address: address as u64,
                             instruction_index: sel_idx,
                         });
                         tracing::debug!(
                             "Paired selector 0x{:08x} -> target 0x{:x} (PUSH at PC 0x{:x})",
-                            sel,
-                            addr,
+                            selector,
+                            address,
                             def_pc
                         );
                         current_selector = None;
@@ -191,7 +191,7 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
         }
 
         // Track previous opcode for next iteration
-        prev_opcode = Some(opcode);
+        previous_opcode = Some(opcode);
     }
 
     if selectors.is_empty() {

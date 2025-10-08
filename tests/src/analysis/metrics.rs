@@ -185,35 +185,35 @@ async fn test_dominator_computation() {
         .await
         .unwrap();
 
-    let (doms, post_doms) = dominator_pairs(&cfg_ir.cfg);
-    let overlap = dom_overlap(&doms, &post_doms);
+    let (dominators, post_dominators) = dominator_pairs(&cfg_ir.cfg);
+    let overlap = dom_overlap(&dominators, &post_dominators);
 
     // Verify dominators
     let entry = NodeIndex::<u32>::new(0);
     let first_body = NodeIndex::<u32>::new(2); // First body block is at index 2
     assert!(
-        doms.contains_key(&first_body),
+        dominators.contains_key(&first_body),
         "First body block should have a dominator"
     );
     assert_eq!(
-        doms.get(&first_body).copied(),
+        dominators.get(&first_body).copied(),
         Some(entry),
-        "First body block’s dominator should be Entry"
+        "First body block's dominator should be Entry"
     );
 
     // Verify post-dominators
     let _exit = NodeIndex::<u32>::new(1); // Exit is at index 1
     let second_body = NodeIndex::<u32>::new(3); // Second body block is at index 3
     assert!(
-        post_doms.contains_key(&first_body),
+        post_dominators.contains_key(&first_body),
         "First body block should have a post-dominator"
     );
     assert!(
-        !post_doms.contains_key(&second_body),
+        !post_dominators.contains_key(&second_body),
         "Second body block should have no post-dominator due to potential loop"
     );
     assert_eq!(
-        post_doms.get(&first_body).copied(),
+        post_dominators.get(&first_body).copied(),
         Some(second_body),
         "In this graph every path from first body block goes through second body block, not Exit"
     );

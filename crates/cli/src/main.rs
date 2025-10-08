@@ -1,8 +1,3 @@
-/// Entry point for the Bytecloak CLI, an EVM bytecode obfuscation tool.
-///
-/// This module parses command-line arguments and dispatches to subcommands for decoding,
-/// stripping, CFG visualization, or obfuscating EVM bytecode. It initializes logging and
-/// handles the main execution flow.
 use azoth_cli::commands::{Cmd, Command};
 use clap::Parser;
 

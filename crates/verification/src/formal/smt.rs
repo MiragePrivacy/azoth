@@ -399,7 +399,7 @@ impl SmtSolver {
                     ));
                     // Add bounds for balance values
                     formula.assertions.push(format!(
-                        "(assert (forall ((s Storage) (addr Address)) (>= (mapping-{slot} s addr) 0)))",
+                        "(assert (forall ((s Storage) (address Address)) (>= (mapping-{slot} s address) 0)))",
                     ));
                 }
                 _ => {

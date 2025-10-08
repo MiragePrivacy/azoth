@@ -136,7 +136,7 @@ impl Transform for JumpAddressTransformer {
                 // Find or create entry for this node
                 if let Some((_, patterns)) = limited_transformations
                     .iter_mut()
-                    .find(|(idx, _)| *idx == node_idx)
+                    .find(|(index, _)| *index == node_idx)
                 {
                     patterns.push(pattern_idx);
                 } else {

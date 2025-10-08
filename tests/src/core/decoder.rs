@@ -11,8 +11,8 @@ async fn test_hex_roundtrip() {
     let (ins, info, asm, _) = decode_bytecode(BYTECODE, false).await.unwrap();
     tracing::debug!("\nRaw assembly:\n{}", asm);
     tracing::debug!("Parsed instructions:");
-    for instr in &ins {
-        tracing::debug!("{}", instr);
+    for instruction in &ins {
+        tracing::debug!("{}", instruction);
     }
     assert_eq!(ins.len(), 5);
 

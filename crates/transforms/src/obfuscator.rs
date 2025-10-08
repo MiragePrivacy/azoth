@@ -145,8 +145,8 @@ pub async fn obfuscate_bytecode(
         // Filter instructions to only those in runtime section
         let runtime_instructions: Vec<_> = instructions
             .iter()
-            .filter(|instr| {
-                instr.pc >= runtime_sec.offset && instr.pc < runtime_sec.offset + runtime_sec.len
+            .filter(|instruction| {
+                instruction.pc >= runtime_sec.offset && instruction.pc < runtime_sec.offset + runtime_sec.len
             })
             .cloned()
             .collect();
@@ -372,10 +372,10 @@ fn analyze_instructions(instructions: &[decoder::Instruction]) -> (usize, usize,
     let mut unknown_count = 0;
     let mut unknown_types = HashSet::new();
 
-    for instr in instructions {
-        if matches!(instr.op, Opcode::INVALID | Opcode::UNKNOWN(_)) {
+    for instruction in instructions {
+        if matches!(instruction.op, Opcode::INVALID | Opcode::UNKNOWN(_)) {
             unknown_count += 1;
-            unknown_types.insert(format!("{}", instr.op));
+            unknown_types.insert(format!("{}", instruction.op));
         }
     }
 

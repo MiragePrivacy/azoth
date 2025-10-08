@@ -1,4 +1,4 @@
-//! azoth's single entry-point for turning byte-sequences into Heimdall instruction streams.
+//! Azoth's single entry-point for turning byte-sequences into Heimdall instruction streams.
 
 use crate::Opcode;
 use crate::result::Error;
@@ -109,7 +109,7 @@ pub fn parse_assembly(asm: &str) -> Result<Vec<Instruction>, Error> {
             msg: "missing opcode".to_string(),
             raw: raw.to_string(),
         })?;
-        let imm = parts
+        let immediate = parts
             .next()
             .map(|s| s.trim_start_matches("0x").to_ascii_lowercase());
 
@@ -164,7 +164,7 @@ pub fn parse_assembly(asm: &str) -> Result<Vec<Instruction>, Error> {
         instructions.push(Instruction {
             pc,
             op: parsed_opcode,
-            imm,
+            imm: immediate,
         });
     }
     Ok(instructions)
@@ -173,8 +173,8 @@ pub fn parse_assembly(asm: &str) -> Result<Vec<Instruction>, Error> {
 impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // pc: six-digit hex, opcode left-padded to 8 chars, then optional imm
-        if let Some(imm) = &self.imm {
-            write!(f, "{:06x}  {:<8} {}", self.pc, self.op, imm)
+        if let Some(immediate) = &self.imm {
+            write!(f, "{:06x}  {:<8} {}", self.pc, self.op, immediate)
         } else {
             write!(f, "{:06x}  {}", self.pc, self.op)
         }

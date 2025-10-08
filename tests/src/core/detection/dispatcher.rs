@@ -37,7 +37,7 @@ async fn test_dispatcher_detection() {
     let runtime_start_pc = runtime_section.offset;
     let runtime_instr_start = instructions
         .iter()
-        .position(|instr| instr.pc >= runtime_start_pc)
+        .position(|instruction| instruction.pc >= runtime_start_pc)
         .expect("Should find runtime start instruction");
 
     let runtime_instructions = &instructions[runtime_instr_start..];
@@ -49,8 +49,8 @@ async fn test_dispatcher_detection() {
     );
     tracing::debug!("Runtime instructions count: {}", runtime_instructions.len());
     tracing::debug!("First 20 runtime instructions:");
-    for (i, instr) in runtime_instructions.iter().take(20).enumerate() {
-        tracing::debug!("  {}: PC={} {} {:?}", i, instr.pc, instr.op, instr.imm);
+    for (i, instruction) in runtime_instructions.iter().take(20).enumerate() {
+        tracing::debug!("  {}: PC={} {} {:?}", i, instruction.pc, instruction.op, instruction.imm);
     }
 
     tracing::debug!("Looking for dispatcher pattern in runtime instructions...");
@@ -80,7 +80,7 @@ async fn test_dispatcher_detection() {
         let dispatcher_pc = 228;
         if let Some(dispatcher_instr_start) = instructions
             .iter()
-            .position(|instr| instr.pc >= dispatcher_pc)
+            .position(|instruction| instruction.pc >= dispatcher_pc)
         {
             let dispatcher_instructions =
                 &instructions[dispatcher_instr_start..runtime_instr_start.min(instructions.len())];
@@ -117,8 +117,8 @@ async fn test_dispatcher_detection() {
 
     tracing::debug!("Runtime instructions count: {}", runtime_instructions.len());
     tracing::debug!("First 20 runtime instructions:");
-    for (i, instr) in runtime_instructions.iter().take(20).enumerate() {
-        tracing::debug!("  {}: PC={} {} {:?}", i, instr.pc, instr.op, instr.imm);
+    for (i, instruction) in runtime_instructions.iter().take(20).enumerate() {
+        tracing::debug!("  {}: PC={} {} {:?}", i, instruction.pc, instruction.op, instruction.imm);
     }
 
     // Let's also look for the dispatcher pattern manually
@@ -239,21 +239,13 @@ async fn test_dispatcher_detection() {
                     expected_selectors.len()
                 );
             }
-
-            // The 0x3ccfd60b selector might be in a different part of the bytecode
-            if !detected_selectors.contains(&0x3ccfd60b) {
-                tracing::info!(
-                    "Note: Missing 0x3ccfd60b - this might be in a different dispatcher section"
-                );
-            }
         }
         None => {
             tracing::error!("❌ Failed to detect function dispatcher in runtime instructions");
 
-            // Debug: Let's examine the first few runtime instructions to see what we're missing
             tracing::error!("Debug: First 20 runtime instructions:");
-            for (i, instr) in runtime_instructions.iter().take(20).enumerate() {
-                tracing::error!("  {}: PC={} {} {:?}", i, instr.pc, instr.op, instr.imm);
+            for (i, instruction) in runtime_instructions.iter().take(20).enumerate() {
+                tracing::error!("  {}: PC={} {} {:?}", i, instruction.pc, instruction.op, instruction.imm);
             }
 
             panic!("Failed to detect function dispatcher in runtime instructions");

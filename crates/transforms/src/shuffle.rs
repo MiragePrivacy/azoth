@@ -41,27 +41,27 @@ impl Transform for Shuffle {
         }
 
         let mut new_instrs = Vec::new();
-        let mut pc_map = HashMap::new();
+        let mut program_counter_mapping = HashMap::new();
         let mut current_pc = 0;
 
         for (_, block) in blocks {
             if let Block::Body { instructions, .. } = block {
-                for instr in instructions {
-                    pc_map.insert(instr.pc, current_pc);
-                    let mut new_instr = instr.clone();
-                    new_instr.pc = current_pc;
-                    new_instrs.push(new_instr);
-                    current_pc += self.instruction_size(instr);
+                for instruction in instructions {
+                    program_counter_mapping.insert(instruction.pc, current_pc);
+                    let mut new_instruction = instruction.clone();
+                    new_instruction.pc = current_pc;
+                    new_instrs.push(new_instruction);
+                    current_pc += self.instruction_size(instruction);
                 }
             }
         }
 
-        for instr in &mut new_instrs {
-            if matches!(instr.op, Opcode::JUMP | Opcode::JUMPI) {
-                if let Some(imm) = &instr.imm {
-                    if let Ok(old_target) = usize::from_str_radix(imm, 16) {
-                        if let Some(new_target) = pc_map.get(&old_target) {
-                            instr.imm = Some(format!("{new_target:x}"));
+        for instruction in &mut new_instrs {
+            if matches!(instruction.op, Opcode::JUMP | Opcode::JUMPI) {
+                if let Some(immediate) = &instruction.imm {
+                    if let Ok(old_target) = usize::from_str_radix(immediate, 16) {
+                        if let Some(new_target) = program_counter_mapping.get(&old_target) {
+                            instruction.imm = Some(format!("{new_target:x}"));
                         } else {
                             return Err(Error::InvalidJumpTarget(old_target));
                         }

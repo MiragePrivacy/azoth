@@ -127,23 +127,23 @@ impl FunctionDispatcher {
         match disguise_method {
             0 => {
                 // SUB disguise: val - val = 0
-                let val = rng.random_range(1..=255);
+                let value = rng.random_range(1..=255);
                 instructions.extend(vec![
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val:02x}")))?,
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val:02x}")))?,
+                    self.create_instruction(Opcode::PUSH(1), Some(format!("{value:02x}")))?,
+                    self.create_instruction(Opcode::PUSH(1), Some(format!("{value:02x}")))?,
                     self.create_instruction(Opcode::SUB, None)?,
                 ]);
-                debug!("Using SUB disguise with value 0x{:02x}", val);
+                debug!("Using SUB disguise with value 0x{:02x}", value);
             }
             1 => {
                 // XOR disguise: val ^ val = 0
-                let val = rng.random_range(1..=255);
+                let value = rng.random_range(1..=255);
                 instructions.extend(vec![
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val:02x}")))?,
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val:02x}")))?,
+                    self.create_instruction(Opcode::PUSH(1), Some(format!("{value:02x}")))?,
+                    self.create_instruction(Opcode::PUSH(1), Some(format!("{value:02x}")))?,
                     self.create_instruction(Opcode::XOR, None)?,
                 ]);
-                debug!("Using XOR disguise with value 0x{:02x}", val);
+                debug!("Using XOR disguise with value 0x{:02x}", value);
             }
             2 => {
                 // Memory disguise: store 0, then load it
@@ -159,10 +159,10 @@ impl FunctionDispatcher {
             }
             4 => {
                 // Modulo disguise: val % (val + 1) where val < val + 1 = val, then val - val = 0
-                let val = rng.random_range(1..=200);
-                let divisor = val + 1;
+                let value = rng.random_range(1..=200);
+                let divisor = value + 1;
                 instructions.extend(vec![
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val:02x}")))?,
+                    self.create_instruction(Opcode::PUSH(1), Some(format!("{value:02x}")))?,
                     self.create_instruction(Opcode::DUP(1), None)?, // duplicate val
                     self.create_instruction(Opcode::PUSH(1), Some(format!("{divisor:02x}")))?,
                     self.create_instruction(Opcode::MOD, None)?, // val % (val + 1) = val
@@ -170,25 +170,25 @@ impl FunctionDispatcher {
                 ]);
                 debug!(
                     "Using modulo disguise with value 0x{:02x} % 0x{:02x}",
-                    val, divisor
+                    value, divisor
                 );
             }
             _ => {
                 // Multi-layer disguise: ((a * b) / b) - a = 0
-                let val1 = rng.random_range(2..=50); // Avoid 0 and 1 for multiplication/division
-                let val2 = rng.random_range(2..=50);
+                let value1 = rng.random_range(2..=50); // Avoid 0 and 1 for multiplication/division
+                let value2 = rng.random_range(2..=50);
                 instructions.extend(vec![
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val1:02x}")))?,
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val2:02x}")))?,
+                    self.create_instruction(Opcode::PUSH(1), Some(format!("{value1:02x}")))?,
+                    self.create_instruction(Opcode::PUSH(1), Some(format!("{value2:02x}")))?,
                     self.create_instruction(Opcode::MUL, None)?, // a * b
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val2:02x}")))?,
+                    self.create_instruction(Opcode::PUSH(1), Some(format!("{value2:02x}")))?,
                     self.create_instruction(Opcode::DIV, None)?, // (a * b) / b = a
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val1:02x}")))?,
+                    self.create_instruction(Opcode::PUSH(1), Some(format!("{value1:02x}")))?,
                     self.create_instruction(Opcode::SUB, None)?, // a - a = 0
                 ]);
                 debug!(
                     "Using multi-layer disguise with values 0x{:02x}, 0x{:02x}",
-                    val1, val2
+                    value1, value2
                 );
             }
         }
@@ -372,8 +372,8 @@ impl FunctionDispatcher {
                             Opcode::CALL | Opcode::DELEGATECALL | Opcode::STATICCALL
                         )
                     {
-                        if let Some(imm) = &instructions[i].imm {
-                            if let Ok(selector) = u32::from_str_radix(imm, 16) {
+                        if let Some(immediate) = &instructions[i].imm {
+                            if let Ok(selector) = u32::from_str_radix(immediate, 16) {
                                 if let Some(token) = mapping.get(&selector) {
                                     // Replace PUSH4 <selector> with PUSH(n) <token>
                                     let token_size = token.len().clamp(1, 32);
@@ -446,7 +446,7 @@ impl FunctionDispatcher {
     fn estimate_bytecode_size(&self, instructions: &[Instruction]) -> usize {
         instructions
             .iter()
-            .map(|instr| match instr.op {
+            .map(|instruction| match instruction.op {
                 Opcode::PUSH(n) => 1 + n as usize,
                 Opcode::PUSH0 => 1,
                 _ => 1,
@@ -631,7 +631,7 @@ impl Transform for FunctionDispatcher {
             if !failed.is_empty() {
                 let failures_summary: Vec<_> = failed
                     .iter()
-                    .map(|(sel, t, abs)| format!("0x{:08x}->0x{:x} (abs: 0x{:x})", sel, t, abs))
+                    .map(|(selector, t, abs)| format!("0x{:08x}->0x{:x} (abs: 0x{:x})", selector, t, abs))
                     .collect();
                 return Err(Error::Generic(format!(
                     "dispatcher: base {:#x} doesn't achieve full coverage. Failed targets: [{}]",
@@ -764,8 +764,8 @@ impl Transform for FunctionDispatcher {
             if let Block::Body { instructions, .. } = &mut ir.cfg[first_block_idx] {
                 let insertion_point = start.saturating_sub(first_block_start);
 
-                for (i, new_instr) in new_instructions.into_iter().enumerate() {
-                    instructions.insert(insertion_point + i, new_instr);
+                for (i, new_instruction) in new_instructions.into_iter().enumerate() {
+                    instructions.insert(insertion_point + i, new_instruction);
                 }
             }
 

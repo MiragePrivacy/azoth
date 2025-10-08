@@ -22,12 +22,12 @@ async fn test_token_dispatcher_obfuscation() {
     let (instructions, _, _, _) = decoder::decode_bytecode(bytecode, false).await.unwrap();
 
     println!("\nOriginal dispatcher structure:");
-    for (i, instr) in instructions.iter().enumerate() {
+    for (i, instruction) in instructions.iter().enumerate() {
         println!(
             "  [{}] {} {}",
             i,
-            instr.op,
-            instr.imm.as_deref().unwrap_or("")
+            instruction.op,
+            instruction.imm.as_deref().unwrap_or("")
         );
     }
 
@@ -87,20 +87,20 @@ async fn test_token_dispatcher_obfuscation() {
             .unwrap();
 
     println!("\nObfuscated dispatcher structure:");
-    for (i, instr) in obfuscated_instructions.iter().enumerate() {
+    for (i, instruction) in obfuscated_instructions.iter().enumerate() {
         println!(
             "  [{}] {} {}",
             i,
-            instr.op,
-            instr.imm.as_deref().unwrap_or("")
+            instruction.op,
+            instruction.imm.as_deref().unwrap_or("")
         );
     }
 
     // Verify original selectors are completely removed
-    let original_selector_found = obfuscated_instructions.iter().any(|instr| {
-        if let Some(imm) = &instr.imm {
+    let original_selector_found = obfuscated_instructions.iter().any(|instruction| {
+        if let Some(immediate) = &instruction.imm {
             original_selectors.iter().any(|&selector| {
-                format!("{:08x}", selector) == *imm || format!("{:x}", selector) == *imm
+                format!("{:08x}", selector) == *immediate || format!("{:x}", selector) == *immediate
             })
         } else {
             false

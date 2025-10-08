@@ -26,8 +26,8 @@ impl OpaquePredicate {
         hasher.finalize().into()
     }
 
-    fn is_non_terminal(&self, instr: &Instruction) -> bool {
-        !Opcode::is_control_flow(&instr.op)
+    fn is_non_terminal(&self, instruction: &Instruction) -> bool {
+        !Opcode::is_control_flow(&instruction.op)
     }
 }
 
@@ -48,7 +48,7 @@ impl Transform for OpaquePredicate {
                 if let Block::Body { instructions, .. } = &ir.cfg[n] {
                     instructions
                         .last()
-                        .is_some_and(|instr| self.is_non_terminal(instr))
+                        .is_some_and(|instruction| self.is_non_terminal(instruction))
                 } else {
                     false
                 }
@@ -71,10 +71,10 @@ impl Transform for OpaquePredicate {
         eligible_blocks.shuffle(rng);
         let selected: Vec<NodeIndex> = eligible_blocks.into_iter().take(predicate_count).collect();
 
-        for (idx, block_id) in selected.iter().enumerate() {
+        for (index, block_id) in selected.iter().enumerate() {
             debug!(
                 "Processing block {}/{} (node_idx={})",
-                idx + 1,
+                index + 1,
                 selected.len(),
                 block_id.index()
             );

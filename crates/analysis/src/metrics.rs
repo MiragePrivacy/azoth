@@ -1,18 +1,4 @@
 use crate::{Error, Result};
-/// Module for computing analytical metrics to evaluate EVM bytecode obfuscation transforms.
-///
-/// Implements a minimal set of metrics quantified by bytecode size, control flow complexity,
-/// stack usage, and dominator overlap to assess transform potency (analyst effort) and gas
-/// efficiency. The module provides functions to collect metrics from a `CfgIrBundle` and
-/// `CleanReport`, compare pre- and post-obfuscation states, and compute
-/// dominator/post-dominator pairs for control flow analysis.
-///
-/// # Usage
-/// ```rust,ignore
-/// let cfg_ir = azoth_core::process_bytecode_to_cfg_only("0x600160015601", false).await.unwrap();
-/// let metrics = metrics::collect_metrics(&cfg_ir, &report).unwrap();
-/// println!("{}", serde_json::to_string_pretty(&metrics).unwrap());
-/// ```
 use azoth_core::cfg_ir::{Block, CfgIrBundle, EdgeType};
 use azoth_core::strip::CleanReport;
 use petgraph::{
@@ -64,8 +50,8 @@ pub fn collect_metrics(ir: &CfgIrBundle, report: &CleanReport) -> Result<Metrics
         return Err(Error::EmptyCfg);
     }
 
-    let (doms, post_doms) = dominator_pairs(&ir.cfg);
-    let overlap = dom_overlap(&doms, &post_doms);
+    let (dominators, post_dominators) = dominator_pairs(&ir.cfg);
+    let overlap = dom_overlap(&dominators, &post_dominators);
 
     let block_cnt = ir
         .cfg
@@ -136,18 +122,18 @@ where
     let entry = NodeIndex::<Ix>::new(0);
     let exit = NodeIndex::<Ix>::new(g.node_count() - 1);
 
-    let doms = simple_fast(g, entry);
+    let dominators_tree = simple_fast(g, entry);
     let mut dom_map = HashMap::new();
     for n in g.node_indices() {
-        if let Some(idom) = doms.immediate_dominator(n) {
+        if let Some(idom) = dominators_tree.immediate_dominator(n) {
             dom_map.insert(n, idom);
         }
     }
 
-    let post = simple_fast(Reversed(g), exit);
+    let post_dominators_tree = simple_fast(Reversed(g), exit);
     let mut pdom_map = HashMap::new();
     for n in g.node_indices() {
-        if let Some(ipdom) = post.immediate_dominator(n) {
+        if let Some(ipdom) = post_dominators_tree.immediate_dominator(n) {
             pdom_map.insert(n, ipdom);
         }
     }
@@ -162,23 +148,23 @@ where
 /// obfuscation potency.
 ///
 /// # Arguments
-/// * `doms` - Map of nodes to their immediate dominators.
-/// * `pdoms` - Map of nodes to their immediate post-dominators.
+/// * `dominators` - Map of nodes to their immediate dominators.
+/// * `post_dominators` - Map of nodes to their immediate post-dominators.
 ///
 /// # Returns
 /// The fraction of nodes where the dominator and post-dominator are the same.
-pub fn dom_overlap<Ix>(doms: &DominatorMap<Ix>, pdoms: &DominatorMap<Ix>) -> f64
+pub fn dom_overlap<Ix>(dominators: &DominatorMap<Ix>, post_dominators: &DominatorMap<Ix>) -> f64
 where
     Ix: IndexType + Hash + Eq,
 {
-    let common = doms
+    let common = dominators
         .iter()
-        .filter(|(n, d)| pdoms.get(*n) == Some(*d))
+        .filter(|(n, d)| post_dominators.get(*n) == Some(*d))
         .count();
-    if doms.is_empty() {
+    if dominators.is_empty() {
         0.0
     } else {
-        common as f64 / doms.len() as f64
+        common as f64 / dominators.len() as f64
     }
 }
 

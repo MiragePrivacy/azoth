@@ -1,3 +1,9 @@
+//! The analysis module implements a minimal set of metrics quantified by bytecode size, control flow complexity,
+//! stack usage, and dominator overlap to assess transform potency (analyst effort) and gas
+//! efficiency. The module provides functions to collect metrics from a `CfgIrBundle` and
+//! `CleanReport`, compare pre- and post-obfuscation states, and compute
+//! dominator/post-dominator pairs for control flow analysis.
+
 pub mod metrics;
 pub use metrics::{Metrics, collect_metrics, compare};
 

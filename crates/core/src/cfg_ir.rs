@@ -1,15 +1,17 @@
-use crate::Opcode;
-/// Module for constructing a Control Flow Graph (CFG) with Intermediate Representation (IR)
-/// in Static Single Assignment (SSA) form for EVM bytecode analysis.
-///
-/// This module builds a CFG from decoded EVM instructions, representing the program's control
-/// flow as a graph of basic blocks connected by edges. It supports SSA form for stack
-/// operations, enabling analysis and obfuscation transforms. The CFG is used to analyze and modify
-/// bytecode structure, ensuring accurate block splitting and edge construction based on
-/// control flow opcodes.
+//! Module for constructing a Control Flow Graph (CFG) with Intermediate Representation (IR)
+//! in Static Single Assignment (SSA) form for EVM bytecode analysis.
+//!
+//! This module builds a CFG from decoded EVM instructions, representing the program's control
+//! flow as a graph of basic blocks connected by edges. It supports SSA form for stack
+//! operations, enabling analysis and obfuscation transforms. The CFG is used to analyze and modify
+//! bytecode structure, ensuring accurate block splitting and edge construction based on
+//! control flow opcodes.
+
 use crate::decoder::Instruction;
 use crate::detection::Section;
+use crate::strip::CleanReport;
 use crate::is_terminal_opcode;
+use crate::Opcode;
 use crate::result::Error;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
@@ -76,9 +78,9 @@ pub struct CfgIrBundle {
     /// Mapping of program counters to block indices.
     pub pc_to_block: HashMap<usize, NodeIndex>,
     /// Report detailing the stripping process for bytecode reassembly.
-    pub clean_report: crate::strip::CleanReport,
+    pub clean_report: CleanReport,
     /// Detected bytecode sections (Init, Runtime, Auxdata, etc.)
-    pub sections: Vec<crate::detection::Section>,
+    pub sections: Vec<Section>,
     /// Mapping of original function selectors to obfuscated tokens.
     /// Only populated when token-based dispatcher transform is applied.
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
@@ -87,8 +89,7 @@ pub struct CfgIrBundle {
 /// Builds a CFG with IR in SSA form from decoded instructions and sections.
 ///
 /// Constructs a control flow graph by splitting instructions into blocks, building edges based on
-/// control flow, and assigning SSA values to track stack operations. The resulting `CfgIrBundle`
-/// is used for further analysis and obfuscation transforms.
+/// control flow, and assigning SSA values to track stack operations.
 ///
 /// # Arguments
 /// * `instructions` - Decoded EVM instructions from `decoder.rs`.
@@ -97,13 +98,6 @@ pub struct CfgIrBundle {
 ///
 /// # Returns
 /// A `Result` containing the `CfgIrBundle` or a `Error` if construction fails.
-///
-/// # Examples
-/// ```rust,ignore
-/// let bytecode = hex::decode("6001600155").unwrap();
-/// let (cfg_ir, _, _, _) = process_bytecode_to_cfg(bytecode, false).await.unwrap();
-/// assert!(cfg_ir.cfg.node_count() >= 2);
-/// ```
 pub fn build_cfg_ir(
     instructions: &[Instruction],
     sections: &[Section],
@@ -114,11 +108,11 @@ pub fn build_cfg_ir(
         instructions.len()
     );
 
-    // Step 1: Block splitter
+    // Split blocks
     let blocks = split_blocks(instructions)?;
     tracing::debug!("Split into {} blocks", blocks.len());
 
-    // Step 2: Edge builder
+    // Build edges
     let mut cfg = DiGraph::new();
     let _entry_idx = cfg.add_node(Block::Entry);
     let _exit_idx = cfg.add_node(Block::Exit);
@@ -126,7 +120,7 @@ pub fn build_cfg_ir(
     cfg.extend_with_edges(edges);
     tracing::debug!("Built CFG with {} nodes", cfg.node_count());
 
-    // Step 3: Stack-SSA walk
+    // Stack-SSA walk
     let report = clean_report;
     assign_ssa_values(&mut cfg, &pc_to_block, instructions)?;
     tracing::debug!("Assigned SSA values and computed stack heights");
@@ -193,8 +187,8 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
         jumpdest_pcs.len()
     );
 
-    for instr in instructions {
-        let opcode = instr.op;
+    for instruction in instructions {
+        let opcode = instruction.op;
 
         // always start new block at JUMPDEST, even if current is empty
         if matches!(opcode, Opcode::JUMPDEST) {
@@ -207,7 +201,7 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
             {
                 tracing::debug!(
                     "Sealing block before JUMPDEST at pc={:#x} (prev block start={:#x})",
-                    instr.pc,
+                    instruction.pc,
                     start_pc
                 );
                 blocks.push(std::mem::take(&mut cur_block));
@@ -215,18 +209,18 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
 
             // Start fresh block AT the JUMPDEST PC
             cur_block = Block::Body {
-                start_pc: instr.pc,
-                instructions: vec![instr.clone()],
+                start_pc: instruction.pc,
+                instructions: vec![instruction.clone()],
                 max_stack: 0,
             };
 
-            tracing::debug!("Started new block at JUMPDEST pc={:#x}", instr.pc);
+            tracing::debug!("Started new block at JUMPDEST pc={:#x}", instruction.pc);
             continue;
         }
 
         // Add instruction to current block
         if let Block::Body { instructions, .. } = &mut cur_block {
-            instructions.push(instr.clone());
+            instructions.push(instruction.clone());
         }
 
         // terminate both JUMP and JUMPI end blocks
@@ -237,7 +231,7 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
             let finished = std::mem::replace(
                 &mut cur_block,
                 Block::Body {
-                    start_pc: instr.pc + 1,
+                    start_pc: instruction.pc + 1,
                     instructions: Vec::new(),
                     max_stack: 0,
                 },
@@ -246,8 +240,8 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
             if let Block::Body { start_pc, .. } = &finished {
                 tracing::debug!(
                     "Sealed block ending with {} at pc={:#x} (block start={:#x})",
-                    instr.op,
-                    instr.pc,
+                    instruction.op,
+                    instruction.pc,
                     start_pc
                 );
             }
@@ -348,13 +342,13 @@ fn build_edges(
             max_stack,
         } = block
         {
-            let idx = cfg.add_node(Block::Body {
+            let index = cfg.add_node(Block::Body {
                 start_pc: *start_pc,
                 instructions: instructions.clone(),
                 max_stack: *max_stack,
             });
-            node_map.insert(*start_pc, idx);
-            pc_to_block.insert(*start_pc, idx);
+            node_map.insert(*start_pc, index);
+            pc_to_block.insert(*start_pc, index);
         }
     }
 
@@ -488,9 +482,9 @@ fn extract_jump_target_from_block(instructions: &[Instruction]) -> Option<usize>
     let push_instr = &instructions[last_idx - 1];
     let push_opcode = push_instr.op;
     if matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0)
-        && let Some(imm) = &push_instr.imm
+        && let Some(immediate) = &push_instr.imm
     {
-        return usize::from_str_radix(imm, 16).ok();
+        return usize::from_str_radix(immediate, 16).ok();
     }
 
     None
@@ -524,9 +518,9 @@ fn assign_ssa_values(
         let mut max_stack = 0;
 
         if let Block::Body { instructions, .. } = block {
-            for instr in instructions {
-                tracing::debug!("Processing opcode {} at pc={}", instr.op, instr.pc);
-                let opcode = instr.op;
+            for instruction in instructions {
+                tracing::debug!("Processing opcode {} at pc={}", instruction.op, instruction.pc);
+                let opcode = instruction.op;
                 if matches!(opcode, Opcode::PUSH(_) | Opcode::PUSH0 | Opcode::DUP(_)) {
                     cur_depth += 1;
                 } else if matches!(opcode, Opcode::POP) && stack.pop().is_some() {
@@ -534,7 +528,7 @@ fn assign_ssa_values(
                 }
                 if matches!(opcode, Opcode::PUSH(_) | Opcode::PUSH0) {
                     stack.push(ValueId(value_id));
-                    ssa_map.insert(instr.pc, ValueId(value_id));
+                    ssa_map.insert(instruction.pc, ValueId(value_id));
                     value_id += 1;
                 }
                 max_stack = max_stack.max(cur_depth);
@@ -588,9 +582,9 @@ impl CfgIrBundle {
         let mut blocks_with_indices: Vec<_> = self
             .cfg
             .node_indices()
-            .filter_map(|idx| {
-                if let Block::Body { start_pc, .. } = &self.cfg[idx] {
-                    Some((idx, *start_pc))
+            .filter_map(|index| {
+                if let Block::Body { start_pc, .. } = &self.cfg[index] {
+                    Some((index, *start_pc))
                 } else {
                     None
                 }
@@ -793,8 +787,8 @@ impl CfgIrBundle {
                     let next_opcode = instructions[i + 1].op;
                     if matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0)
                         && matches!(next_opcode, Opcode::JUMP | Opcode::JUMPI)
-                        && let Some(imm) = &instructions[i].imm
-                        && let Ok(old_target) = usize::from_str_radix(imm, 16)
+                        && let Some(immediate) = &instructions[i].imm
+                        && let Ok(old_target) = usize::from_str_radix(immediate, 16)
                     {
                         // Calculate new target using local logic to avoid borrowing self
                         let new_target = if let Some(mapping) = pc_mapping {
@@ -862,9 +856,9 @@ impl CfgIrBundle {
                 let push_instr = &instructions[last_idx - 1];
                 let push_opcode = push_instr.op;
                 if matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0)
-                    && let Some(imm) = &push_instr.imm
+                    && let Some(immediate) = &push_instr.imm
                 {
-                    return usize::from_str_radix(imm, 16).ok();
+                    return usize::from_str_radix(immediate, 16).ok();
                 }
             }
         }
@@ -884,7 +878,7 @@ impl CfgIrBundle {
             let end_pc = *start_pc
                 + instructions
                     .iter()
-                    .map(|instr| instr.byte_size())
+                    .map(|instruction| instruction.byte_size())
                     .sum::<usize>();
 
             // Find block that starts at end_pc
@@ -896,9 +890,9 @@ impl CfgIrBundle {
 
     /// Finds the Exit node in the CFG
     fn find_exit_node(&mut self) -> NodeIndex {
-        for idx in self.cfg.node_indices() {
-            if matches!(self.cfg.node_weight(idx), Some(Block::Exit)) {
-                return idx;
+        for index in self.cfg.node_indices() {
+            if matches!(self.cfg.node_weight(index), Some(Block::Exit)) {
+                return index;
             }
         }
         // If no Exit node found, create one (shouldn't happen in well-formed CFG)
@@ -931,8 +925,8 @@ impl CfgIrBundle {
                     let next_opcode = instructions[i + 1].op;
                     if matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0)
                         && matches!(next_opcode, Opcode::JUMP | Opcode::JUMPI)
-                        && let Some(imm) = &instructions[i].imm
-                        && let Ok(old_target) = usize::from_str_radix(imm, 16)
+                        && let Some(immediate) = &instructions[i].imm
+                        && let Ok(old_target) = usize::from_str_radix(immediate, 16)
                     {
                         // Use pre-collected mapping instead of accessing self.cfg
                         if let Some(&new_target) = target_mappings.get(&old_target)

@@ -3,7 +3,6 @@ pub mod jump_address_transformer;
 pub mod obfuscator;
 pub mod opaque_predicate;
 pub mod pass;
-pub mod result;
 pub mod shuffle;
 
 use azoth_core::cfg_ir::CfgIrBundle;

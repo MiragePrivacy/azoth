@@ -1,5 +1,6 @@
 //! Module for stripping EVM bytecode to extract the runtime blob and prepare it for
 //! obfuscation.
+
 use crate::detection::{Section, SectionKind};
 use crate::result::Error;
 use serde::{Deserialize, Serialize};
@@ -36,7 +37,7 @@ pub struct CleanReport {
     /// Keccak-256 hash of the cleaned runtime bytecode.
     pub clean_keccak: [u8; 32],
     /// Mapping of old PCs to new PCs after stripping.
-    pub pc_map: Vec<(usize, usize)>,
+    pub program_counter_mapping: Vec<(usize, usize)>,
 }
 
 /// Strips non-runtime sections from bytecode, returning clean runtime and report.
@@ -59,7 +60,7 @@ pub fn strip_bytecode(bytes: &[u8], sections: &[Section]) -> Result<(Vec<u8>, Cl
         swarm_hash: None,        // Will be populated if found
         clean_len: 0,            // Will be set at the end
         clean_keccak: [0u8; 32], // Will be calculated at the end
-        pc_map: Vec::new(),      // Will be populated if needed
+        program_counter_mapping: Vec::new(), // Will be populated if needed
         bytes_saved: 0,
     };
 

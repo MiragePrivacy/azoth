@@ -1,5 +1,6 @@
 //! Module for encoding EVM instructions into bytecode and reassembling bytecode with
 //! non-runtime sections.
+
 use crate::Opcode;
 use crate::decoder::Instruction;
 use crate::result::Error;
@@ -49,8 +50,8 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
             tracing::warn!("Encoding INVALID opcode at pc={}", ins.pc);
 
             // First try immediate data (might contain the original byte value)
-            if let Some(imm) = &ins.imm
-                && let Ok(byte_val) = u8::from_str_radix(imm, 16)
+            if let Some(immediate) = &ins.imm
+                && let Ok(byte_val) = u8::from_str_radix(immediate, 16)
             {
                 bytes.push(byte_val);
                 tracing::debug!(
@@ -91,11 +92,11 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
 
         // Handle immediate data for PUSH opcodes
         if let Opcode::PUSH(n) = opcode {
-            if let Some(imm) = &ins.imm {
-                let imm_bytes = hex::decode(imm).inspect_err(|&e| {
+            if let Some(immediate) = &ins.imm {
+                let imm_bytes = hex::decode(immediate).inspect_err(|&e| {
                     tracing::error!(
                         "Failed to decode immediate '{}' for {} at pc={}: {:?}",
-                        imm,
+                        immediate,
                         opcode,
                         ins.pc,
                         e

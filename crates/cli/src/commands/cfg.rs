@@ -1,9 +1,7 @@
-/// Module for the `cfg` subcommand, which visualizes the control flow graph (CFG) of EVM
-/// bytecode.
-///
-/// This module processes input bytecode, constructs a CFG using the `cfg_ir` module, and
-/// generates a Graphviz .dot file representing the CFG. The output can be written to a file or
-/// printed to stdout.
+//! This module processes input bytecode, constructs a CFG using the `cfg_ir` module, and
+//! generates a Graphviz .dot file representing the CFG. The output can be written to a file or
+//! printed to stdout.
+
 use async_trait::async_trait;
 use azoth_core::cfg_ir::{build_cfg_ir, Block, CfgIrBundle, EdgeType};
 use azoth_core::decoder::decode_bytecode;

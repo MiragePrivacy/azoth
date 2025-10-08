@@ -1,7 +1,6 @@
-/// Module for the `decode` subcommand, which decodes EVM bytecode to annotated assembly.
-///
-/// This module processes input bytecode and outputs both the raw assembly from the Heimdall
-/// disassembler and a structured list of instructions with program counters and opcodes.
+//! This module processes input bytecode and outputs both the raw assembly from the Heimdall
+//! disassembler and a structured list of instructions with program counters and opcodes.
+
 use async_trait::async_trait;
 use azoth_core::decoder::decode_bytecode;
 use clap::Args;
@@ -22,8 +21,8 @@ impl super::Command for DecodeArgs {
         let is_file = !self.input.starts_with("0x") && Path::new(&self.input).is_file();
         let (instructions, _, asm, _) = decode_bytecode(&self.input, is_file).await?;
         println!("{asm}");
-        for instr in instructions {
-            println!("{instr}");
+        for instruction in instructions {
+            println!("{instruction}");
         }
         Ok(())
     }

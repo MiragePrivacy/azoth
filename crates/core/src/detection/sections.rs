@@ -226,7 +226,7 @@ pub fn extract_runtime_instructions(
         // Find the instruction index that corresponds to runtime_start PC
         let runtime_instr_start = instructions
             .iter()
-            .position(|instr| instr.pc >= runtime_start)?;
+            .position(|instruction| instruction.pc >= runtime_start)?;
 
         return Some(&instructions[runtime_instr_start..]);
     }
@@ -271,13 +271,13 @@ fn detect_deployment_fallback(
 /// Simple CODECOPY + RETURN detection
 fn detect_codecopy_return_simple(instructions: &[Instruction]) -> Option<(usize, usize)> {
     // Find first CODECOPY
-    let codecopy_idx = instructions.iter().position(|i| i.op == Opcode::CODECOPY)?;
+    let codecopy_idx = instructions.iter().position(|instruction| instruction.op == Opcode::CODECOPY)?;
 
     // Find RETURN after CODECOPY (within reasonable distance)
     let return_idx = instructions[codecopy_idx..]
         .iter()
         .take(20)
-        .position(|i| i.op == Opcode::RETURN)
+        .position(|instruction| instruction.op == Opcode::RETURN)
         .map(|pos| codecopy_idx + pos)?;
 
     let init_end = instructions[return_idx].pc + 1;
@@ -285,10 +285,10 @@ fn detect_codecopy_return_simple(instructions: &[Instruction]) -> Option<(usize,
     // Try to find runtime start from PUSH instructions before CODECOPY
     let mut runtime_start = init_end; // fallback
 
-    for i in (0..codecopy_idx).rev().take(10) {
-        if matches!(instructions[i].op, Opcode::PUSH(_) | Opcode::PUSH0)
-            && let Some(imm) = &instructions[i].imm
-            && let Ok(value) = usize::from_str_radix(imm, 16)
+    for instruction in (0..codecopy_idx).rev().take(10) {
+        if matches!(instructions[instruction].op, Opcode::PUSH(_) | Opcode::PUSH0)
+            && let Some(immediate) = &instructions[instruction].imm
+            && let Ok(value) = usize::from_str_radix(immediate, 16)
             && value > init_end
             && value < 100000
         {
@@ -336,15 +336,14 @@ pub fn validate_sections(sections: &[Section], total_len: usize) -> Result<(), E
     Ok(())
 }
 
-/// Detects Auxdata (CBOR) section from the end of the bytecode.
+/// Detects Auxdata (CBOR) section from the end of the bytecode, using a canonical length check
+/// and a fallback scan for invalid lengths.
 ///
 /// # Arguments
 /// * `bytes` - Raw bytecode bytes.
 ///
 /// # Returns
 /// Optional tuple of (offset, length) if Auxdata is found, None otherwise.
-/// Detects Auxdata (CBOR) section from the end of the bytecode, using a canonical length check
-/// and a fallback scan for invalid lengths.
 fn detect_auxdata(bytes: &[u8]) -> Option<(usize, usize)> {
     const MARKER: &[u8] = &[0xa1, 0x65, 0x62, 0x7a, 0x7a, 0x72]; // a165627a7a72
     let len = bytes.len();
@@ -395,11 +394,11 @@ fn detect_padding(instructions: &[Instruction], aux_offset: usize) -> Option<(us
     let last_terminal = instructions
         .iter()
         .rev()
-        .skip_while(|instr| instr.op == Opcode::STOP)
-        .find(|instr| is_terminal_opcode(instr.op));
+        .skip_while(|instruction| instruction.op == Opcode::STOP)
+        .find(|instruction| is_terminal_opcode(instruction.op));
 
-    last_terminal.and_then(|instr| {
-        let pad_offset = instr.pc + 1;
+    last_terminal.and_then(|instruction| {
+        let pad_offset = instruction.pc + 1;
         if pad_offset < aux_offset {
             Some((pad_offset, aux_offset - pad_offset))
         } else {
@@ -469,13 +468,13 @@ fn detect_codecopy_return_pattern(instructions: &[Instruction]) -> Option<(usize
     // Find CODECOPY instruction
     let codecopy_idx = instructions
         .iter()
-        .position(|instr| instr.op == Opcode::CODECOPY)?;
+        .position(|instruction| instruction.op == Opcode::CODECOPY)?;
 
     // Look for RETURN after CODECOPY (within reasonable distance)
     let return_idx = instructions[codecopy_idx + 1..]
         .iter()
         .take(10) // Look within next 10 instructions
-        .position(|instr| instr.op == Opcode::RETURN)
+        .position(|instruction| instruction.op == Opcode::RETURN)
         .map(|pos| codecopy_idx + 1 + pos)?;
 
     // Try to extract runtime parameters from PUSH instructions before CODECOPY
@@ -483,10 +482,10 @@ fn detect_codecopy_return_pattern(instructions: &[Instruction]) -> Option<(usize
     let mut runtime_start = None;
 
     // Look backwards from CODECOPY for PUSH instructions
-    for i in (0..codecopy_idx).rev().take(10) {
-        if matches!(instructions[i].op, Opcode::PUSH(_) | Opcode::PUSH0)
-            && let Some(imm) = &instructions[i].imm
-            && let Ok(value) = usize::from_str_radix(imm, 16)
+    for instruction in (0..codecopy_idx).rev().take(10) {
+        if matches!(instructions[instruction].op, Opcode::PUSH(_) | Opcode::PUSH0)
+            && let Some(immediate) = &instructions[instruction].imm
+            && let Ok(value) = usize::from_str_radix(immediate, 16)
         {
             if runtime_len.is_none() && value > 0 && value < 100000 {
                 // First reasonable value could be runtime length

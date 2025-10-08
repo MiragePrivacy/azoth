@@ -726,8 +726,8 @@ impl SemanticAnalyzer {
     fn update_stack(&self, stack: &mut Vec<StackValue>, instruction: &Instruction) {
         match instruction.op {
             Opcode::PUSH(_) | Opcode::PUSH0 => {
-                if let Some(imm) = &instruction.imm {
-                    if let Ok(value) = u64::from_str_radix(imm, 16) {
+                if let Some(immediate) = &instruction.imm {
+                    if let Ok(value) = u64::from_str_radix(immediate, 16) {
                         stack.push(StackValue::Concrete(value));
                     } else {
                         stack.push(StackValue::Unknown);
@@ -926,7 +926,7 @@ impl SemanticAnalyzer {
                     invariants
                         .push("(= (sum-all-balances state) (total-supply state))".to_string());
                     invariants
-                        .push("(forall ((addr Address)) (>= (balance addr state) 0))".to_string());
+                        .push("(forall ((address Address)) (>= (balance address state) 0))".to_string());
                 }
                 PatternType::Ownable => {
                     invariants.push(
@@ -1208,7 +1208,7 @@ pub mod tests {
             bytes_saved: 0,
             clean_len: 0,
             clean_keccak: [0; 32],
-            pc_map: vec![],
+            program_counter_mapping: vec![],
         }
     }
 
