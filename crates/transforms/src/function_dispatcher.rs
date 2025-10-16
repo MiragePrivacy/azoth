@@ -268,6 +268,7 @@ impl FunctionDispatcher {
         selectors: &[FunctionSelector],
         mapping: &HashMap<u32, Vec<u8>>,
         base_offset: usize,
+        runtime_start: usize,
         rng: &mut StdRng,
     ) -> Result<(Vec<Instruction>, usize)> {
         let mut instructions = Vec::new();
@@ -291,9 +292,8 @@ impl FunctionDispatcher {
                 // Calculate absolute full bytecode PC
                 let absolute_target_pc = base_offset as u64 + selector_info.target_address;
 
-                // Use absolute PC for full bytecode (testing scenario)
-                // For production deployment of runtime-only bytecode, would use runtime-relative
-                let target_for_push = absolute_target_pc;
+                // Convert to runtime-relative for deployed bytecode
+                let target_for_push = absolute_target_pc - runtime_start as u64;
 
                 // Generate comparison with PC-relative internal jumps
                 let comparison_block =
@@ -308,7 +308,7 @@ impl FunctionDispatcher {
                     debug!("  Token: 0x{}", hex::encode(token));
                     debug!("  Absolute target PC: 0x{:x}", absolute_target_pc);
                     debug!(
-                        "  Runtime-relative target: 0x{:x} (abs - runtime_start)",
+                        "  Runtime-relative target (for PUSH): 0x{:x}",
                         target_for_push
                     );
                     debug!("  Comparison block instructions:");
@@ -833,7 +833,7 @@ impl Transform for FunctionDispatcher {
 
             // Generate the complete disguised dispatcher
             let (new_instructions, needed_stack) =
-                self.create_obfuscated_dispatcher(&selectors, &mapping, base, rng)?;
+                self.create_obfuscated_dispatcher(&selectors, &mapping, base, runtime_start, rng)?;
 
             let new_size = self.estimate_bytecode_size(&new_instructions);
             let size_delta = new_size as isize - total_original_size as isize;
@@ -873,11 +873,84 @@ impl Transform for FunctionDispatcher {
 
             // Insert the disguised dispatcher into the first affected block
             let (first_block_idx, first_block_start, _) = affected_blocks[0];
+            let num_dispatcher_instructions = new_instructions.len();
             if let Block::Body { instructions, .. } = &mut ir.cfg[first_block_idx] {
                 let insertion_point = start.saturating_sub(first_block_start);
 
                 for (i, new_instruction) in new_instructions.into_iter().enumerate() {
                     instructions.insert(insertion_point + i, new_instruction);
+                }
+
+                // Adjust dispatcher's function jump targets to account for dispatcher growth
+                // The targets are runtime-relative and point to code AFTER the dispatcher.
+                // When the dispatcher grows by size_delta, all that code shifts forward.
+                if size_delta > 0 {
+                    let start_idx = insertion_point;
+                    let dispatcher_end_idx = start_idx + num_dispatcher_instructions;
+
+                    for i in start_idx..dispatcher_end_idx.saturating_sub(1) {
+                        // Find PUSH+JUMP pairs (not PUSH+JUMPI, which are PC-relative internal jumps)
+                        if matches!(instructions[i].op, Opcode::PUSH(_))
+                            && matches!(instructions[i + 1].op, Opcode::JUMP)
+                        {
+                            if let Some(imm) = &instructions[i].imm {
+                                if let Ok(target) = u64::from_str_radix(imm, 16) {
+                                    // Store original size before mutation
+                                    let original_bytes = imm.len() / 2;
+
+                                    // Add size_delta to the target
+                                    let adjusted_target = target + size_delta as u64;
+                                    // Calculate required bytes for the adjusted target
+                                    let bytes_needed = if adjusted_target == 0 {
+                                        1
+                                    } else {
+                                        ((64 - adjusted_target.leading_zeros()).div_ceil(8)
+                                            as usize)
+                                            .max(1)
+                                    };
+
+                                    // If size changed, update PC-relative delta 5 instructions back
+                                    if bytes_needed != original_bytes && i >= start_idx + 5 {
+                                        // Pattern: [..., PUSH delta, PC, ADD, SWAP, JUMPI, POP, PUSH target, JUMP]
+                                        //            i-5                                   i-1   i       i+1
+                                        let delta_idx = i - 5;
+                                        if matches!(instructions[delta_idx].op, Opcode::PUSH(1))
+                                            && matches!(instructions[delta_idx + 1].op, Opcode::PC)
+                                        {
+                                            if let Some(delta_imm) = &instructions[delta_idx].imm {
+                                                if let Ok(old_delta) =
+                                                    u64::from_str_radix(delta_imm, 16)
+                                                {
+                                                    // Adjust delta by the size difference
+                                                    let new_delta = old_delta
+                                                        + (bytes_needed - original_bytes) as u64;
+                                                    instructions[delta_idx].imm =
+                                                        Some(format!("{:02x}", new_delta));
+                                                    debug!(
+                                                        "Adjusted PC-relative delta: 0x{:x} -> 0x{:x}",
+                                                        old_delta, new_delta
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Update both the opcode size AND the immediate
+                                    let new_opcode = Opcode::PUSH(bytes_needed as u8);
+                                    let hex_width = bytes_needed * 2;
+                                    let new_imm =
+                                        format!("{:0width$x}", adjusted_target, width = hex_width);
+                                    instructions[i].op = new_opcode;
+                                    instructions[i].imm = Some(new_imm);
+                                    debug!(
+                                        "Adjusted dispatcher target: 0x{:x} -> 0x{:x} (+{}) [PUSH{} -> PUSH{}]",
+                                        target, adjusted_target, size_delta,
+                                        original_bytes, bytes_needed
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
