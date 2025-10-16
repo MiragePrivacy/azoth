@@ -269,8 +269,6 @@ impl FunctionDispatcher {
         mapping: &HashMap<u32, Vec<u8>>,
         base_offset: usize,
         rng: &mut StdRng,
-        dispatcher_start_pc: usize,
-        runtime_start: usize,
     ) -> Result<(Vec<Instruction>, usize)> {
         let mut instructions = Vec::new();
         let max_stack_needed = 4;
@@ -293,29 +291,34 @@ impl FunctionDispatcher {
                 // Calculate absolute full bytecode PC
                 let absolute_target_pc = base_offset as u64 + selector_info.target_address;
 
-                // CRITICAL: Convert to runtime-relative PC for deployed bytecode
-                // Deployed bytecode only contains runtime portion starting at byte 0,
-                // but our IR uses full bytecode PCs. We must convert for PUSH immediates.
-                let runtime_relative_target = absolute_target_pc.saturating_sub(runtime_start as u64);
+                // Use absolute PC for full bytecode (testing scenario)
+                // For production deployment of runtime-only bytecode, would use runtime-relative
+                let target_for_push = absolute_target_pc;
 
                 // Generate comparison with PC-relative internal jumps
-                let comparison_block = self.create_token_comparison_clean(
-                    token,
-                    runtime_relative_target,
-                    0,
-                )?;
+                let comparison_block =
+                    self.create_token_comparison_clean(token, target_for_push, 0)?;
 
                 // Debug: log the first comparison block details
                 if idx == 0 {
-                    debug!("=== First Comparison Block (selector 0x{:08x}) ===", selector_info.selector);
+                    debug!(
+                        "=== First Comparison Block (selector 0x{:08x}) ===",
+                        selector_info.selector
+                    );
                     debug!("  Token: 0x{}", hex::encode(token));
                     debug!("  Absolute target PC: 0x{:x}", absolute_target_pc);
-                    debug!("  Runtime-relative target: 0x{:x} (abs - runtime_start)", runtime_relative_target);
+                    debug!(
+                        "  Runtime-relative target: 0x{:x} (abs - runtime_start)",
+                        target_for_push
+                    );
                     debug!("  Comparison block instructions:");
                     for (i, instr) in comparison_block.iter().enumerate() {
                         debug!("    [{}] {:?} {:?}", i, instr.op, instr.imm);
                     }
-                    debug!("  Comparison block size: {} bytes", self.estimate_bytecode_size(&comparison_block));
+                    debug!(
+                        "  Comparison block size: {} bytes",
+                        self.estimate_bytecode_size(&comparison_block)
+                    );
                 }
 
                 instructions.extend(comparison_block);
@@ -325,7 +328,7 @@ impl FunctionDispatcher {
         // Phase 3: Default case protection (prevents execution of random code)
         // At this point, token is still on stack, so POP it before reverting
         instructions.extend(vec![
-            self.create_instruction(Opcode::POP, None)?,  // Clean token off stack
+            self.create_instruction(Opcode::POP, None)?, // Clean token off stack
             self.create_instruction(Opcode::PUSH(1), Some("00".to_string()))?,
             self.create_instruction(Opcode::DUP(1), None)?,
             self.create_instruction(Opcode::REVERT, None)?,
@@ -386,35 +389,36 @@ impl FunctionDispatcher {
         //   PUSH delta
         //   PC                   // <-- PC at position p, returns p
         //   ADD                  // at p+1
-        //   JUMPI                // at p+2
-        //   POP                  // at p+3
-        //   PUSH(n) target       // at p+4 (opcode) through p+4+n (immediate)
-        //   JUMP                 // at p+5+n
-        //   JUMPDEST             // at p+6+n <-- landing target
+        //   SWAP1                // at p+2
+        //   JUMPI                // at p+3
+        //   POP                  // at p+4
+        //   PUSH(n) target       // at p+5 (opcode) through p+5+n (immediate)
+        //   JUMP                 // at p+6+n
+        //   JUMPDEST             // at p+7+n <-- landing target
         //
         // PC returns p, so delta = (p+6+n) - p = 6 + n
-        let delta_to_after: u64 = (6 + target_push_bytes) as u64;
+        let delta_to_after: u64 = (7 + target_push_bytes) as u64;
 
         // Comparison (keeps stack tidy for both paths)
         instructions.extend(vec![
             // Stack: [token]
-            self.create_instruction(Opcode::DUP(1), None)?,                             // [token, token]
+            self.create_instruction(Opcode::DUP(1), None)?, // [token, token]
             self.create_instruction(Opcode::PUSH(token_size as u8), Some(token_hex))?, // [token, token, token_i]
-            self.create_instruction(Opcode::EQ, None)?,                                // [token, match?]
-            self.create_instruction(Opcode::ISZERO, None)?,                            // [token, !match?]
-
+            self.create_instruction(Opcode::EQ, None)?, // [token, match?]
+            self.create_instruction(Opcode::ISZERO, None)?, // [token, !match?]
             // PC-relative skip to after_i if !match
             self.create_push_instruction(delta_to_after, None)?, // [token, !match?, delta]
             self.create_instruction(Opcode::PC, None)?,          // [token, !match?, delta, pc]
             self.create_instruction(Opcode::ADD, None)?,         // [token, !match?, pc+delta]
-            self.create_instruction(Opcode::JUMPI, None)?,       // jump if !match, else fall through (stack now [token])
+            self.create_instruction(Opcode::SWAP(1), None)?,     // [token, pc+delta, !match?]
+            self.create_instruction(Opcode::JUMPI, None)?, // jump if !match, else fall through (stack now [token])
         ]);
 
         // Match path (fallthrough): clean stack, then jump to target
         instructions.extend(vec![
-            self.create_instruction(Opcode::POP, None)?,                          // []  (remove token)
+            self.create_instruction(Opcode::POP, None)?, // []  (remove token)
             self.create_push_instruction(target_address, Some(target_push_bytes))?, // [target]
-            self.create_instruction(Opcode::JUMP, None)?,                         // JUMP
+            self.create_instruction(Opcode::JUMP, None)?, // JUMP
         ]);
 
         // After_i label for the next comparison
@@ -742,10 +746,7 @@ impl Transform for FunctionDispatcher {
                 } else {
                     full_bytecode_pc
                 };
-                debug!(
-                    "  Selector {}: 0x{:08x}",
-                    i, selector_info.selector
-                );
+                debug!("  Selector {}: 0x{:08x}", i, selector_info.selector);
                 debug!(
                     "    deployed_target (from detection): {:#x}",
                     deployed_target
@@ -832,7 +833,7 @@ impl Transform for FunctionDispatcher {
 
             // Generate the complete disguised dispatcher
             let (new_instructions, needed_stack) =
-                self.create_obfuscated_dispatcher(&selectors, &mapping, base, rng, dispatcher_start_pc, runtime_start)?;
+                self.create_obfuscated_dispatcher(&selectors, &mapping, base, rng)?;
 
             let new_size = self.estimate_bytecode_size(&new_instructions);
             let size_delta = new_size as isize - total_original_size as isize;
@@ -871,7 +872,7 @@ impl Transform for FunctionDispatcher {
             }
 
             // Insert the disguised dispatcher into the first affected block
-            let (first_block_idx, first_block_start, first_block_start_pc) = affected_blocks[0];
+            let (first_block_idx, first_block_start, _) = affected_blocks[0];
             if let Block::Body { instructions, .. } = &mut ir.cfg[first_block_idx] {
                 let insertion_point = start.saturating_sub(first_block_start);
 
@@ -894,13 +895,19 @@ impl Transform for FunctionDispatcher {
                         {
                             push_jump_count += 1;
                             if let Some(imm) = &instructions[i].imm {
-                                debug!("  PUSH+JUMP/I pair #{}: PUSH {:?} at idx {}", push_jump_count, imm, i);
+                                debug!(
+                                    "  PUSH+JUMP/I pair #{}: PUSH {:?} at idx {}",
+                                    push_jump_count, imm, i
+                                );
                             }
                         }
                     }
                 }
             }
-            debug!("Total PUSH+JUMP/JUMPI pairs in dispatcher block: {}", push_jump_count);
+            debug!(
+                "Total PUSH+JUMP/JUMPI pairs in dispatcher block: {}",
+                push_jump_count
+            );
 
             // Update CFG structure and addresses
             // IMPORTANT: Use dispatcher_start_pc, not first_block_start_pc
@@ -925,7 +932,13 @@ impl Transform for FunctionDispatcher {
                             debug!("=== First Comparison Block After Reindexing ===");
                             for j in 0..12 {
                                 let instr = &instructions[i + j];
-                                debug!("  [{}] PC=0x{:x} {:?} {:?}", i+j, instr.pc, instr.op, instr.imm);
+                                debug!(
+                                    "  [{}] PC=0x{:x} {:?} {:?}",
+                                    i + j,
+                                    instr.pc,
+                                    instr.op,
+                                    instr.imm
+                                );
                             }
                             // Calculate where PC-relative jump should land
                             if let Some(delta_imm) = &instructions[i + 4].imm {
@@ -933,7 +946,7 @@ impl Transform for FunctionDispatcher {
                                     let pc_instruction_pc = instructions[i + 5].pc;
                                     let after_pc_location = pc_instruction_pc + 1; // PC returns next instruction
                                     let jump_target = after_pc_location + delta;
-                                    let jumpdest_actual_pc = instructions[i + 11].pc;
+                                    let jumpdest_actual_pc = instructions[i + 12].pc;
                                     debug!("  PC instr at: 0x{:x}", pc_instruction_pc);
                                     debug!("  PC returns: 0x{:x}", after_pc_location);
                                     debug!("  Delta: 0x{}", delta_imm);

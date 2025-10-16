@@ -15,11 +15,11 @@ use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use revm::bytecode::Bytecode;
 use revm::context::result::{ExecutionResult, Output};
+use revm::context::ContextTr;
 use revm::context::TxEnv;
 use revm::database::InMemoryDB;
 use revm::primitives::{Address, TxKind, U256};
 use revm::state::AccountInfo;
-use revm::context::ContextTr;
 use revm::{Context, DatabaseCommit, ExecuteEvm, MainBuilder, MainContext};
 
 #[tokio::test]
