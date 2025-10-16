@@ -387,7 +387,7 @@ impl FunctionDispatcher {
         // JUMP distance from the *PC* opcode to the after_i JUMPDEST.
         // Layout after ISZERO:
         //   PUSH delta
-        //   PC                   // <-- PC at position p, returns p
+        //   PC                   // <-- PC at position p, returns p+1 (next instruction address)
         //   ADD                  // at p+1
         //   SWAP1                // at p+2
         //   JUMPI                // at p+3
@@ -396,8 +396,8 @@ impl FunctionDispatcher {
         //   JUMP                 // at p+6+n
         //   JUMPDEST             // at p+7+n <-- landing target
         //
-        // PC returns p, so delta = (p+6+n) - p = 6 + n
-        let delta_to_after: u64 = (7 + target_push_bytes) as u64;
+        // PC returns p+1, so delta = (p+7+n) - (p+1) = 6 + n
+        let delta_to_after: u64 = (6 + target_push_bytes) as u64;
 
         // Comparison (keeps stack tidy for both paths)
         instructions.extend(vec![
