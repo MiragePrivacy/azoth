@@ -1,10 +1,9 @@
 //! Contract semantics extraction and representation
 //!
-//! This module analyzes bytecode to extract semantic information needed
-//! for formal verification by leveraging pattern recognition,
-//! symbolic execution, and property synthesis.
+//! This module analyzes bytecode to extract semantic information needed for formal verification
+//! by leveraging pattern recognition, symbolic execution, and property synthesis.
 
-use crate::{VerificationError, VerificationResult};
+use crate::{Error, VerificationResult};
 use azoth_core::cfg_ir::{Block, CfgIrBundle, EdgeType};
 use azoth_core::decoder::Instruction;
 use azoth_core::{cfg_ir, decoder, detection, strip, Opcode};
@@ -287,21 +286,16 @@ pub async fn extract_semantics_from_bytecode(
     let (instructions, _, _, _) =
         decoder::decode_bytecode(&format!("0x{}", hex::encode(bytecode)), false)
             .await
-            .map_err(|e| {
-                VerificationError::BytecodeAnalysis(format!("Failed to decode bytecode: {e}"))
-            })?;
+            .map_err(|e| Error::BytecodeAnalysis(format!("Failed to decode bytecode: {e}")))?;
 
-    let sections = detection::locate_sections(bytecode, &instructions).map_err(|e| {
-        VerificationError::BytecodeAnalysis(format!("Failed to detect sections: {e}"))
-    })?;
+    let sections = detection::locate_sections(bytecode, &instructions)
+        .map_err(|e| Error::BytecodeAnalysis(format!("Failed to detect sections: {e}")))?;
 
-    let (_clean_runtime, clean_report) =
-        strip::strip_bytecode(bytecode, &sections).map_err(|e| {
-            VerificationError::BytecodeAnalysis(format!("Failed to strip bytecode: {e}"))
-        })?;
+    let (_clean_runtime, clean_report) = strip::strip_bytecode(bytecode, &sections)
+        .map_err(|e| Error::BytecodeAnalysis(format!("Failed to strip bytecode: {e}")))?;
 
     let cfg_bundle = cfg_ir::build_cfg_ir(&instructions, &sections, clean_report)
-        .map_err(|e| VerificationError::BytecodeAnalysis(format!("Failed to build CFG: {e}")))?;
+        .map_err(|e| Error::BytecodeAnalysis(format!("Failed to build CFG: {e}")))?;
 
     extract_semantics(&cfg_bundle)
 }
@@ -527,7 +521,7 @@ impl SemanticAnalyzer {
         if let Some(&start_node) = self.cfg_bundle.pc_to_block.get(&start_pc) {
             queue.push_back(start_node);
         } else {
-            return Err(VerificationError::BytecodeAnalysis(format!(
+            return Err(Error::BytecodeAnalysis(format!(
                 "No block found for start PC: {start_pc}",
             )));
         }
@@ -925,8 +919,9 @@ impl SemanticAnalyzer {
                 PatternType::ERC20Token => {
                     invariants
                         .push("(= (sum-all-balances state) (total-supply state))".to_string());
-                    invariants
-                        .push("(forall ((address Address)) (>= (balance address state) 0))".to_string());
+                    invariants.push(
+                        "(forall ((address Address)) (>= (balance address state) 0))".to_string(),
+                    );
                 }
                 PatternType::Ownable => {
                     invariants.push(

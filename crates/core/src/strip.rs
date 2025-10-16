@@ -57,9 +57,9 @@ pub fn strip_bytecode(bytes: &[u8], sections: &[Section]) -> Result<(Vec<u8>, Cl
     let mut report = CleanReport {
         removed: Vec::new(),
         runtime_layout: Vec::new(),
-        swarm_hash: None,        // Will be populated if found
-        clean_len: 0,            // Will be set at the end
-        clean_keccak: [0u8; 32], // Will be calculated at the end
+        swarm_hash: None,                    // Will be populated if found
+        clean_len: 0,                        // Will be set at the end
+        clean_keccak: [0u8; 32],             // Will be calculated at the end
         program_counter_mapping: Vec::new(), // Will be populated if needed
         bytes_saved: 0,
     };

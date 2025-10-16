@@ -262,7 +262,7 @@ impl_calldata_builders!(ObfuscatedCaller for EscrowMappings {
     fn is_bonded_call_data() -> is_bonded;
     fn collect_call_data() -> collect;
     fn withdraw_call_data() -> withdraw;
-    fn fund_call_data() -> fund;
+    fn fund_call_data(reward_amount: U256, payment_amount: U256) -> fund;
     fn funded_call_data() -> funded;
 });
 

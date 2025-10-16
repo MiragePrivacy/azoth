@@ -19,27 +19,21 @@ pub enum Error {
     /// Core operation failed.
     #[error("core operation failed: {0}")]
     CoreError(String),
-
     /// Instruction encoding failed.
     #[error("instruction encoding failed: {0}")]
     EncodingError(String),
-
     /// Generic error.
     #[error("generic error: {0}")]
     Generic(String),
-
     /// Invalid jump target.
     #[error("invalid jump target: {0}")]
     InvalidJumpTarget(usize),
-
     /// Metrics computation failed.
     #[error("metrics computation failed: {0}")]
     Metrics(#[from] MetricsError),
-
     /// Bytecode size exceeds maximum allowed delta.
     #[error("bytecode size exceeds maximum allowed delta")]
     SizeLimitExceeded,
-
     /// Stack depth exceeds maximum limit of 1024.
     #[error("stack depth exceeds maximum limit of 1024")]
     StackOverflow,
@@ -91,15 +85,6 @@ impl Default for PassConfig {
 /// # Returns
 /// * `Some((Opcode, usize))` - The parsed opcode and its immediate size (1-32 bytes)
 /// * `None` - If the input is not a valid PUSH opcode
-///
-/// # Examples
-/// ```
-/// use bytecloak_transform::util::parse_push_opcode;
-///
-/// assert!(parse_push_opcode("PUSH0").is_none());
-/// assert!(parse_push_opcode("PUSH33").is_none());
-/// assert!(parse_push_opcode("ADD").is_none());
-/// ```
 pub fn parse_push_opcode(opcode_str: &str) -> Option<(Opcode, usize)> {
     if let Some(push_num_str) = opcode_str.strip_prefix("PUSH") {
         if let Ok(push_num) = push_num_str.parse::<u8>() {

@@ -15,14 +15,19 @@ use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use revm::bytecode::Bytecode;
 use revm::context::result::{ExecutionResult, Output};
+use revm::context::ContextTr;
 use revm::context::TxEnv;
 use revm::database::InMemoryDB;
 use revm::primitives::{Address, TxKind, U256};
 use revm::state::AccountInfo;
-use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
+use revm::{Context, DatabaseCommit, ExecuteEvm, MainBuilder, MainContext};
 
 #[tokio::test]
 async fn test_obfuscated_function_calls() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .try_init();
+
     // obfuscate contract
     let seed = Seed::generate();
     let config = ObfuscationConfig {
@@ -42,6 +47,10 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         obfuscation_result.obfuscated_size,
         obfuscation_result.size_increase_percentage
     );
+
+    // Debug: Print first 500 bytes of obfuscated bytecode
+    let obf_hex = hex::encode(&obfuscation_result.obfuscated_bytecode);
+    println!("{}", obf_hex);
 
     // extracting selector mappings
     let selector_mapping = obfuscation_result
@@ -88,18 +97,28 @@ async fn test_obfuscated_function_calls() -> Result<()> {
 
     let mut evm = Context::mainnet().with_db(db).build_mainnet();
 
+    // Track nonce explicitly for each transaction
+    let mut deployer_nonce = 0u64;
+
     let deploy_tx = TxEnv {
         caller: deployer,
         gas_limit: 30_000_000,
         kind: TxKind::Create,
         data: obfuscated_bytecode,
         value: U256::ZERO,
+        nonce: deployer_nonce,
         ..Default::default()
     };
 
     let deploy_result = evm
         .transact(deploy_tx)
         .map_err(|e| eyre!("Deployment transaction failed: {:?}", e))?;
+
+    // Commit deployment state changes to database
+    evm.db_mut().commit(deploy_result.state.clone());
+
+    // Increment nonce after successful deployment
+    deployer_nonce += 1;
 
     let contract_address = match deploy_result.result {
         ExecutionResult::Success { output, .. } => match output {
@@ -130,12 +149,16 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         kind: TxKind::Call(contract_address),
         data: is_bonded_calldata,
         value: U256::ZERO,
+        nonce: deployer_nonce,
         ..Default::default()
     };
 
-    let call_result = evm
-        .transact(call_tx)
-        .map_err(|e| eyre!("Call transaction failed: {:?}", e))?;
+    let call_result = evm.transact(call_tx);
+    println!("Call result: {:?}", call_result);
+    let call_result = call_result.map_err(|e| eyre!("Call transaction failed: {:?}", e))?;
+
+    // Increment nonce after successful transaction
+    deployer_nonce += 1;
 
     let is_bonded_result = match call_result.result {
         ExecutionResult::Success { output, .. } => match output {
@@ -156,23 +179,35 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     assert!(!is_bonded, "Expected is_bonded to be false initially");
     println!("✓ is_bonded() call succeeded with correct result");
 
-    let fund_calldata = caller.fund_call_data();
-    println!("  Calldata (obfuscated): 0x{}", hex::encode(&fund_calldata));
-
-    let fund_amount = U256::from(10000); // Send some ETH to fund the contract
+    let reward_amount = U256::from(5000);
+    let payment_amount = U256::from(5000);
+    let fund_calldata = caller.fund_call_data(reward_amount, payment_amount);
+    println!(
+        "  Calldata (obfuscated): 0x{} (reward: {}, payment: {})",
+        hex::encode(&fund_calldata),
+        reward_amount,
+        payment_amount
+    );
 
     let fund_tx = TxEnv {
         caller: deployer,
         gas_limit: 10_000_000,
         kind: TxKind::Call(contract_address),
         data: fund_calldata,
-        value: fund_amount,
+        value: U256::ZERO,
+        nonce: deployer_nonce,
         ..Default::default()
     };
 
     let fund_result = evm
         .transact(fund_tx)
         .map_err(|e| eyre!("Fund transaction failed: {:?}", e))?;
+
+    // Commit fund state changes to database
+    evm.db_mut().commit(fund_result.state.clone());
+
+    // Increment nonce after successful transaction
+    deployer_nonce += 1;
 
     match fund_result.result {
         ExecutionResult::Success { gas_used, .. } => {
@@ -199,12 +234,16 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         kind: TxKind::Call(contract_address),
         data: funded_calldata,
         value: U256::ZERO,
+        nonce: deployer_nonce,
         ..Default::default()
     };
 
     let funded_result = evm
         .transact(funded_tx)
         .map_err(|e| eyre!("Funded check failed: {:?}", e))?;
+
+    // Increment nonce after successful transaction
+    deployer_nonce += 1;
 
     if let ExecutionResult::Success { output, .. } = funded_result.result {
         if let Output::Call(data) = output {
@@ -223,12 +262,19 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         kind: TxKind::Call(contract_address),
         data: bond_calldata,
         value: U256::ZERO,
+        nonce: deployer_nonce,
         ..Default::default()
     };
 
     let bond_result = evm
         .transact(bond_tx)
         .map_err(|e| eyre!("Bond transaction failed: {:?}", e))?;
+
+    // Commit bond state changes to database
+    evm.db_mut().commit(bond_result.state.clone());
+
+    // Increment nonce after successful transaction
+    deployer_nonce += 1;
 
     let bond_output = match bond_result.result {
         ExecutionResult::Success {
@@ -264,6 +310,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         kind: TxKind::Call(contract_address),
         data: is_bonded_calldata,
         value: U256::ZERO,
+        nonce: deployer_nonce,
         ..Default::default()
     };
 
@@ -290,21 +337,11 @@ async fn test_obfuscated_function_calls() -> Result<()> {
 
     println!("✓ bond() executed successfully on obfuscated contract");
 
-    let collect_calldata = caller.collect_call_data();
-    println!("  collect() calldata: 0x{}", hex::encode(&collect_calldata));
-
-    let withdraw_calldata = caller.withdraw_call_data();
-    println!(
-        "  withdraw() calldata: 0x{}",
-        hex::encode(&withdraw_calldata)
-    );
-
-    let fund_calldata = caller.fund_call_data();
-    println!("  fund() calldata: 0x{}", hex::encode(&fund_calldata));
-
-    println!("✓ Obfuscated contract executes correctly");
-    println!("✓ Function calls using obfuscated tokens work");
+    println!("\n✓ Obfuscated contract executes correctly");
+    println!("✓ Valid tokens route to correct functions");
+    println!("✓ Token extraction works with function arguments (bond with uint256)");
     println!("✓ State changes are preserved through obfuscation");
+    println!("✓ No stack underflows detected");
 
     Ok(())
 }

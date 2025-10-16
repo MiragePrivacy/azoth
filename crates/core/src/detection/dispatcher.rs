@@ -128,7 +128,10 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
                     let target_val = stack[stack.len() - 1];
                     stack.truncate(stack.len() - 2);
 
-                    if let StackValue::Const { addr: address, def_pc } = target_val
+                    if let StackValue::Const {
+                        addr: address,
+                        def_pc,
+                    } = target_val
                         && let Some((selector, sel_idx)) = current_selector
                     {
                         selectors.push(FunctionSelector {

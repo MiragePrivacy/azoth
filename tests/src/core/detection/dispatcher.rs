@@ -50,7 +50,13 @@ async fn test_dispatcher_detection() {
     tracing::debug!("Runtime instructions count: {}", runtime_instructions.len());
     tracing::debug!("First 20 runtime instructions:");
     for (i, instruction) in runtime_instructions.iter().take(20).enumerate() {
-        tracing::debug!("  {}: PC={} {} {:?}", i, instruction.pc, instruction.op, instruction.imm);
+        tracing::debug!(
+            "  {}: PC={} {} {:?}",
+            i,
+            instruction.pc,
+            instruction.op,
+            instruction.imm
+        );
     }
 
     tracing::debug!("Looking for dispatcher pattern in runtime instructions...");
@@ -118,7 +124,13 @@ async fn test_dispatcher_detection() {
     tracing::debug!("Runtime instructions count: {}", runtime_instructions.len());
     tracing::debug!("First 20 runtime instructions:");
     for (i, instruction) in runtime_instructions.iter().take(20).enumerate() {
-        tracing::debug!("  {}: PC={} {} {:?}", i, instruction.pc, instruction.op, instruction.imm);
+        tracing::debug!(
+            "  {}: PC={} {} {:?}",
+            i,
+            instruction.pc,
+            instruction.op,
+            instruction.imm
+        );
     }
 
     // Let's also look for the dispatcher pattern manually
@@ -245,7 +257,13 @@ async fn test_dispatcher_detection() {
 
             tracing::error!("Debug: First 20 runtime instructions:");
             for (i, instruction) in runtime_instructions.iter().take(20).enumerate() {
-                tracing::error!("  {}: PC={} {} {:?}", i, instruction.pc, instruction.op, instruction.imm);
+                tracing::error!(
+                    "  {}: PC={} {} {:?}",
+                    i,
+                    instruction.pc,
+                    instruction.op,
+                    instruction.imm
+                );
             }
 
             panic!("Failed to detect function dispatcher in runtime instructions");
