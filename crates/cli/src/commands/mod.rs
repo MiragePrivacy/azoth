@@ -19,7 +19,6 @@ pub enum ObfuscateError {
     #[error("hex decode error: {0}")]
     HexDecode(#[from] hex::FromHexError),
     /// File read/write error.
-    ///
     #[error("file error: {0}")]
     File(#[from] std::io::Error),
     /// Transform application failed.

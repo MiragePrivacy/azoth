@@ -196,31 +196,32 @@ impl FunctionDispatcher {
         // Phase 2: Load calldata from calculated offset (always 0x00)
         instructions.push(self.create_instruction(Opcode::CALLDATALOAD, None)?);
 
-        // Phase 3: Token extraction using variable-size mask
+        // Phase 3: Token extraction using right-shift
         //
-        // The choice for `ffff`(or any other size it takes) isn't arbitrary, it's hexadecimal where f represents
-        // the binary value `1111`
-        // Input:  1010110101001101...  (calldata)
-        // Mask:   111111111111111111111111  (ffffff)
-        // AND:    1010110101001101...  (preserves first 24 bits)
-        let mask = match max_token_size {
-            1 => "ff",               // 1 byte:  0xFF
-            2 => "ffff",             // 2 bytes: 0xFFFF
-            3 => "ffffff",           // 3 bytes: 0xFFFFFF
-            4 => "ffffffff",         // 4 bytes: 0xFFFFFFFF
-            5 => "ffffffffff",       // 5 bytes: 0xFFFFFFFFFF
-            6 => "ffffffffffff",     // 6 bytes: 0xFFFFFFFFFFFF
-            7 => "ffffffffffffff",   // 7 bytes: 0xFFFFFFFFFFFFFF
-            8 => "ffffffffffffffff", // 8 bytes: 0xFFFFFFFFFFFFFFFF
-            _ => "ffffffffffffffff", // Default to 8 bytes max
-        };
+        // CALLDATALOAD returns 32 bytes with calldata left-aligned (most significant bytes first).
+        // For a 4-byte token like 0x1a9886de with function arguments, CALLDATALOAD(0) returns:
+        //   0x1a9886de<first 28 bytes of ABI-encoded arguments>
+        //
+        // We extract the token by shifting right by (32 - N) bytes, which moves the leftmost
+        // N bytes to the rightmost position and discards everything else.
+        //
+        // For 4-byte tokens: shift right by 28 bytes = 224 bits = 0xe0
+        //
+        // Example with arguments (bond(1000)):
+        //   Calldata:    0x1a9886de00000000000000000000000000000000000000000000000000000003e8
+        //   CALLDATALOAD(0): 0x1a9886de00000000000000000000000000000000000000000000000000000000
+        //   SHR 224:     0x000000000000000000000000000000000000000000000000000000001a9886de
+        //
+        // Note: Since we use fixed 4-byte tokens, the SHR operation alone is sufficient.
+        // The right-shift automatically removes all argument bytes, leaving only the token.
+        // No additional masking is needed.
+        let shift_bits = (32 - max_token_size) * 8; // Convert bytes to bits
+        let shift_hex = format!("{:02x}", shift_bits);
 
-        let push_size = max_token_size.clamp(1, 8);
-
-        // Phase 4: Apply mask to extract token
+        // Phase 4: Apply right-shift to extract token from leftmost bytes
         instructions.extend(vec![
-            self.create_instruction(Opcode::PUSH(push_size as u8), Some(mask.to_string()))?,
-            self.create_instruction(Opcode::AND, None)?,
+            self.create_instruction(Opcode::PUSH(1), Some(shift_hex))?,
+            self.create_instruction(Opcode::SHR, None)?,
         ]);
 
         // Phase 5: Optional noise operations (Bernoulli trial)
@@ -266,14 +267,18 @@ impl FunctionDispatcher {
         &self,
         selectors: &[FunctionSelector],
         mapping: &HashMap<u32, Vec<u8>>,
+        base_offset: usize,
         rng: &mut StdRng,
+        dispatcher_start_pc: usize,
+        runtime_start: usize,
     ) -> Result<(Vec<Instruction>, usize)> {
         let mut instructions = Vec::new();
-        let max_stack_needed = 3;
+        let max_stack_needed = 4;
 
         // Phase 1: Disguised token extraction (completely hides dispatcher signature)
         let max_token_size = mapping.values().map(|token| token.len()).max().unwrap_or(1);
-        instructions.extend(self.create_token_extraction(max_token_size, rng)?);
+        let extraction_instructions = self.create_token_extraction(max_token_size, rng)?;
+        instructions.extend(extraction_instructions);
 
         // Phase 2: Token-based selector comparisons (shuffled order for additional obfuscation)
         let mut selector_order: Vec<_> = selectors.iter().collect();
@@ -283,15 +288,44 @@ impl FunctionDispatcher {
             debug!("Shuffled selector comparison order");
         }
 
-        for selector_info in selector_order {
+        for (idx, selector_info) in selector_order.iter().enumerate() {
             if let Some(token) = mapping.get(&selector_info.selector) {
-                instructions
-                    .extend(self.create_token_comparison(token, selector_info.target_address)?);
+                // Calculate absolute full bytecode PC
+                let absolute_target_pc = base_offset as u64 + selector_info.target_address;
+
+                // CRITICAL: Convert to runtime-relative PC for deployed bytecode
+                // Deployed bytecode only contains runtime portion starting at byte 0,
+                // but our IR uses full bytecode PCs. We must convert for PUSH immediates.
+                let runtime_relative_target = absolute_target_pc.saturating_sub(runtime_start as u64);
+
+                // Generate comparison with PC-relative internal jumps
+                let comparison_block = self.create_token_comparison_clean(
+                    token,
+                    runtime_relative_target,
+                    0,
+                )?;
+
+                // Debug: log the first comparison block details
+                if idx == 0 {
+                    debug!("=== First Comparison Block (selector 0x{:08x}) ===", selector_info.selector);
+                    debug!("  Token: 0x{}", hex::encode(token));
+                    debug!("  Absolute target PC: 0x{:x}", absolute_target_pc);
+                    debug!("  Runtime-relative target: 0x{:x} (abs - runtime_start)", runtime_relative_target);
+                    debug!("  Comparison block instructions:");
+                    for (i, instr) in comparison_block.iter().enumerate() {
+                        debug!("    [{}] {:?} {:?}", i, instr.op, instr.imm);
+                    }
+                    debug!("  Comparison block size: {} bytes", self.estimate_bytecode_size(&comparison_block));
+                }
+
+                instructions.extend(comparison_block);
             }
         }
 
         // Phase 3: Default case protection (prevents execution of random code)
+        // At this point, token is still on stack, so POP it before reverting
         instructions.extend(vec![
+            self.create_instruction(Opcode::POP, None)?,  // Clean token off stack
             self.create_instruction(Opcode::PUSH(1), Some("00".to_string()))?,
             self.create_instruction(Opcode::DUP(1), None)?,
             self.create_instruction(Opcode::REVERT, None)?,
@@ -304,44 +338,89 @@ impl FunctionDispatcher {
         Ok((instructions, max_stack_needed))
     }
 
-    /// Creates token comparison sequence for variable-size tokens
+    /// Creates token comparison sequence with clean stack hygiene using PC-relative jumps
     ///
-    /// before:
+    /// Uses guarded fallthrough pattern with PC-relative skip jumps to avoid relocation issues:
     /// ```assembly
-    /// DUP1                 // duplicate selector on stack
-    /// PUSH4 0xa9059cbb     // push 4-byte selector to compare
-    /// EQ                   // compare: stack_top == 0xa9059cbb
-    /// PUSH2 0x001a         // target address if match
-    /// JUMPI                // jump to function if equal
+    /// # Stack before: [token]
+    /// DUP1                 // [token, token]
+    /// PUSH token_i         // [token, token, token_i]
+    /// EQ                   // [token, match?]
+    /// ISZERO               // [token, !match?]
+    /// PUSH delta           // [token, !match?, delta]
+    /// PC                   // [token, !match?, delta, PC]
+    /// ADD                  // [token, !match?, PC+delta]
+    /// SWAP1                // [token, PC+delta, !match?]
+    /// JUMPI                // if no match, skip to after_i (PC-relative)
+    ///
+    /// # Match path (fallthrough):
+    /// POP                  // [] - clean the token off stack
+    /// PUSH target          // [target] (absolute PC)
+    /// JUMP                 // jump with clean baseline
+    ///
+    /// JUMPDEST after_i:    // Stack: [token] for next comparison
     /// ```
     ///
-    /// after:
-    /// ```assembly
-    /// DUP1                 // duplicate token on stack
-    /// PUSH2 0x8f3a         // push 2-byte derived token
-    /// EQ                   // compare: stack_top == 0x8f3a
-    /// PUSH2 0x001a         // same target address  
-    /// JUMPI                // jump to function if equal
-    /// ```
-    fn create_token_comparison(
+    /// PC-relative jumps avoid relocation by update_jump_targets, while absolute
+    /// function target jumps get properly relocated.
+    fn create_token_comparison_clean(
         &self,
         token: &[u8],
         target_address: u64,
+        _cursor_pc: u64, // no longer needed for absolute after_i calc
     ) -> Result<Vec<Instruction>> {
-        let mut comparison = vec![self.create_instruction(Opcode::DUP(1), None)?];
+        let mut instructions = Vec::new();
 
-        // Push token with appropriate size
-        let push_size = token.len().clamp(1, 32);
+        let token_size = token.len().clamp(1, 32);
         let token_hex = hex::encode(token);
-        comparison.push(self.create_instruction(Opcode::PUSH(push_size as u8), Some(token_hex))?);
 
-        comparison.extend(vec![
-            self.create_instruction(Opcode::EQ, None)?,
-            self.create_push_instruction(target_address, Some(2))?,
-            self.create_instruction(Opcode::JUMPI, None)?,
+        // How many bytes to PUSH for the target address
+        let target_push_bytes = if target_address == 0 {
+            1
+        } else {
+            ((64 - target_address.leading_zeros()).div_ceil(8) as usize).clamp(1, 32)
+        };
+
+        // JUMP distance from the *PC* opcode to the after_i JUMPDEST.
+        // Layout after ISZERO:
+        //   PUSH delta
+        //   PC                   // <-- PC at position p, returns p
+        //   ADD                  // at p+1
+        //   JUMPI                // at p+2
+        //   POP                  // at p+3
+        //   PUSH(n) target       // at p+4 (opcode) through p+4+n (immediate)
+        //   JUMP                 // at p+5+n
+        //   JUMPDEST             // at p+6+n <-- landing target
+        //
+        // PC returns p, so delta = (p+6+n) - p = 6 + n
+        let delta_to_after: u64 = (6 + target_push_bytes) as u64;
+
+        // Comparison (keeps stack tidy for both paths)
+        instructions.extend(vec![
+            // Stack: [token]
+            self.create_instruction(Opcode::DUP(1), None)?,                             // [token, token]
+            self.create_instruction(Opcode::PUSH(token_size as u8), Some(token_hex))?, // [token, token, token_i]
+            self.create_instruction(Opcode::EQ, None)?,                                // [token, match?]
+            self.create_instruction(Opcode::ISZERO, None)?,                            // [token, !match?]
+
+            // PC-relative skip to after_i if !match
+            self.create_push_instruction(delta_to_after, None)?, // [token, !match?, delta]
+            self.create_instruction(Opcode::PC, None)?,          // [token, !match?, delta, pc]
+            self.create_instruction(Opcode::ADD, None)?,         // [token, !match?, pc+delta]
+            self.create_instruction(Opcode::JUMPI, None)?,       // jump if !match, else fall through (stack now [token])
         ]);
 
-        Ok(comparison)
+        // Match path (fallthrough): clean stack, then jump to target
+        instructions.extend(vec![
+            self.create_instruction(Opcode::POP, None)?,                          // []  (remove token)
+            self.create_push_instruction(target_address, Some(target_push_bytes))?, // [target]
+            self.create_instruction(Opcode::JUMP, None)?,                         // JUMP
+        ]);
+
+        // After_i label for the next comparison
+        instructions.push(self.create_instruction(Opcode::JUMPDEST, None)?);
+
+        Ok(instructions)
     }
 
     /// Updates internal CALL instructions to use tokens instead of selectors
@@ -650,15 +729,41 @@ impl Transform for FunctionDispatcher {
                 base
             );
 
-            // Log all validated selectors
-            for selector_info in &validated_selectors {
+            // Log all validated selectors with coordinate system details
+            debug!("=== Coordinate System Analysis ===");
+            debug!("runtime_start = {:#x}", runtime_start);
+            debug!("best_base = {:#x}", best_base);
+
+            for (i, selector_info) in validated_selectors.iter().enumerate().take(10) {
                 let deployed_target = selector_info.target_address as usize;
-                let original_target_pc = base + deployed_target;
+                let full_bytecode_pc = base + deployed_target;
+                let runtime_relative_pc = if full_bytecode_pc >= runtime_start {
+                    full_bytecode_pc - runtime_start
+                } else {
+                    full_bytecode_pc
+                };
                 debug!(
-                    "  ✓ Selector 0x{:08x} -> 0x{:x} (original PC: 0x{:x})",
-                    selector_info.selector, deployed_target, original_target_pc
+                    "  Selector {}: 0x{:08x}",
+                    i, selector_info.selector
+                );
+                debug!(
+                    "    deployed_target (from detection): {:#x}",
+                    deployed_target
+                );
+                debug!(
+                    "    full_bytecode_pc (base + target): {:#x}",
+                    full_bytecode_pc
+                );
+                debug!(
+                    "    runtime_relative_pc (full - runtime_start): {:#x}",
+                    runtime_relative_pc
+                );
+                debug!(
+                    "    JD exists at full_bytecode_pc: {}",
+                    jumpdests.contains(&(full_bytecode_pc as u32))
                 );
             }
+            debug!("=== End Coordinate Analysis ===");
 
             debug!(
                 "All {} targets validated successfully",
@@ -721,9 +826,13 @@ impl Transform for FunctionDispatcher {
                 }
             }
 
+            // Calculate dispatcher start PC from the actual instruction PC
+            // IMPORTANT: Use all_instructions[start].pc, not block start PC
+            let dispatcher_start_pc = all_instructions[start].pc;
+
             // Generate the complete disguised dispatcher
             let (new_instructions, needed_stack) =
-                self.create_obfuscated_dispatcher(&selectors, &mapping, rng)?;
+                self.create_obfuscated_dispatcher(&selectors, &mapping, base, rng, dispatcher_start_pc, runtime_start)?;
 
             let new_size = self.estimate_bytecode_size(&new_instructions);
             let size_delta = new_size as isize - total_original_size as isize;
@@ -774,13 +883,70 @@ impl Transform for FunctionDispatcher {
             // Update any internal CALL instructions to use tokens
             self.update_internal_calls(ir, &mapping)?;
 
+            // Debug: Count PUSH+JUMP/JUMPI pairs in dispatcher
+            let mut push_jump_count = 0;
+            if let Some((first_block_idx, _, _)) = affected_blocks.first() {
+                if let Block::Body { instructions, .. } = &ir.cfg[*first_block_idx] {
+                    let start_idx = start.saturating_sub(first_block_start);
+                    for i in start_idx..instructions.len().saturating_sub(1) {
+                        if matches!(instructions[i].op, Opcode::PUSH(_))
+                            && matches!(instructions[i + 1].op, Opcode::JUMP | Opcode::JUMPI)
+                        {
+                            push_jump_count += 1;
+                            if let Some(imm) = &instructions[i].imm {
+                                debug!("  PUSH+JUMP/I pair #{}: PUSH {:?} at idx {}", push_jump_count, imm, i);
+                            }
+                        }
+                    }
+                }
+            }
+            debug!("Total PUSH+JUMP/JUMPI pairs in dispatcher block: {}", push_jump_count);
+
             // Update CFG structure and addresses
-            let region_start = first_block_start_pc;
+            // IMPORTANT: Use dispatcher_start_pc, not first_block_start_pc
+            let region_start = dispatcher_start_pc;
             ir.update_jump_targets(size_delta, region_start, None)
                 .map_err(|e| Error::CoreError(e.to_string()))?;
 
             ir.reindex_pcs()
                 .map_err(|e| Error::CoreError(e.to_string()))?;
+
+            // Debug: Verify PC-relative jumps land on JUMPDEST
+            if let Some((first_block_idx, _, _)) = affected_blocks.first() {
+                if let Block::Body { instructions, .. } = &ir.cfg[*first_block_idx] {
+                    let start_idx = start.saturating_sub(first_block_start);
+                    // Find first comparison block and verify PC-relative jump
+                    for i in start_idx..instructions.len().saturating_sub(8) {
+                        if matches!(instructions[i].op, Opcode::DUP(1))
+                            && matches!(instructions[i + 1].op, Opcode::PUSH(4))
+                            && matches!(instructions[i + 4].op, Opcode::PUSH(1))
+                            && matches!(instructions[i + 5].op, Opcode::PC)
+                        {
+                            debug!("=== First Comparison Block After Reindexing ===");
+                            for j in 0..12 {
+                                let instr = &instructions[i + j];
+                                debug!("  [{}] PC=0x{:x} {:?} {:?}", i+j, instr.pc, instr.op, instr.imm);
+                            }
+                            // Calculate where PC-relative jump should land
+                            if let Some(delta_imm) = &instructions[i + 4].imm {
+                                if let Ok(delta) = usize::from_str_radix(delta_imm, 16) {
+                                    let pc_instruction_pc = instructions[i + 5].pc;
+                                    let after_pc_location = pc_instruction_pc + 1; // PC returns next instruction
+                                    let jump_target = after_pc_location + delta;
+                                    let jumpdest_actual_pc = instructions[i + 11].pc;
+                                    debug!("  PC instr at: 0x{:x}", pc_instruction_pc);
+                                    debug!("  PC returns: 0x{:x}", after_pc_location);
+                                    debug!("  Delta: 0x{}", delta_imm);
+                                    debug!("  Calculated jump target: 0x{:x}", jump_target);
+                                    debug!("  Actual JUMPDEST at: 0x{:x}", jumpdest_actual_pc);
+                                    debug!("  Match: {}", jump_target == jumpdest_actual_pc);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
 
             // Rebuild edges for all affected blocks
             for (block_idx, _, _) in &affected_blocks {

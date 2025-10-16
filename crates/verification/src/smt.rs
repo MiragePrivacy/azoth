@@ -3,10 +3,8 @@
 //! This module provides SMT-LIB formula generation and Z3 solver integration
 //! for proving contract equivalence and property preservation.
 
-use crate::formal::semantics::{
-    ContractSemantics, FunctionSemantics, ModificationType, StateModification,
-};
-use crate::{config::SmtConfig, VerificationError, VerificationResult};
+use crate::semantics::{ContractSemantics, FunctionSemantics, ModificationType, StateModification};
+use crate::{Error, VerificationResult};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use z3::{
@@ -18,8 +16,6 @@ use z3::{
 #[derive(Debug)]
 pub struct SmtSolver {
     z3_context: Context,
-    #[allow(dead_code)]
-    config: SmtConfig,
 }
 
 /// SMT formula with declarations and assertions
@@ -78,11 +74,11 @@ impl SmtFormula {
 
 impl SmtSolver {
     /// Create new SMT solver instance
-    pub fn new(config: SmtConfig) -> VerificationResult<Self> {
+    pub fn new() -> VerificationResult<Self> {
         let z3_config = Config::new();
         let z3_context = Context::new(&z3_config);
 
-        Ok(Self { z3_context, config })
+        Ok(Self { z3_context })
     }
 
     /// Check satisfiability of SMT formulas
@@ -128,7 +124,7 @@ impl SmtSolver {
                 // For now, skip declarations as they're handled by our type system
                 Ok(())
             } else {
-                Err(VerificationError::SmtSolver(format!(
+                Err(Error::SmtSolver(format!(
                     "Unsupported formula format: {formula}",
                 )))
             }
@@ -141,9 +137,7 @@ impl SmtSolver {
             let content = &trimmed[8..trimmed.len() - 1].trim();
             Ok(content.to_string())
         } else {
-            Err(VerificationError::SmtSolver(
-                "Invalid assertion format".to_string(),
-            ))
+            Err(Error::SmtSolver("Invalid assertion format".to_string()))
         }
     }
 
@@ -870,19 +864,16 @@ impl SmtSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SmtConfig;
 
     #[tokio::test]
     async fn test_smt_solver_creation() {
-        let config = SmtConfig::default();
-        let solver = SmtSolver::new(config);
+        let solver = SmtSolver::new();
         assert!(solver.is_ok());
     }
 
     #[tokio::test]
     async fn test_basic_formula_parsing() {
-        let config = SmtConfig::default();
-        let solver = SmtSolver::new(config).unwrap();
+        let solver = SmtSolver::new().unwrap();
 
         let formulas = vec![
             "(assert true)".to_string(),
