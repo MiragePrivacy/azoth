@@ -279,3 +279,6 @@ mod deploy;
 
 #[cfg(test)]
 mod escrow;
+
+#[cfg(test)]
+mod test_original;
