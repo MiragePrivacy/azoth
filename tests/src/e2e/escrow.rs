@@ -151,7 +151,10 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         .map(|i| i.pc)
         .collect();
 
-    println!("Obfuscated deployed bytecode has {} JUMPDESTs", jumpdests.len());
+    println!(
+        "Obfuscated deployed bytecode has {} JUMPDESTs",
+        jumpdests.len()
+    );
 
     // Check all PUSH+JUMP/JUMPI pairs
     let mut valid_jumps = 0;
@@ -183,8 +186,22 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     println!("  Total jumps: {}", valid_jumps + invalid_jumps.len());
     println!("  Valid jumps: {}", valid_jumps);
     println!("  Invalid jumps: {}", invalid_jumps.len());
-    
+
     if !invalid_jumps.is_empty() {
+        println!("\n=== Invalid Jump Details (first 10) ===");
+        for (i, (push_pc, target, jump_type)) in invalid_jumps.iter().take(10).enumerate() {
+            println!(
+                "  [{}] PUSH at PC 0x{:x} -> target 0x{:x} ({:?}) - NO JUMPDEST",
+                i, push_pc, target, jump_type
+            );
+        }
+        println!("\n=== All Available JUMPDESTs (first 20) ===");
+        let mut jd_list: Vec<_> = jumpdests.iter().collect();
+        jd_list.sort();
+        for (i, jd) in jd_list.iter().take(20).enumerate() {
+            println!("  [{}] JUMPDEST at PC 0x{:x}", i, jd);
+        }
+
         return Err(eyre!(
             "Found {} invalid jump targets in deployed bytecode! First invalid: PUSH at 0x{:x} -> 0x{:x}",
             invalid_jumps.len(),
@@ -401,7 +418,6 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     println!("✓ Valid tokens route to correct functions");
     println!("✓ Token extraction works with function arguments (bond with uint256)");
     println!("✓ State changes are preserved through obfuscation");
-    println!("✓ No stack underflows detected");
 
     Ok(())
 }

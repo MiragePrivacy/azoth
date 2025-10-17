@@ -289,14 +289,14 @@ impl FunctionDispatcher {
 
         for (idx, selector_info) in selector_order.iter().enumerate() {
             if let Some(token) = mapping.get(&selector_info.selector) {
-                // CRITICAL: For deployed bytecode, jump targets must be relative to runtime start
-                // because when deployed, only the runtime portion is stored on-chain (starting at PC 0).
-                // The selector_info.target_address is already relative to runtime start from detection,
-                // so we use it directly for jump targets.
+                // The selector_info.target_address is a relative offset from the dispatcher detection.
+                // We need to convert it to an absolute PC in the full bytecode by adding base_offset,
+                // which was validated via voting to ensure all targets map to actual JUMPDESTs.
+                // After reindexing, patch_jump_immediates will update these to the new PC locations.
                 let target_for_push = selector_info.target_address;
 
                 // Generate comparison with PC-relative internal jumps
-                let comparison_block = self.create_token_comparison(token, target_for_push, 0)?;
+                let comparison_block = self.create_token_comparison(token, target_for_push, base_offset)?;
 
                 // Debug: log the first comparison block details
                 if idx == 0 {
@@ -365,7 +365,7 @@ impl FunctionDispatcher {
         &self,
         token: &[u8],
         target_address: u64,
-        _cursor_pc: u64, // no longer needed for absolute after_i calc
+        runtime_base: usize,
     ) -> Result<Vec<Instruction>> {
         let mut instructions = Vec::new();
 
@@ -375,10 +375,11 @@ impl FunctionDispatcher {
         // Calculate minimal bytes needed for the target address
         // Using the minimal width avoids overflow issues and works correctly
         // with the PC mapping approach (which patches immediates after reindexing)
-        let target_push_bytes = if target_address == 0 {
+        let absolute_target = runtime_base as u64 + target_address;
+        let target_push_bytes = if absolute_target == 0 {
             1
         } else {
-            ((64 - target_address.leading_zeros()).div_ceil(8) as usize).clamp(1, 32)
+            ((64 - absolute_target.leading_zeros()).div_ceil(8) as usize).clamp(1, 32)
         };
 
         // JUMP distance from the *PC* opcode to the after_i JUMPDEST.
@@ -414,7 +415,7 @@ impl FunctionDispatcher {
         // Match path (fallthrough): clean stack, then jump to target
         instructions.extend(vec![
             self.create_instruction(Opcode::POP, None)?, // []  (remove token)
-            self.create_push_instruction(target_address, Some(target_push_bytes))?, // [target]
+            self.create_push_instruction(absolute_target, Some(target_push_bytes))?, // [absolute target PC]
             self.create_instruction(Opcode::JUMP, None)?, // JUMP
         ]);
 
@@ -827,10 +828,6 @@ impl Transform for FunctionDispatcher {
                 }
             }
 
-            // Calculate dispatcher start PC from the actual instruction PC
-            // IMPORTANT: Use all_instructions[start].pc, not block start PC
-            let dispatcher_start_pc = all_instructions[start].pc;
-
             // Generate the complete disguised dispatcher
             let (new_instructions, needed_stack) =
                 self.create_obfuscated_dispatcher(&selectors, &mapping, base, runtime_start, rng)?;
@@ -854,7 +851,6 @@ impl Transform for FunctionDispatcher {
                 if let Block::Body {
                     instructions,
                     max_stack,
-                    start_pc,
                     ..
                 } = &mut ir.cfg[*block_idx]
                 {
@@ -898,10 +894,33 @@ impl Transform for FunctionDispatcher {
                 }
             }
 
+            // Remove empty blocks from the CFG to avoid PC reindexing issues
+            debug!("=== Removing Empty Blocks ===");
+            let empty_blocks: Vec<_> = affected_blocks
+                .iter()
+                .filter(|(block_idx, _, _)| {
+                    if let Some(Block::Body { instructions, .. }) = ir.cfg.node_weight(*block_idx) {
+                        instructions.is_empty()
+                    } else {
+                        false
+                    }
+                })
+                .map(|(block_idx, _, _)| *block_idx)
+                .collect();
+
+            for block_idx in &empty_blocks {
+                debug!("  Removing empty block {}", block_idx.index());
+                ir.cfg.remove_node(*block_idx);
+            }
+
+            // Update affected_blocks to exclude removed blocks
+            affected_blocks.retain(|(block_idx, _, _)| !empty_blocks.contains(block_idx));
+            debug!("  Removed {} empty blocks, {} affected blocks remain", empty_blocks.len(), affected_blocks.len());
+
             // Insert the disguised dispatcher into the first affected block
             debug!("=== Inserting New Dispatcher ===");
             let (first_block_idx, first_block_start, first_block_pc) = affected_blocks[0];
-            if let Block::Body { instructions, start_pc, .. } = &mut ir.cfg[first_block_idx] {
+            if let Block::Body { instructions, .. } = &mut ir.cfg[first_block_idx] {
                 let insertion_point = start.saturating_sub(first_block_start);
                 debug!(
                     "  Inserting into block {} (PC 0x{:x}, all_instrs offset {})",
@@ -979,7 +998,7 @@ impl Transform for FunctionDispatcher {
                 .collect();
             blocks_before.sort_by_key(|(_, pc, _)| *pc);
 
-            for (i, (idx, pc, len)) in blocks_before.iter().take(10).enumerate() {
+            for &(idx, pc, len) in blocks_before.iter().take(10) {
                 debug!("  Block {}: start_pc=0x{:x}, {} instrs", idx, pc, len);
             }
             debug!("  ... ({} total blocks)", blocks_before.len());
@@ -1012,14 +1031,13 @@ impl Transform for FunctionDispatcher {
                 .collect();
             blocks_after.sort_by_key(|(_, pc, _)| *pc);
 
-            for (i, (idx, new_pc, len)) in blocks_after.iter().take(10).enumerate() {
+            for &(idx, new_pc, len) in blocks_after.iter().take(10) {
                 // Find the old PC for this block
                 let old_pc = blocks_before
                     .iter()
-                    .find(|(b_idx, _, _)| b_idx == idx)
-                    .map(|(_, pc, _)| *pc)
+                    .find_map(|&(b_idx, pc, _)| (b_idx == idx).then_some(pc))
                     .unwrap_or(0);
-                let shift = *new_pc as isize - old_pc as isize;
+                let shift = new_pc as isize - old_pc as isize;
                 debug!(
                     "  Block {}: 0x{:x} -> 0x{:x} (shift: {:+}), {} instrs",
                     idx, old_pc, new_pc, shift, len

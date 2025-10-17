@@ -109,7 +109,10 @@ async fn test_original_is_bonded() -> Result<()> {
         .map(|i| i.pc)
         .collect();
 
-    println!("Original deployed bytecode has {} JUMPDESTs", jumpdests.len());
+    println!(
+        "Original deployed bytecode has {} JUMPDESTs",
+        jumpdests.len()
+    );
 
     // Check all PUSH+JUMP/JUMPI pairs
     let mut valid_jumps = 0;
