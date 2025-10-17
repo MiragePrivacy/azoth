@@ -3,6 +3,7 @@ use clap::Subcommand;
 use std::error::Error;
 
 pub mod cfg;
+pub mod debug;
 pub mod decode;
 pub mod obfuscate;
 pub mod strip;
@@ -43,6 +44,8 @@ pub enum Cmd {
     Cfg(cfg::CfgArgs),
     /// Obfuscate bytecode with specified transforms
     Obfuscate(obfuscate::ObfuscateArgs),
+    /// Debug transformation mappings with interactive TUI
+    Debug(debug::DebugArgs),
 }
 
 /// Trait for executing CLI subcommands.
@@ -66,6 +69,7 @@ impl Command for Cmd {
             Cmd::Strip(args) => args.execute().await,
             Cmd::Cfg(args) => args.execute().await,
             Cmd::Obfuscate(args) => args.execute().await,
+            Cmd::Debug(args) => args.execute().await,
         }
     }
 }

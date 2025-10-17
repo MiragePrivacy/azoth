@@ -40,6 +40,16 @@ impl Transform for Shuffle {
             return Ok(false);
         }
 
+        // Create mapping from old PC to logical_id to preserve block identity
+        let mut pc_to_logical_id = HashMap::new();
+        for (_, block) in &blocks {
+            if let Block::Body { logical_id, instructions, .. } = block {
+                for instruction in instructions {
+                    pc_to_logical_id.insert(instruction.pc, *logical_id);
+                }
+            }
+        }
+
         let mut new_instrs = Vec::new();
         let mut program_counter_mapping = HashMap::new();
         let mut current_pc = 0;
@@ -70,7 +80,8 @@ impl Transform for Shuffle {
             }
         }
 
-        ir.replace_body(new_instrs, &[])
+        // Use the new method that preserves logical_ids
+        ir.replace_body_preserving_logical_ids(new_instrs, &[], &pc_to_logical_id)
             .map_err(|e| Error::CoreError(e.to_string()))?;
         Ok(true)
     }

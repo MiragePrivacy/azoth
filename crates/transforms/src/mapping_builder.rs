@@ -29,12 +29,13 @@ pub fn extract_snapshot(cfg_ir: &CfgIrBundle) -> BytecodeSnapshot {
         .node_indices()
         .filter_map(|idx| {
             if let Block::Body {
+                logical_id,
                 start_pc,
                 instructions,
                 ..
             } = &cfg_ir.cfg[idx]
             {
-                Some((idx.index(), *start_pc, instructions.clone()))
+                Some((*logical_id, *start_pc, instructions.clone()))
             } else {
                 None
             }
@@ -43,18 +44,18 @@ pub fn extract_snapshot(cfg_ir: &CfgIrBundle) -> BytecodeSnapshot {
 
     body_blocks.sort_by_key(|(_, start_pc, _)| *start_pc);
 
-    for (block_id, start_pc, instructions) in body_blocks {
+    for (logical_id, start_pc, instructions) in body_blocks {
         let instruction_count = instructions.len();
         let byte_size: usize = instructions.iter().map(|i| i.byte_size()).sum();
         let end_pc = start_pc + byte_size;
 
         let instruction_infos: Vec<InstructionInfo> = instructions
             .iter()
-            .map(|instr| instruction_to_info(instr))
+            .map(instruction_to_info)
             .collect();
 
         blocks.push(BlockInfo {
-            block_id,
+            block_id: logical_id,
             start_pc,
             end_pc,
             instruction_count,
