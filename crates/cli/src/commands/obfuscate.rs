@@ -37,6 +37,9 @@ pub struct ObfuscateArgs {
     /// Path to emit gas/size report as JSON (optional).
     #[arg(long)]
     emit: Option<String>,
+    /// Path to emit bytecode transformation mappings as JSON (optional).
+    #[arg(long)]
+    emit_mappings: Option<String>,
 }
 
 /// Executes the `obfuscate` subcommand using the unified obfuscation pipeline.
@@ -67,6 +70,7 @@ impl super::Command for ObfuscateArgs {
             max_opaque_ratio: 0.5,
         };
         config.preserve_unknown_opcodes = true;
+        config.generate_mappings = self.emit_mappings.is_some();
 
         // Step 4: Run obfuscation pipeline
         let result = match obfuscate_bytecode(&input_bytecode, config).await {
@@ -94,7 +98,20 @@ impl super::Command for ObfuscateArgs {
             println!("📊 Wrote gas/size report to {}", &path);
         }
 
-        // Step 8: Output final bytecode
+        // Step 8: Write transformation mappings if requested
+        if let Some(path) = self.emit_mappings {
+            if let Some(ref mapping) = result.transformation_mapping {
+                let mapping_json = mapping
+                    .to_json_pretty()
+                    .map_err(|e| format!("Failed to serialize mappings: {e}"))?;
+                fs::write(&path, mapping_json)?;
+                println!("🗺️  Wrote transformation mappings to {}", &path);
+            } else {
+                println!("⚠️  Warning: No transformation mappings available (this shouldn't happen)");
+            }
+        }
+
+        // Step 9: Output final bytecode
         println!("{}", result.obfuscated_bytecode);
 
         Ok(())

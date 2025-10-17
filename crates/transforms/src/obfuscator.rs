@@ -1,4 +1,6 @@
 use crate::function_dispatcher::FunctionDispatcher;
+use crate::mapping::ObfuscationMapping;
+use crate::mapping_builder;
 use crate::{PassConfig, Transform};
 use azoth_core::seed::Seed;
 use azoth_core::{cfg_ir, decoder, detection, encoder, process_bytecode_to_cfg, Opcode};
@@ -16,6 +18,8 @@ pub struct ObfuscationConfig {
     pub pass_config: PassConfig,
     /// Whether to preserve unknown opcodes
     pub preserve_unknown_opcodes: bool,
+    /// Whether to generate transformation mappings
+    pub generate_mappings: bool,
 }
 
 impl ObfuscationConfig {
@@ -26,6 +30,7 @@ impl ObfuscationConfig {
             transforms: Vec::new(),
             pass_config: PassConfig::default(),
             preserve_unknown_opcodes: true,
+            generate_mappings: false,
         }
     }
 }
@@ -37,6 +42,7 @@ impl Default for ObfuscationConfig {
             transforms: Vec::new(),
             pass_config: PassConfig::default(),
             preserve_unknown_opcodes: true,
+            generate_mappings: false,
         }
     }
 }
@@ -50,6 +56,7 @@ impl std::fmt::Debug for ObfuscationConfig {
             )
             .field("pass_config", &self.pass_config)
             .field("preserve_unknown_opcodes", &self.preserve_unknown_opcodes)
+            .field("generate_mappings", &self.generate_mappings)
             .finish()
     }
 }
@@ -61,7 +68,7 @@ pub struct ObfuscationResult {
     pub obfuscated_bytecode: String,
     /// Original bytecode size in bytes
     pub original_size: usize,
-    /// Obfuscated bytecode size in bytes  
+    /// Obfuscated bytecode size in bytes
     pub obfuscated_size: usize,
     /// Size increase as percentage
     pub size_increase_percentage: f64,
@@ -79,6 +86,9 @@ pub struct ObfuscationResult {
     pub metadata: ObfuscationMetadata,
     /// Mapping from original selectors to tokens (if token dispatcher was applied)
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
+    /// Detailed transformation mapping (if generate_mappings was enabled)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transformation_mapping: Option<ObfuscationMapping>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +209,14 @@ pub async fn obfuscate_bytecode(
     let mut transform_change_log = Vec::new();
     let mut any_transform_changed = false;
 
+    // Initialize mapping if requested
+    let mut obfuscation_mapping = if config.generate_mappings {
+        let original_hex = hex::encode(&bytes);
+        Some(ObfuscationMapping::new(original_hex, original_size))
+    } else {
+        None
+    };
+
     if !all_transforms.is_empty() {
         // Create deterministic RNG from cryptographic seed
         let mut shared_rng = config.seed.create_deterministic_rng();
@@ -217,6 +235,13 @@ pub async fn obfuscate_bytecode(
                 pre_block_count,
                 pre_instruction_count
             );
+
+            // Capture snapshot before transform (if generating mappings)
+            let before_snapshot = if config.generate_mappings {
+                Some(mapping_builder::extract_snapshot(&cfg_ir))
+            } else {
+                None
+            };
 
             // Apply transform with deterministic RNG
             let transform_changed = match transform.apply(&mut cfg_ir, &mut shared_rng) {
@@ -248,6 +273,28 @@ pub async fn obfuscate_bytecode(
                 post_instruction_count,
                 instructions_delta
             );
+
+            // Capture snapshot after transform and record step (if generating mappings)
+            if config.generate_mappings {
+                let after_snapshot = mapping_builder::extract_snapshot(&cfg_ir);
+
+                // Use the PC mapping captured by the transform during reindex_pcs()
+                let pc_mapping = cfg_ir.last_pc_mapping.clone();
+
+                let transform_step = mapping_builder::create_transform_step(
+                    transform_name.to_string(),
+                    i,
+                    transform_changed,
+                    before_snapshot.unwrap(),
+                    after_snapshot,
+                    pc_mapping,
+                    &cfg_ir,
+                );
+
+                if let Some(ref mut mapping) = obfuscation_mapping {
+                    mapping.add_step(transform_step);
+                }
+            }
         }
     }
 
@@ -347,7 +394,13 @@ pub async fn obfuscate_bytecode(
         false
     };
 
-    // Step 11: Build result
+    // Step 11: Finalize mapping if generated
+    if let Some(ref mut mapping) = obfuscation_mapping {
+        let final_hex = hex::encode(&final_bytecode);
+        mapping.finalize(final_hex, obfuscated_size);
+    }
+
+    // Step 12: Build result
     Ok(ObfuscationResult {
         obfuscated_bytecode: format!("0x{}", hex::encode(&final_bytecode)),
         original_size,
@@ -364,6 +417,7 @@ pub async fn obfuscate_bytecode(
             unknown_opcodes_preserved: config.preserve_unknown_opcodes,
         },
         selector_mapping: cfg_ir.selector_mapping, // Extract from CFG bundle
+        transformation_mapping: obfuscation_mapping,
     })
 }
 

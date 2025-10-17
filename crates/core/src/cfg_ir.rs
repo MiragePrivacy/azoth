@@ -84,6 +84,9 @@ pub struct CfgIrBundle {
     /// Mapping of original function selectors to obfuscated tokens.
     /// Only populated when token-based dispatcher transform is applied.
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
+    /// Last PC mapping from the most recent reindexing operation.
+    /// Maps old PC → new PC after structural changes.
+    pub last_pc_mapping: HashMap<usize, usize>,
 }
 
 /// Builds a CFG with IR in SSA form from decoded instructions and sections.
@@ -135,6 +138,7 @@ pub fn build_cfg_ir(
         clean_report: report,
         sections: sections.to_vec(),
         selector_mapping: None, // Initially empty, set by transforms
+        last_pc_mapping: HashMap::new(), // Initially empty
     })
 }
 
@@ -161,6 +165,7 @@ impl CfgIrBundle {
         self.clean_report = new_bundle.clean_report;
         self.sections = new_bundle.sections;
         self.selector_mapping = selector_mapping; // Restore mapping
+        self.last_pc_mapping = HashMap::new(); // Reset after rebuild
 
         Ok(())
     }
@@ -633,6 +638,9 @@ impl CfgIrBundle {
 
         // Update the pc_to_block mapping
         self.pc_to_block = new_pc_to_block;
+
+        // Store the mapping for external access
+        self.last_pc_mapping = pc_map.clone();
 
         tracing::debug!(
             "PC reindexing complete. Total bytecode size: {} bytes, {} PC mappings",
