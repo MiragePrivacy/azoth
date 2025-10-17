@@ -216,7 +216,8 @@ impl Transform for OpaquePredicate {
         if changed {
             debug!("Inserted {} opaque predicates", predicate_count);
             debug!("Reindexing PCs...");
-            ir.reindex_pcs()
+            let _ = ir
+                .reindex_pcs()
                 .map_err(|e| Error::CoreError(e.to_string()))?;
             debug!("=== OpaquePredicate Transform Complete ===");
         }

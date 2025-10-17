@@ -8,9 +8,7 @@ use super::{
     mock_token_bytecode, prepare_bytecode, EscrowMappings, ObfuscatedCaller,
     ESCROW_CONTRACT_BYTECODE, MOCK_TOKEN_ADDR,
 };
-use azoth_core::seed::Seed;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
-use azoth_transform::PassConfig;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use revm::bytecode::Bytecode;
@@ -29,13 +27,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         .try_init();
 
     // obfuscate contract
-    let seed = Seed::generate();
-    let config = ObfuscationConfig {
-        seed,
-        transforms: vec![],
-        pass_config: PassConfig::default(),
-        preserve_unknown_opcodes: true,
-    };
+    let config = ObfuscationConfig::default();
 
     let obfuscation_result = obfuscate_bytecode(ESCROW_CONTRACT_BYTECODE, config)
         .await
@@ -47,10 +39,6 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         obfuscation_result.obfuscated_size,
         obfuscation_result.size_increase_percentage
     );
-
-    // Debug: Print first 500 bytes of obfuscated bytecode
-    let obf_hex = hex::encode(&obfuscation_result.obfuscated_bytecode);
-    println!("{}", obf_hex);
 
     // extracting selector mappings
     let selector_mapping = obfuscation_result
@@ -134,6 +122,78 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     };
 
     println!("✓ Obfuscated contract deployed at: {}", contract_address);
+
+    // Validate all PUSH+JUMP pairs in deployed bytecode
+    println!("\n=== Validating Deployed Bytecode ===");
+    let deployed_code = evm
+        .db()
+        .cache
+        .accounts
+        .get(&contract_address)
+        .and_then(|acc| acc.info.code.as_ref())
+        .ok_or_else(|| eyre!("Failed to get deployed code"))?;
+
+    let deployed_bytes = match deployed_code {
+        Bytecode::LegacyAnalyzed(analyzed) => analyzed.bytecode(),
+        _ => return Err(eyre!("Unexpected bytecode format")),
+    };
+
+    // Decode and validate
+    let (deployed_instructions, _, _, _) =
+        azoth_core::decoder::decode_bytecode(&hex::encode(deployed_bytes), false)
+            .await
+            .map_err(|e| eyre!("Failed to decode deployed bytecode: {:?}", e))?;
+
+    // Find all JUMPDESTs
+    let jumpdests: std::collections::HashSet<usize> = deployed_instructions
+        .iter()
+        .filter(|i| matches!(i.op, azoth_core::Opcode::JUMPDEST))
+        .map(|i| i.pc)
+        .collect();
+
+    println!("Obfuscated deployed bytecode has {} JUMPDESTs", jumpdests.len());
+
+    // Check all PUSH+JUMP/JUMPI pairs
+    let mut valid_jumps = 0;
+    let mut invalid_jumps = Vec::new();
+    for i in 0..deployed_instructions.len().saturating_sub(1) {
+        let curr = &deployed_instructions[i];
+        let next = &deployed_instructions[i + 1];
+
+        if matches!(curr.op, azoth_core::Opcode::PUSH(_))
+            && matches!(
+                next.op,
+                azoth_core::Opcode::JUMP | azoth_core::Opcode::JUMPI
+            )
+        {
+            if let Some(target_hex) = &curr.imm {
+                if let Ok(target) = usize::from_str_radix(target_hex, 16) {
+                    let has_jumpdest = jumpdests.contains(&target);
+                    if has_jumpdest {
+                        valid_jumps += 1;
+                    } else {
+                        invalid_jumps.push((curr.pc, target, next.op));
+                    }
+                }
+            }
+        }
+    }
+
+    println!("Obfuscated deployed bytecode jump statistics:");
+    println!("  Total jumps: {}", valid_jumps + invalid_jumps.len());
+    println!("  Valid jumps: {}", valid_jumps);
+    println!("  Invalid jumps: {}", invalid_jumps.len());
+    
+    if !invalid_jumps.is_empty() {
+        return Err(eyre!(
+            "Found {} invalid jump targets in deployed bytecode! First invalid: PUSH at 0x{:x} -> 0x{:x}",
+            invalid_jumps.len(),
+            invalid_jumps[0].0,
+            invalid_jumps[0].1
+        ));
+    }
+
+    println!("✓ All PUSH+JUMP pairs target valid JUMPDESTs\n");
 
     let caller = ObfuscatedCaller::new(escrow_mappings);
 

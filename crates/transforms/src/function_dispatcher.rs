@@ -268,7 +268,7 @@ impl FunctionDispatcher {
         selectors: &[FunctionSelector],
         mapping: &HashMap<u32, Vec<u8>>,
         base_offset: usize,
-        runtime_start: usize,
+        _runtime_start: usize,
         rng: &mut StdRng,
     ) -> Result<(Vec<Instruction>, usize)> {
         let mut instructions = Vec::new();
@@ -289,15 +289,14 @@ impl FunctionDispatcher {
 
         for (idx, selector_info) in selector_order.iter().enumerate() {
             if let Some(token) = mapping.get(&selector_info.selector) {
-                // Calculate absolute full bytecode PC
-                let absolute_target_pc = base_offset as u64 + selector_info.target_address;
-
-                // Convert to runtime-relative for deployed bytecode
-                let target_for_push = absolute_target_pc - runtime_start as u64;
+                // CRITICAL: For deployed bytecode, jump targets must be relative to runtime start
+                // because when deployed, only the runtime portion is stored on-chain (starting at PC 0).
+                // The selector_info.target_address is already relative to runtime start from detection,
+                // so we use it directly for jump targets.
+                let target_for_push = selector_info.target_address;
 
                 // Generate comparison with PC-relative internal jumps
-                let comparison_block =
-                    self.create_token_comparison_clean(token, target_for_push, 0)?;
+                let comparison_block = self.create_token_comparison(token, target_for_push, 0)?;
 
                 // Debug: log the first comparison block details
                 if idx == 0 {
@@ -306,11 +305,7 @@ impl FunctionDispatcher {
                         selector_info.selector
                     );
                     debug!("  Token: 0x{}", hex::encode(token));
-                    debug!("  Absolute target PC: 0x{:x}", absolute_target_pc);
-                    debug!(
-                        "  Runtime-relative target (for PUSH): 0x{:x}",
-                        target_for_push
-                    );
+                    debug!("  Runtime-relative target PC (for PUSH): 0x{:x}", target_for_push);
                     debug!("  Comparison block instructions:");
                     for (i, instr) in comparison_block.iter().enumerate() {
                         debug!("    [{}] {:?} {:?}", i, instr.op, instr.imm);
@@ -366,7 +361,7 @@ impl FunctionDispatcher {
     ///
     /// PC-relative jumps avoid relocation by update_jump_targets, while absolute
     /// function target jumps get properly relocated.
-    fn create_token_comparison_clean(
+    fn create_token_comparison(
         &self,
         token: &[u8],
         target_address: u64,
@@ -377,7 +372,9 @@ impl FunctionDispatcher {
         let token_size = token.len().clamp(1, 32);
         let token_hex = hex::encode(token);
 
-        // How many bytes to PUSH for the target address
+        // Calculate minimal bytes needed for the target address
+        // Using the minimal width avoids overflow issues and works correctly
+        // with the PC mapping approach (which patches immediates after reindexing)
         let target_push_bytes = if target_address == 0 {
             1
         } else {
@@ -387,7 +384,7 @@ impl FunctionDispatcher {
         // JUMP distance from the *PC* opcode to the after_i JUMPDEST.
         // Layout after ISZERO:
         //   PUSH delta
-        //   PC                   // <-- PC at position p, returns p+1 (next instruction address)
+        //   PC                   // <-- PC at position p, returns p (its own address, per EVM spec)
         //   ADD                  // at p+1
         //   SWAP1                // at p+2
         //   JUMPI                // at p+3
@@ -396,8 +393,8 @@ impl FunctionDispatcher {
         //   JUMP                 // at p+6+n
         //   JUMPDEST             // at p+7+n <-- landing target
         //
-        // PC returns p+1, so delta = (p+7+n) - (p+1) = 6 + n
-        let delta_to_after: u64 = (6 + target_push_bytes) as u64;
+        // PC returns p (its own address), so delta = (p+7+n) - p = 7 + n
+        let delta_to_after: u64 = (7 + target_push_bytes) as u64;
 
         // Comparison (keeps stack tidy for both paths)
         instructions.extend(vec![
@@ -737,27 +734,19 @@ impl Transform for FunctionDispatcher {
             debug!("=== Coordinate System Analysis ===");
             debug!("runtime_start = {:#x}", runtime_start);
             debug!("best_base = {:#x}", best_base);
+            debug!("IMPORTANT: Jump targets use runtime-relative PCs for deployed bytecode compatibility");
 
             for (i, selector_info) in validated_selectors.iter().enumerate().take(10) {
-                let deployed_target = selector_info.target_address as usize;
-                let full_bytecode_pc = base + deployed_target;
-                let runtime_relative_pc = if full_bytecode_pc >= runtime_start {
-                    full_bytecode_pc - runtime_start
-                } else {
-                    full_bytecode_pc
-                };
+                let runtime_relative_target = selector_info.target_address as usize;
+                let full_bytecode_pc = base + runtime_relative_target;
                 debug!("  Selector {}: 0x{:08x}", i, selector_info.selector);
                 debug!(
-                    "    deployed_target (from detection): {:#x}",
-                    deployed_target
+                    "    Runtime-relative target (used in PUSH): {:#x}",
+                    runtime_relative_target
                 );
                 debug!(
-                    "    full_bytecode_pc (base + target): {:#x}",
+                    "    Full bytecode PC (base + target): {:#x}",
                     full_bytecode_pc
-                );
-                debug!(
-                    "    runtime_relative_pc (full - runtime_start): {:#x}",
-                    runtime_relative_pc
                 );
                 debug!(
                     "    JD exists at full_bytecode_pc: {}",
@@ -778,6 +767,10 @@ impl Transform for FunctionDispatcher {
 
             // Find which blocks contain the dispatcher
             let mut affected_blocks = Vec::new();
+            debug!("=== Calculating Affected Blocks ===");
+            debug!("Dispatcher range in all_instructions: [{}..{})", start, end);
+            debug!("Total blocks to check: {}", block_boundaries.len());
+
             for (node_idx, block_start, start_pc) in block_boundaries {
                 let block_instructions = if let Block::Body { instructions, .. } = &ir.cfg[node_idx]
                 {
@@ -787,15 +780,22 @@ impl Transform for FunctionDispatcher {
                 };
 
                 let block_end = block_start + block_instructions;
-                if block_start < end && block_end > start {
+                let is_affected = block_start < end && block_end > start;
+
+                debug!(
+                    "Block {} (PC 0x{:x}): all_instrs[{}..{}) - {}",
+                    node_idx.index(),
+                    start_pc,
+                    block_start,
+                    block_end,
+                    if is_affected { "AFFECTED" } else { "skipped" }
+                );
+
+                if is_affected {
                     affected_blocks.push((node_idx, block_start, start_pc));
-                    debug!(
-                        "Block {} is affected (PC 0x{:x})",
-                        node_idx.index(),
-                        start_pc
-                    );
                 }
             }
+            debug!("=== Total Affected Blocks: {} ===", affected_blocks.len());
 
             if affected_blocks.is_empty() {
                 debug!("No affected blocks found - skipping");
@@ -843,14 +843,25 @@ impl Transform for FunctionDispatcher {
                 total_original_size, new_size, size_delta
             );
 
+            // Note: Jump validation is performed on deployed bytecode in the test suite
+            // since the CFG contains full bytecode (init + runtime) with different PC coordinates
+            // than what gets deployed (runtime only). See tests/src/e2e/escrow.rs for validation.
+
             // Clear original dispatcher sections from all affected blocks
-            for (block_idx, block_start, _) in &affected_blocks {
+            debug!("=== Draining Old Dispatcher ===");
+            let mut orig_len_first = 0;
+            for (idx, (block_idx, block_start, block_pc)) in affected_blocks.iter().enumerate() {
                 if let Block::Body {
                     instructions,
                     max_stack,
+                    start_pc,
                     ..
                 } = &mut ir.cfg[*block_idx]
                 {
+                    let orig_len = instructions.len();
+                    if idx == 0 {
+                        orig_len_first = orig_len;
+                    }
                     let block_dispatcher_start = if start >= *block_start {
                         start - block_start
                     } else {
@@ -862,24 +873,61 @@ impl Transform for FunctionDispatcher {
                         0
                     };
 
+                    debug!(
+                        "  Affected block {}/{}: node_idx={}, PC=0x{:x}, all_instrs offset={}, {} instructions",
+                        idx + 1,
+                        affected_blocks.len(),
+                        block_idx.index(),
+                        block_pc,
+                        block_start,
+                        orig_len
+                    );
+                    debug!(
+                        "    Draining indices [{}..{}) from block",
+                        block_dispatcher_start,
+                        block_dispatcher_end
+                    );
+
                     if block_dispatcher_start < instructions.len()
                         && block_dispatcher_end > block_dispatcher_start
                     {
                         instructions.drain(block_dispatcher_start..block_dispatcher_end);
+                        debug!("    After drain: {} instructions remain", instructions.len());
                         *max_stack = (*max_stack).max(needed_stack);
                     }
                 }
             }
 
             // Insert the disguised dispatcher into the first affected block
-            let (first_block_idx, first_block_start, _) = affected_blocks[0];
-            let num_dispatcher_instructions = new_instructions.len();
-            if let Block::Body { instructions, .. } = &mut ir.cfg[first_block_idx] {
+            debug!("=== Inserting New Dispatcher ===");
+            let (first_block_idx, first_block_start, first_block_pc) = affected_blocks[0];
+            if let Block::Body { instructions, start_pc, .. } = &mut ir.cfg[first_block_idx] {
                 let insertion_point = start.saturating_sub(first_block_start);
+                debug!(
+                    "  Inserting into block {} (PC 0x{:x}, all_instrs offset {})",
+                    first_block_idx.index(),
+                    first_block_pc,
+                    first_block_start
+                );
+                debug!(
+                    "    Insertion point: index {} (start={}, first_block_start={})",
+                    insertion_point, start, first_block_start
+                );
+                debug!(
+                    "    Block before insert: {} instructions",
+                    instructions.len()
+                );
 
                 for (i, new_instruction) in new_instructions.into_iter().enumerate() {
                     instructions.insert(insertion_point + i, new_instruction);
                 }
+
+                let net_change = instructions.len() as isize - orig_len_first as isize + (end - start) as isize;
+                debug!(
+                    "    Block after insert: {} instructions (net change: {:+})",
+                    instructions.len(),
+                    net_change
+                );
             }
 
             // Update any internal CALL instructions to use tokens
@@ -910,13 +958,78 @@ impl Transform for FunctionDispatcher {
                 push_jump_count
             );
 
-            // Update CFG structure and addresses
-            // IMPORTANT: Use dispatcher_start_pc, not first_block_start_pc
-            let region_start = dispatcher_start_pc;
-            ir.update_jump_targets(size_delta, region_start, None)
+            // Update CFG structure and addresses using PC mapping approach
+            // First, log all block PCs BEFORE reindexing
+            debug!("=== Block PCs Before Reindexing ===");
+            let mut blocks_before: Vec<_> = ir
+                .cfg
+                .node_indices()
+                .filter_map(|idx| {
+                    if let Block::Body {
+                        start_pc,
+                        instructions,
+                        ..
+                    } = &ir.cfg[idx]
+                    {
+                        Some((idx.index(), *start_pc, instructions.len()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            blocks_before.sort_by_key(|(_, pc, _)| *pc);
+
+            for (i, (idx, pc, len)) in blocks_before.iter().take(10).enumerate() {
+                debug!("  Block {}: start_pc=0x{:x}, {} instrs", idx, pc, len);
+            }
+            debug!("  ... ({} total blocks)", blocks_before.len());
+
+            // First reindex to get the old→new PC mapping
+            debug!("=== Reindexing PCs and getting old→new mapping ===");
+            let pc_map = ir
+                .reindex_pcs()
                 .map_err(|e| Error::CoreError(e.to_string()))?;
 
-            ir.reindex_pcs()
+            debug!("PC mapping generated with {} entries", pc_map.len());
+
+            // Log all block PCs AFTER reindexing
+            debug!("=== Block PCs After Reindexing ===");
+            let mut blocks_after: Vec<_> = ir
+                .cfg
+                .node_indices()
+                .filter_map(|idx| {
+                    if let Block::Body {
+                        start_pc,
+                        instructions,
+                        ..
+                    } = &ir.cfg[idx]
+                    {
+                        Some((idx.index(), *start_pc, instructions.len()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            blocks_after.sort_by_key(|(_, pc, _)| *pc);
+
+            for (i, (idx, new_pc, len)) in blocks_after.iter().take(10).enumerate() {
+                // Find the old PC for this block
+                let old_pc = blocks_before
+                    .iter()
+                    .find(|(b_idx, _, _)| b_idx == idx)
+                    .map(|(_, pc, _)| *pc)
+                    .unwrap_or(0);
+                let shift = *new_pc as isize - old_pc as isize;
+                debug!(
+                    "  Block {}: 0x{:x} -> 0x{:x} (shift: {:+}), {} instrs",
+                    idx, old_pc, new_pc, shift, len
+                );
+            }
+            debug!("  ... ({} total blocks)", blocks_after.len());
+
+            // Now patch all jump immediates using the precise PC mapping
+            debug!("Patching jump immediates with PC mapping...");
+            ir.patch_jump_immediates(&pc_map)
                 .map_err(|e| Error::CoreError(e.to_string()))?;
 
             // Debug: Verify PC-relative jumps land on JUMPDEST
@@ -945,7 +1058,7 @@ impl Transform for FunctionDispatcher {
                             if let Some(delta_imm) = &instructions[i + 4].imm {
                                 if let Ok(delta) = usize::from_str_radix(delta_imm, 16) {
                                     let pc_instruction_pc = instructions[i + 5].pc;
-                                    let after_pc_location = pc_instruction_pc + 1; // PC returns next instruction
+                                    let after_pc_location = pc_instruction_pc; // PC returns its own address (per EVM spec)
                                     let jump_target = after_pc_location + delta;
                                     let jumpdest_actual_pc = instructions[i + 12].pc;
                                     debug!("  PC instr at: 0x{:x}", pc_instruction_pc);

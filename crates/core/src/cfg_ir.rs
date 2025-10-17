@@ -565,21 +565,26 @@ impl Block {
 }
 
 impl CfgIrBundle {
-    /// Reindexes all PC values after bytecode modifications.
+    /// Reindexes all PC values after bytecode modifications and returns the old→new PC mapping.
     ///
     /// This method recalculates program counters for all instructions in all blocks,
     /// maintaining the correct sequential order and updating the pc_to_block mapping.
     /// Should be called after any transform that changes instruction sequences.
     ///
+    /// The returned mapping can be used to patch jump immediates that reference absolute
+    /// PCs to ensure they point to the correct locations after reindexing.
+    ///
     /// # Returns
-    /// A `Result` indicating success or a `Error` if reindexing fails.
-    pub fn reindex_pcs(&mut self) -> Result<(), Error> {
+    /// A `Result` containing a `HashMap` mapping old PC values to new PC values, or an
+    /// `Error` if reindexing fails.
+    pub fn reindex_pcs(&mut self) -> Result<HashMap<usize, usize>, Error> {
         tracing::debug!(
             "Starting PC reindexing for {} blocks",
             self.cfg.node_count()
         );
 
         let mut new_pc_to_block = HashMap::new();
+        let mut pc_map = HashMap::new();
         let mut current_pc = 0;
 
         // Get all body blocks sorted by their original start_pc to maintain order
@@ -598,7 +603,7 @@ impl CfgIrBundle {
         blocks_with_indices.sort_by_key(|(_, start_pc)| *start_pc);
 
         // Reindex each block's instructions
-        for (node_idx, _) in blocks_with_indices {
+        for (node_idx, old_start_pc) in blocks_with_indices {
             if let Block::Body {
                 instructions,
                 start_pc,
@@ -609,15 +614,18 @@ impl CfgIrBundle {
                 new_pc_to_block.insert(new_start_pc, node_idx);
 
                 for instruction in instructions.iter_mut() {
+                    // Record old→new PC mapping BEFORE we overwrite
+                    pc_map.insert(instruction.pc, current_pc);
                     instruction.pc = current_pc;
-                    current_pc += instruction.byte_size(); // ← Much cleaner!
+                    current_pc += instruction.byte_size();
                 }
 
                 // Update block's start_pc
                 *start_pc = new_start_pc;
                 tracing::debug!(
-                    "Reindexed block {}: new start_pc = 0x{:x}",
+                    "Reindexed block {}: old start_pc 0x{:x} -> new start_pc 0x{:x}",
                     node_idx.index(),
+                    old_start_pc,
                     new_start_pc
                 );
             }
@@ -626,14 +634,12 @@ impl CfgIrBundle {
         // Update the pc_to_block mapping
         self.pc_to_block = new_pc_to_block;
 
-        // Patch jump immediates to point to new addresses
-        self.patch_jump_immediates()?;
-
         tracing::debug!(
-            "PC reindexing complete. Total bytecode size: {} bytes",
-            current_pc
+            "PC reindexing complete. Total bytecode size: {} bytes, {} PC mappings",
+            current_pc,
+            pc_map.len()
         );
-        Ok(())
+        Ok(pc_map)
     }
 
     /// Rebuilds edges for a specific block after instruction modifications.
@@ -818,22 +824,42 @@ impl CfgIrBundle {
                         };
 
                         if new_target != old_target {
-                            // Update the PUSH instruction with new target (inline logic)
+                            let original_push_size = if let Opcode::PUSH(n) = push_opcode {
+                                n as usize
+                            } else {
+                                // PUSH0 case - shouldn't be used for jump targets
+                                1
+                            };
+
+                            // Verify the new value fits in the original PUSH size
                             let bytes_needed = if new_target == 0 {
                                 1
                             } else {
                                 (64 - (new_target as u64).leading_zeros()).div_ceil(8) as usize
                             };
-                            let push_size = bytes_needed.clamp(1, 32);
 
-                            instructions[i].op = Opcode::PUSH(push_size as u8);
-                            instructions[i].imm =
-                                Some(format!("{:0width$x}", new_target, width = push_size * 2));
+                            if bytes_needed > original_push_size {
+                                return Err(Error::InvalidImmediate(format!(
+                                    "Jump target 0x{:x} requires {} bytes but PUSH({}) only has {} bytes",
+                                    new_target,
+                                    bytes_needed,
+                                    original_push_size,
+                                    original_push_size
+                                )));
+                            }
+
+                            // Keep the same PUSH size, just update the immediate value
+                            instructions[i].imm = Some(format!(
+                                "{:0width$x}",
+                                new_target,
+                                width = original_push_size * 2
+                            ));
 
                             tracing::debug!(
-                                "Updated jump target: 0x{:x} -> 0x{:x}",
+                                "Updated jump target: 0x{:x} -> 0x{:x} (kept PUSH({}))",
                                 old_target,
-                                new_target
+                                new_target,
+                                original_push_size
                             );
                         }
                     }
@@ -904,54 +930,96 @@ impl CfgIrBundle {
     }
 
     /// Patches PUSH immediate values that target jump destinations after PC reindexing.
-    fn patch_jump_immediates(&mut self) -> Result<(), Error> {
+    ///
+    /// This method should be called after `reindex_pcs()` with the returned PC mapping
+    /// to update all jump targets to their new locations.
+    ///
+    /// # Arguments
+    /// * `pc_mapping` - Map of old PC values to new PC values from reindexing
+    ///
+    /// # Returns
+    /// A `Result` indicating success or an `Error` if patching fails.
+    pub fn patch_jump_immediates(
+        &mut self,
+        pc_mapping: &HashMap<usize, usize>,
+    ) -> Result<(), Error> {
         tracing::debug!("Patching jump immediates after PC reindexing");
 
-        // First, collect all the target mappings to avoid borrowing conflicts
-        let mut target_mappings = HashMap::new();
-        for node_idx in self.cfg.node_indices() {
-            if let Some(Block::Body { start_pc, .. }) = self.cfg.node_weight(node_idx) {
-                // Map old PC positions to new start_pc values
-                for (&old_pc, &block_idx) in &self.pc_to_block {
-                    if block_idx == node_idx {
-                        target_mappings.insert(old_pc, *start_pc);
-                    }
-                }
-            }
-        }
-
-        // Now patch the instructions
+        // Now patch the instructions using the correct old->new PC mapping
         for node_idx in self.cfg.node_indices().collect::<Vec<_>>() {
             if let Block::Body { instructions, .. } = &mut self.cfg[node_idx] {
                 for i in 0..instructions.len().saturating_sub(1) {
-                    // Look for PUSH followed by JUMP/JUMPI
                     let push_opcode = instructions[i].op;
+
+                    // Skip if not a PUSH instruction
+                    if !matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0) {
+                        continue;
+                    }
+
+                    // Check if this is a PC-relative jump pattern: PUSH delta, PC, ADD, ...JUMPI
+                    // PC-relative jumps should NOT be patched
+                    let is_pc_relative = if i + 2 < instructions.len() {
+                        matches!(instructions[i + 1].op, Opcode::PC)
+                            && matches!(instructions[i + 2].op, Opcode::ADD)
+                    } else {
+                        false
+                    };
+
+                    if is_pc_relative {
+                        tracing::debug!(
+                            "Skipping PC-relative jump at index {} (PUSH delta={:?})",
+                            i,
+                            instructions[i].imm
+                        );
+                        continue;
+                    }
+
+                    // Look for absolute PUSH followed by JUMP/JUMPI
                     let next_opcode = instructions[i + 1].op;
-                    if matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0)
-                        && matches!(next_opcode, Opcode::JUMP | Opcode::JUMPI)
+                    if matches!(next_opcode, Opcode::JUMP | Opcode::JUMPI)
                         && let Some(immediate) = &instructions[i].imm
                         && let Ok(old_target) = usize::from_str_radix(immediate, 16)
                     {
-                        // Use pre-collected mapping instead of accessing self.cfg
-                        if let Some(&new_target) = target_mappings.get(&old_target)
+                        // Use the provided old->new PC mapping
+                        if let Some(&new_target) = pc_mapping.get(&old_target)
                             && new_target != old_target
                         {
-                            // Update the PUSH instruction with new target
+                            // Preserve the original PUSH opcode size
+                            let original_push_size = if let Opcode::PUSH(n) = push_opcode {
+                                n as usize
+                            } else {
+                                1
+                            };
+
+                            // Verify the new value fits
                             let bytes_needed = if new_target == 0 {
                                 1
                             } else {
                                 (64 - (new_target as u64).leading_zeros()).div_ceil(8) as usize
                             };
-                            let push_size = bytes_needed.clamp(1, 32);
 
-                            instructions[i].op = Opcode::PUSH(push_size as u8);
-                            instructions[i].imm =
-                                Some(format!("{:0width$x}", new_target, width = push_size * 2));
+                            if bytes_needed > original_push_size {
+                                return Err(Error::InvalidImmediate(format!(
+                                    "Patched target 0x{:x} requires {} bytes but PUSH({}) only has {} bytes",
+                                    new_target,
+                                    bytes_needed,
+                                    original_push_size,
+                                    original_push_size
+                                )));
+                            }
+
+                            // Keep the same PUSH size, just update the immediate
+                            instructions[i].imm = Some(format!(
+                                "{:0width$x}",
+                                new_target,
+                                width = original_push_size * 2
+                            ));
 
                             tracing::debug!(
-                                "Patched jump immediate: 0x{:x} -> 0x{:x}",
+                                "Patched jump immediate: 0x{:x} -> 0x{:x} (kept PUSH({}))",
                                 old_target,
-                                new_target
+                                new_target,
+                                original_push_size
                             );
                         }
                     }
