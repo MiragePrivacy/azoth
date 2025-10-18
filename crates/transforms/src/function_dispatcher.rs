@@ -794,6 +794,12 @@ impl Transform for FunctionDispatcher {
 
                 if is_affected {
                     affected_blocks.push((node_idx, block_start, start_pc));
+
+                    // Record the logical_id of this dispatcher block
+                    if let Block::Body { logical_id, .. } = &ir.cfg[node_idx] {
+                        ir.dispatcher_blocks.insert(*logical_id);
+                        debug!("Marked block with logical_id {} as dispatcher block", logical_id);
+                    }
                 }
             }
             debug!("=== Total Affected Blocks: {} ===", affected_blocks.len());

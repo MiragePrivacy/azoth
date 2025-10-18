@@ -1,5 +1,7 @@
 pub mod function_dispatcher;
 pub mod jump_address_transformer;
+pub mod mapping;
+pub mod mapping_builder;
 pub mod obfuscator;
 pub mod opaque_predicate;
 pub mod pass;

@@ -29,6 +29,19 @@ impl OpaquePredicate {
     fn is_non_terminal(&self, instruction: &Instruction) -> bool {
         !Opcode::is_control_flow(&instruction.op)
     }
+
+    /// Determines the minimum PUSH size needed for a PC value and formats it appropriately.
+    fn format_push_immediate(&self, pc: usize) -> (u8, String) {
+        let bytes_needed = if pc == 0 {
+            1
+        } else {
+            ((pc.ilog2() / 8) + 1).max(1) as usize
+        };
+
+        let push_size = bytes_needed.min(32) as u8;
+        let formatted = format!("{:0width$x}", pc, width = push_size as usize * 2);
+        (push_size, formatted)
+    }
 }
 
 impl Transform for OpaquePredicate {
@@ -98,7 +111,13 @@ impl Transform for OpaquePredicate {
                 true_start_pc, false_start_pc
             );
 
+            // For synthetic blocks, use a high logical_id that won't conflict with original bytecode
+            // Use 0x100000 + true_start_pc to ensure uniqueness
+            let true_logical_id = 0x100000 + true_start_pc;
+            let false_logical_id = 0x100000 + false_start_pc;
+
             let true_label = ir.cfg.add_node(Block::Body {
+                logical_id: true_logical_id,
                 start_pc: true_start_pc,
                 instructions: vec![Instruction {
                     pc: true_start_pc,
@@ -108,7 +127,21 @@ impl Transform for OpaquePredicate {
                 max_stack: 0,
             });
 
+            // Calculate the target PC and format it properly for the PUSH instruction
+            let target_pc = original_fallthrough
+                .and_then(|n| {
+                    if let Block::Body { start_pc, .. } = &ir.cfg[n] {
+                        Some(*start_pc)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+
+            let (target_push_size, target_imm) = self.format_push_immediate(target_pc);
+
             let false_label = ir.cfg.add_node(Block::Body {
+                logical_id: false_logical_id,
                 start_pc: false_start_pc,
                 instructions: vec![
                     Instruction {
@@ -118,23 +151,13 @@ impl Transform for OpaquePredicate {
                     },
                     Instruction {
                         pc: false_start_pc + 1,
-                        op: Opcode::PUSH(1),
-                        imm: Some("00".to_string()),
+                        op: Opcode::PUSH(target_push_size),
+                        imm: Some(target_imm),
                     },
                     Instruction {
                         pc: false_start_pc + 2,
                         op: Opcode::JUMP,
-                        imm: Some(
-                            original_fallthrough
-                                .map(|n| {
-                                    if let Block::Body { start_pc, .. } = &ir.cfg[n] {
-                                        format!("{start_pc:x}")
-                                    } else {
-                                        "0".to_string()
-                                    }
-                                })
-                                .unwrap_or("0".to_string()),
-                        ),
+                        imm: None,
                     },
                 ],
                 max_stack: 1,
@@ -154,6 +177,10 @@ impl Transform for OpaquePredicate {
                 let seed = rng.random::<u64>();
                 let constant = self.generate_constant(seed);
                 let constant_hex = hex::encode(constant);
+
+                let (true_push_size, true_imm) = self.format_push_immediate(true_start_pc);
+                let (false_push_size, false_imm) = self.format_push_immediate(false_start_pc);
+
                 instructions.extend(vec![
                     Instruction {
                         pc: 0,
@@ -172,8 +199,8 @@ impl Transform for OpaquePredicate {
                     },
                     Instruction {
                         pc: 0,
-                        op: Opcode::PUSH(2),
-                        imm: Some(format!("{true_start_pc:x}")),
+                        op: Opcode::PUSH(true_push_size),
+                        imm: Some(true_imm),
                     },
                     Instruction {
                         pc: 0,
@@ -182,13 +209,13 @@ impl Transform for OpaquePredicate {
                     },
                     Instruction {
                         pc: 0,
-                        op: Opcode::JUMPDEST,
-                        imm: None,
+                        op: Opcode::PUSH(false_push_size),
+                        imm: Some(false_imm),
                     },
                     Instruction {
                         pc: 0,
                         op: Opcode::JUMP,
-                        imm: Some(format!("{false_start_pc:x}")),
+                        imm: None,
                     },
                 ]);
             }

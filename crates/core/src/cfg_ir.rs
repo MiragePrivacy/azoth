@@ -34,6 +34,9 @@ pub enum Block {
     Exit,
     /// A body block containing a sequence of instructions.
     Body {
+        /// Stable logical identifier for this block that persists across transforms.
+        /// Set to the block's original start_pc when first created and never changes.
+        logical_id: usize,
         /// The program counter (PC) at which the block starts.
         start_pc: usize,
         /// The list of decoded EVM instructions in the block.
@@ -84,6 +87,12 @@ pub struct CfgIrBundle {
     /// Mapping of original function selectors to obfuscated tokens.
     /// Only populated when token-based dispatcher transform is applied.
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
+    /// Last PC mapping from the most recent reindexing operation.
+    /// Maps old PC → new PC after structural changes.
+    pub last_pc_mapping: HashMap<usize, usize>,
+    /// Set of logical_ids for blocks that were part of the original function dispatcher.
+    /// Only populated when dispatcher transform is applied.
+    pub dispatcher_blocks: std::collections::HashSet<usize>,
 }
 
 /// Builds a CFG with IR in SSA form from decoded instructions and sections.
@@ -135,6 +144,63 @@ pub fn build_cfg_ir(
         clean_report: report,
         sections: sections.to_vec(),
         selector_mapping: None, // Initially empty, set by transforms
+        last_pc_mapping: HashMap::new(), // Initially empty
+        dispatcher_blocks: std::collections::HashSet::new(), // Initially empty
+    })
+}
+
+/// Builds a CFG while preserving logical_id mappings from a previous CFG.
+///
+/// This is used by transforms that reorder blocks (like shuffle) to maintain
+/// stable block identifiers across transformations.
+///
+/// # Arguments
+/// * `instructions` - Decoded EVM instructions.
+/// * `sections` - Detected sections.
+/// * `clean_report` - Report for reassembly.
+/// * `pc_to_logical_id` - Mapping from instruction PC to logical_id.
+///
+/// # Returns
+/// A `Result` containing the `CfgIrBundle` or a `Error` if construction fails.
+fn build_cfg_ir_with_logical_ids(
+    instructions: &[Instruction],
+    sections: &[Section],
+    clean_report: crate::strip::CleanReport,
+    pc_to_logical_id: &HashMap<usize, usize>,
+) -> Result<CfgIrBundle, Error> {
+    tracing::debug!(
+        "Starting CFG-IR construction with logical_id preservation for {} instructions",
+        instructions.len()
+    );
+
+    // Split blocks with logical_id preservation
+    let blocks = split_blocks_with_logical_ids(instructions, pc_to_logical_id)?;
+    tracing::debug!("Split into {} blocks with preserved logical_ids", blocks.len());
+
+    // Build edges
+    let mut cfg = DiGraph::new();
+    let _entry_idx = cfg.add_node(Block::Entry);
+    let _exit_idx = cfg.add_node(Block::Exit);
+    let (edges, pc_to_block) = build_edges(&blocks, instructions, &mut cfg)?;
+    cfg.extend_with_edges(edges);
+    tracing::debug!("Built CFG with {} nodes", cfg.node_count());
+
+    // Stack-SSA walk
+    assign_ssa_values(&mut cfg, &pc_to_block, instructions)?;
+    tracing::debug!("Assigned SSA values and computed stack heights");
+
+    debug_assert!(
+        cfg.node_count() >= 2,
+        "CFG must contain at least Entry and Exit"
+    );
+    Ok(CfgIrBundle {
+        cfg,
+        pc_to_block,
+        clean_report,
+        sections: sections.to_vec(),
+        selector_mapping: None,
+        last_pc_mapping: HashMap::new(),
+        dispatcher_blocks: std::collections::HashSet::new(),
     })
 }
 
@@ -154,6 +220,7 @@ impl CfgIrBundle {
     ) -> Result<(), Error> {
         let clean_report = self.clean_report.clone();
         let selector_mapping = self.selector_mapping.clone(); // Preserve mapping
+        let dispatcher_blocks = self.dispatcher_blocks.clone(); // Preserve dispatcher blocks
         let new_bundle = build_cfg_ir(&instructions, sections, clean_report)?;
 
         self.cfg = new_bundle.cfg;
@@ -161,6 +228,42 @@ impl CfgIrBundle {
         self.clean_report = new_bundle.clean_report;
         self.sections = new_bundle.sections;
         self.selector_mapping = selector_mapping; // Restore mapping
+        self.last_pc_mapping = HashMap::new(); // Reset after rebuild
+        self.dispatcher_blocks = dispatcher_blocks; // Restore dispatcher blocks
+
+        Ok(())
+    }
+
+    /// Replaces the body of the CFG while preserving logical_id mappings.
+    ///
+    /// This method is used when the instruction order is changed (e.g., during shuffling)
+    /// but we want to maintain stable block identifiers across the transformation.
+    ///
+    /// # Arguments
+    /// * `instructions` - The new instructions to process.
+    /// * `sections` - Detected sections for the new bytecode.
+    /// * `pc_to_logical_id` - Mapping from instruction PC to the logical_id it should have.
+    ///
+    /// # Returns
+    /// A `Result` indicating success or a `Error` if rebuilding fails.
+    pub fn replace_body_preserving_logical_ids(
+        &mut self,
+        instructions: Vec<Instruction>,
+        sections: &[Section],
+        pc_to_logical_id: &HashMap<usize, usize>,
+    ) -> Result<(), Error> {
+        let clean_report = self.clean_report.clone();
+        let selector_mapping = self.selector_mapping.clone();
+        let dispatcher_blocks = self.dispatcher_blocks.clone();
+        let new_bundle = build_cfg_ir_with_logical_ids(&instructions, sections, clean_report, pc_to_logical_id)?;
+
+        self.cfg = new_bundle.cfg;
+        self.pc_to_block = new_bundle.pc_to_block;
+        self.clean_report = new_bundle.clean_report;
+        self.sections = new_bundle.sections;
+        self.selector_mapping = selector_mapping;
+        self.last_pc_mapping = HashMap::new();
+        self.dispatcher_blocks = dispatcher_blocks;
 
         Ok(())
     }
@@ -169,6 +272,7 @@ impl CfgIrBundle {
 fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
     let mut blocks = Vec::new();
     let mut cur_block = Block::Body {
+        logical_id: 0,
         start_pc: 0,
         instructions: Vec::new(),
         max_stack: 0,
@@ -208,7 +312,9 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
             }
 
             // Start fresh block AT the JUMPDEST PC
+            // Use instruction.pc as the logical_id since it's the original PC
             cur_block = Block::Body {
+                logical_id: instruction.pc,
                 start_pc: instruction.pc,
                 instructions: vec![instruction.clone()],
                 max_stack: 0,
@@ -228,10 +334,12 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
         let is_terminal = is_terminal_opcode(opcode);
 
         if is_branch || is_terminal {
+            let next_pc = instruction.pc + 1;
             let finished = std::mem::replace(
                 &mut cur_block,
                 Block::Body {
-                    start_pc: instruction.pc + 1,
+                    logical_id: next_pc,
+                    start_pc: next_pc,
                     instructions: Vec::new(),
                     max_stack: 0,
                 },
@@ -303,6 +411,136 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
     Ok(blocks)
 }
 
+/// Splits instructions into blocks while preserving logical_ids from a mapping.
+///
+/// This is used during transforms that reorder blocks to maintain stable identifiers.
+/// The splitting logic is identical to `split_blocks`, but logical_ids come from
+/// the provided mapping instead of being derived from instruction PCs.
+fn split_blocks_with_logical_ids(
+    instructions: &[Instruction],
+    pc_to_logical_id: &HashMap<usize, usize>,
+) -> Result<Vec<Block>, Error> {
+    let mut blocks = Vec::new();
+
+    // Find the logical_id for the first instruction (default to 0 if not found)
+    let first_logical_id = instructions
+        .first()
+        .and_then(|i| pc_to_logical_id.get(&i.pc).copied())
+        .unwrap_or(0);
+
+    let mut cur_block = Block::Body {
+        logical_id: first_logical_id,
+        start_pc: 0,
+        instructions: Vec::new(),
+        max_stack: 0,
+    };
+
+    // Collect all JUMPDEST locations from bytecode
+    let jumpdest_pcs: HashSet<usize> = instructions
+        .iter()
+        .filter(|i| matches!(i.op, Opcode::JUMPDEST))
+        .map(|i| i.pc)
+        .collect();
+
+    for instruction in instructions {
+        let opcode = instruction.op;
+
+        // Start new block at JUMPDEST
+        if matches!(opcode, Opcode::JUMPDEST) {
+            if let Block::Body {
+                instructions,
+                ..
+            } = &cur_block
+                && !instructions.is_empty()
+            {
+                blocks.push(std::mem::take(&mut cur_block));
+            }
+
+            // Get logical_id from mapping, or use PC as fallback
+            let logical_id = pc_to_logical_id
+                .get(&instruction.pc)
+                .copied()
+                .unwrap_or(instruction.pc);
+
+            cur_block = Block::Body {
+                logical_id,
+                start_pc: instruction.pc,
+                instructions: vec![instruction.clone()],
+                max_stack: 0,
+            };
+            continue;
+        }
+
+        // Add instruction to current block
+        if let Block::Body { instructions, .. } = &mut cur_block {
+            instructions.push(instruction.clone());
+        }
+
+        // Terminate at branch/terminal instructions
+        let is_branch = matches!(opcode, Opcode::JUMP | Opcode::JUMPI);
+        let is_terminal = is_terminal_opcode(opcode);
+
+        if is_branch || is_terminal {
+            let next_pc = instruction.pc + 1;
+
+            // Get logical_id for next block from mapping, or use next_pc as fallback
+            let next_logical_id = pc_to_logical_id
+                .get(&next_pc)
+                .copied()
+                .unwrap_or(next_pc);
+
+            let finished = std::mem::replace(
+                &mut cur_block,
+                Block::Body {
+                    logical_id: next_logical_id,
+                    start_pc: next_pc,
+                    instructions: Vec::new(),
+                    max_stack: 0,
+                },
+            );
+            blocks.push(finished);
+            continue;
+        }
+    }
+
+    // Push trailing non-empty block
+    if let Block::Body { instructions, .. } = &cur_block
+        && !instructions.is_empty()
+    {
+        blocks.push(cur_block);
+    }
+
+    // Verify every JUMPDEST is a block start
+    let block_starts: HashSet<usize> = blocks
+        .iter()
+        .filter_map(|b| {
+            if let Block::Body { start_pc, .. } = b {
+                Some(*start_pc)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let orphaned_jumpdests: Vec<_> = jumpdest_pcs
+        .iter()
+        .filter(|pc| !block_starts.contains(pc))
+        .collect();
+
+    if !orphaned_jumpdests.is_empty() {
+        return Err(Error::InvalidBlockStructure(format!(
+            "JUMPDESTs not aligned with block starts: {:?}",
+            orphaned_jumpdests
+        )));
+    }
+
+    if blocks.is_empty() {
+        return Err(Error::NoEntryBlock);
+    }
+
+    Ok(blocks)
+}
+
 /// Type alias for the return type of `build_edges`.
 type BuildEdgesResult = Result<
     (
@@ -337,12 +575,14 @@ fn build_edges(
     // Add body blocks to graph
     for block in blocks {
         if let Block::Body {
+            logical_id,
             start_pc,
             instructions,
             max_stack,
         } = block
         {
             let index = cfg.add_node(Block::Body {
+                logical_id: *logical_id,
                 start_pc: *start_pc,
                 instructions: instructions.clone(),
                 max_stack: *max_stack,
@@ -517,7 +757,7 @@ fn assign_ssa_values(
         let mut cur_depth: usize = 0;
         let mut max_stack = 0;
 
-        if let Block::Body { instructions, .. } = block {
+        if let Block::Body { logical_id, instructions, .. } = block {
             for instruction in instructions {
                 tracing::debug!(
                     "Processing opcode {} at pc={}",
@@ -543,6 +783,7 @@ fn assign_ssa_values(
                 max_stack
             );
             let updated_block = Block::Body {
+                logical_id: *logical_id,
                 start_pc: block.start_pc(),
                 instructions: instructions.clone(),
                 max_stack,
@@ -605,6 +846,7 @@ impl CfgIrBundle {
         // Reindex each block's instructions
         for (node_idx, old_start_pc) in blocks_with_indices {
             if let Block::Body {
+                logical_id,
                 instructions,
                 start_pc,
                 ..
@@ -620,11 +862,12 @@ impl CfgIrBundle {
                     current_pc += instruction.byte_size();
                 }
 
-                // Update block's start_pc
+                // Update block's start_pc (but keep logical_id unchanged!)
                 *start_pc = new_start_pc;
                 tracing::debug!(
-                    "Reindexed block {}: old start_pc 0x{:x} -> new start_pc 0x{:x}",
+                    "Reindexed block {} (logical_id={}): old start_pc 0x{:x} -> new start_pc 0x{:x}",
                     node_idx.index(),
+                    logical_id,
                     old_start_pc,
                     new_start_pc
                 );
@@ -633,6 +876,9 @@ impl CfgIrBundle {
 
         // Update the pc_to_block mapping
         self.pc_to_block = new_pc_to_block;
+
+        // Store the mapping for external access
+        self.last_pc_mapping = pc_map.clone();
 
         tracing::debug!(
             "PC reindexing complete. Total bytecode size: {} bytes, {} PC mappings",

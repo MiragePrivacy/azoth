@@ -178,6 +178,7 @@ fn create_mirage_config(seed_k2: &Seed) -> ObfuscationConfig {
             max_opaque_ratio: 0.3, // Apply to 30% of blocks
         },
         preserve_unknown_opcodes: true,
+        generate_mappings: false, // Don't generate mappings for examples
     }
 }
 

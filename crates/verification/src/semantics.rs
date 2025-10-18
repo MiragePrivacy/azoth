@@ -366,6 +366,7 @@ impl SemanticAnalyzer {
                 start_pc,
                 instructions,
                 max_stack,
+                ..
             }) = cfg.node_weight(node_idx)
             {
                 // Extract function selectors (semantic analysis)
