@@ -11,8 +11,7 @@ use azoth_transform::mapping::ObfuscationMapping;
 use clap::Args;
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
-        MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -28,6 +27,9 @@ use ratatui::{
     },
     Frame, Terminal,
 };
+use serde::{Deserialize, Serialize};
+use sha3::{Digest, Keccak256};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::io;
@@ -37,6 +39,85 @@ use std::io;
 pub struct DebugArgs {
     /// Path to the transformation mapping JSON file (generated with --emit-mappings)
     pub mapping_file: String,
+
+    /// Optional path to ABI JSON file for function name resolution
+    #[arg(long)]
+    pub abi: Option<String>,
+}
+
+/// Represents a single ABI function entry.
+#[derive(Debug, Deserialize, Serialize)]
+struct AbiFunctionEntry {
+    /// Function name (optional - constructors, fallback, receive don't have names)
+    #[serde(default)]
+    name: Option<String>,
+    /// Function type (function, constructor, fallback, receive)
+    #[serde(rename = "type")]
+    entry_type: String,
+    /// Input parameters
+    #[serde(default)]
+    inputs: Vec<AbiParameter>,
+}
+
+/// Represents an ABI parameter.
+#[derive(Debug, Deserialize, Serialize)]
+struct AbiParameter {
+    /// Parameter name
+    #[serde(default)]
+    name: String,
+    /// Parameter type (e.g., "uint256", "address", "bytes")
+    #[serde(rename = "type")]
+    param_type: String,
+}
+
+/// Computes the function selector from a function signature.
+///
+/// The selector is the first 4 bytes of the Keccak256 hash of the
+/// canonical function signature (e.g., "transfer(address,uint256)").
+fn compute_selector(signature: &str) -> u32 {
+    let mut hasher = Keccak256::new();
+    hasher.update(signature.as_bytes());
+    let hash = hasher.finalize();
+    u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
+}
+
+/// Represents a Foundry-style contract artifact with ABI.
+#[derive(Debug, Deserialize)]
+struct FoundryArtifact {
+    abi: Vec<AbiFunctionEntry>,
+}
+
+/// Parses a Foundry artifact JSON file and returns a mapping from selector to function name.
+///
+/// Expects Foundry format: `{"abi": [{...}, {...}], "bytecode": "...", ...}`
+fn parse_abi(abi_path: &str) -> Result<HashMap<u32, String>, Box<dyn Error>> {
+    let abi_json = fs::read_to_string(abi_path)?;
+    let artifact: FoundryArtifact = serde_json::from_str(&abi_json)?;
+
+    let mut selector_map = HashMap::new();
+
+    for entry in artifact.abi {
+        // Only process function entries with names
+        if entry.entry_type != "function" {
+            continue;
+        }
+
+        let Some(function_name) = entry.name else {
+            continue;
+        };
+
+        // Build canonical signature: "functionName(type1,type2,...)"
+        let param_types: Vec<String> = entry.inputs.iter().map(|p| p.param_type.clone()).collect();
+        let signature = format!("{}({})", function_name, param_types.join(","));
+
+        // Compute selector
+        let selector = compute_selector(&signature);
+
+        // Store mapping with the full signature for display
+        selector_map.insert(selector, signature);
+    }
+
+    Ok(selector_map)
 }
 
 /// Executes the `debug` subcommand by launching the interactive TUI.
@@ -47,8 +128,15 @@ impl super::Command for DebugArgs {
         let mapping_json = fs::read_to_string(&self.mapping_file)?;
         let mapping: ObfuscationMapping = serde_json::from_str(&mapping_json)?;
 
+        // Load ABI if provided
+        let selector_names = if let Some(abi_path) = self.abi {
+            parse_abi(&abi_path)?
+        } else {
+            HashMap::new()
+        };
+
         // Launch the TUI
-        run_tui(mapping)?;
+        run_tui(mapping, selector_names)?;
 
         Ok(())
     }
@@ -58,6 +146,8 @@ impl super::Command for DebugArgs {
 struct App {
     /// The loaded obfuscation mapping
     mapping: ObfuscationMapping,
+    /// Mapping from function selector to function signature
+    selector_names: HashMap<u32, String>,
     /// Current view mode
     view_mode: ViewMode,
     /// Previous view mode (for toggling back)
@@ -120,7 +210,7 @@ enum ViewMode {
 
 impl App {
     /// Creates a new app instance with the given mapping.
-    fn new(mapping: ObfuscationMapping) -> Self {
+    fn new(mapping: ObfuscationMapping, selector_names: HashMap<u32, String>) -> Self {
         let mut transform_list_state = ListState::default();
         if !mapping.transform_steps.is_empty() {
             transform_list_state.select(Some(0));
@@ -128,6 +218,7 @@ impl App {
 
         Self {
             mapping,
+            selector_names,
             view_mode: ViewMode::Detail,
             previous_view_mode: ViewMode::BlockDiff,
             selected_step: 0,
@@ -597,7 +688,10 @@ impl App {
 }
 
 /// Runs the terminal user interface.
-fn run_tui(mapping: ObfuscationMapping) -> Result<(), Box<dyn Error>> {
+fn run_tui(
+    mapping: ObfuscationMapping,
+    selector_names: HashMap<u32, String>,
+) -> Result<(), Box<dyn Error>> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -606,7 +700,7 @@ fn run_tui(mapping: ObfuscationMapping) -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app state
-    let mut app = App::new(mapping);
+    let mut app = App::new(mapping, selector_names);
 
     // Main loop
     let res = run_app(&mut terminal, &mut app);
@@ -864,6 +958,49 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
             Span::raw(if step.changed { "Yes" } else { "No" }),
         ]),
         Line::from(""),
+    ];
+
+    // Add semantic changes at the top
+    if let Some(ref semantic) = step.semantic_changes {
+        lines.push(Line::from(Span::styled(
+            "Semantic Changes:",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        if let Some(ref selectors) = semantic.selector_mapping {
+            lines.push(Line::from(format!(
+                "  Function Selectors Remapped: {}",
+                selectors.len()
+            )));
+            for (selector, token) in selectors.iter() {
+                // Parse selector string (hex) to u32 for lookup
+                let selector_value = u32::from_str_radix(selector, 16).ok();
+                let function_sig = selector_value
+                    .and_then(|s| app.selector_names.get(&s))
+                    .map(|name| format!(" ; {}", name))
+                    .unwrap_or_default();
+
+                lines.push(Line::from(format!(
+                    "    0x{} → {}{}",
+                    selector,
+                    hex::encode(token),
+                    function_sig
+                )));
+            }
+        }
+
+        if !semantic.jump_target_remapping.is_empty() {
+            lines.push(Line::from(format!(
+                "  Jump Targets Remapped: {}",
+                semantic.jump_target_remapping.len()
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+
+    lines.extend(vec![
         Line::from(Span::styled(
             "Statistics:",
             Style::default()
@@ -887,7 +1024,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
             step.statistics.bytes_before, step.statistics.bytes_after, step.statistics.bytes_delta
         )),
         Line::from(""),
-    ];
+    ]);
 
     // Add blocks added
     if !step.blocks_added.is_empty() {
@@ -971,52 +1108,11 @@ fn render_detail(f: &mut Frame, area: Rect, app: &mut App) {
                 let pc_delta = block_mod.new_start_pc as i64 - block_mod.old_start_pc as i64;
                 lines.push(Line::from(format!(
                     "  Block {}: PC {:#x} → {:#x} ({:+})",
-                    block_mod.block_id,
-                    block_mod.old_start_pc,
-                    block_mod.new_start_pc,
-                    pc_delta
+                    block_mod.block_id, block_mod.old_start_pc, block_mod.new_start_pc, pc_delta
                 )));
             }
             lines.push(Line::from(""));
         }
-    }
-
-    // Add semantic changes
-    if let Some(ref semantic) = step.semantic_changes {
-        lines.push(Line::from(Span::styled(
-            "Semantic Changes:",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        )));
-
-        if let Some(ref selectors) = semantic.selector_mapping {
-            lines.push(Line::from(format!(
-                "  Function Selectors Remapped: {}",
-                selectors.len()
-            )));
-            for (selector, token) in selectors.iter().take(5) {
-                lines.push(Line::from(format!(
-                    "    0x{} → {}",
-                    selector,
-                    hex::encode(token)
-                )));
-            }
-            if selectors.len() > 5 {
-                lines.push(Line::from(format!(
-                    "    ... and {} more",
-                    selectors.len() - 5
-                )));
-            }
-        }
-
-        if !semantic.jump_target_remapping.is_empty() {
-            lines.push(Line::from(format!(
-                "  Jump Targets Remapped: {}",
-                semantic.jump_target_remapping.len()
-            )));
-        }
-        lines.push(Line::from(""));
     }
 
     // Add PC mapping info
@@ -1140,6 +1236,7 @@ fn render_block_diff(f: &mut Frame, area: Rect, app: &mut App) {
             &step.after.blocks,
             &app.mapping.sections,
             app.mnemonic_scroll,
+            &app.selector_names,
         );
 
         // Update scroll max based on instruction count
@@ -1203,11 +1300,18 @@ fn render_block_list(
                 .unwrap_or_default();
 
             // Get display ID for this block
-            let display_id = block_id_to_display.get(&block.block_id).copied().unwrap_or(idx);
+            let display_id = block_id_to_display
+                .get(&block.block_id)
+                .copied()
+                .unwrap_or(idx);
 
             let content = format!(
                 "Block {:>width$} @ {:#06x}{}\n{} instr, {} bytes",
-                display_id, block.start_pc, section_str, block.instruction_count, block.byte_size,
+                display_id,
+                block.start_pc,
+                section_str,
+                block.instruction_count,
+                block.byte_size,
                 width = padding_width
             );
 
@@ -1256,7 +1360,9 @@ fn render_block_list(
 }
 
 /// Creates a mapping from block_id to sequential display ID based on start_pc ordering
-fn create_block_id_mapping(blocks: &[azoth_transform::mapping::BlockInfo]) -> std::collections::HashMap<usize, usize> {
+fn create_block_id_mapping(
+    blocks: &[azoth_transform::mapping::BlockInfo],
+) -> std::collections::HashMap<usize, usize> {
     let mut sorted_blocks: Vec<_> = blocks.iter().collect();
     sorted_blocks.sort_by_key(|b| b.start_pc);
 
@@ -1289,12 +1395,15 @@ fn render_mnemonic_diff(
     all_after_blocks: &[azoth_transform::mapping::BlockInfo],
     sections: &Option<Vec<azoth_transform::mapping::SectionInfo>>,
     scroll_offset: u16,
+    selector_names: &HashMap<u32, String>,
 ) {
     // Create sequential block ID mappings
     let before_id_map = create_block_id_mapping(all_before_blocks);
     let after_id_map = create_block_id_mapping(all_after_blocks);
 
-    let display_id = before_id_map.get(&before_block.block_id).unwrap_or(&before_block.block_id);
+    let display_id = before_id_map
+        .get(&before_block.block_id)
+        .unwrap_or(&before_block.block_id);
 
     // Add section info to title if available
     let section_str = find_section_at_pc(before_block.start_pc, sections)
@@ -1331,32 +1440,50 @@ fn render_mnemonic_diff(
         .find(|b| b.end_pc == before_block.start_pc);
 
     // Calculate max instruction width for alignment across BOTH before and after sections
-    let before_max = before_block.instructions.iter().map(|instr| {
-        let imm_str = instr.immediate.as_ref().map(|i| {
-            if i.len() > 8 {
-                format!(" 0x{}...", &i[..8])
-            } else {
-                format!(" 0x{}", i)
-            }
-        }).unwrap_or_default();
-        let line = format!("{:#06x}: {}{}", instr.pc, &instr.opcode, imm_str);
-        line.len()
-    }).max().unwrap_or(30);
-
-    let after_max = if let Some(after) = after_block {
-        after.instructions.iter().map(|instr| {
-            let imm_str = instr.immediate.as_ref().map(|i| {
-                if i.len() > 8 {
-                    format!(" 0x{}...", &i[..8])
-                } else {
-                    format!(" 0x{}", i)
-                }
-            }).unwrap_or_default();
+    let before_max = before_block
+        .instructions
+        .iter()
+        .map(|instr| {
+            let imm_str = instr
+                .immediate
+                .as_ref()
+                .map(|i| {
+                    if i.len() > 8 {
+                        format!(" 0x{}...", &i[..8])
+                    } else {
+                        format!(" 0x{}", i)
+                    }
+                })
+                .unwrap_or_default();
             let line = format!("{:#06x}: {}{}", instr.pc, &instr.opcode, imm_str);
             line.len()
-        }).max().unwrap_or(30)
+        })
+        .max()
+        .unwrap_or(30);
+
+    let after_max = if let Some(after) = after_block {
+        after
+            .instructions
+            .iter()
+            .map(|instr| {
+                let imm_str = instr
+                    .immediate
+                    .as_ref()
+                    .map(|i| {
+                        if i.len() > 8 {
+                            format!(" 0x{}...", &i[..8])
+                        } else {
+                            format!(" 0x{}", i)
+                        }
+                    })
+                    .unwrap_or_default();
+                let line = format!("{:#06x}: {}{}", instr.pc, &instr.opcode, imm_str);
+                line.len()
+            })
+            .max()
+            .unwrap_or(30)
     } else {
-        30
+        0  // No after block, so don't affect the max width calculation
     };
 
     let max_instr_width = before_max.max(after_max);
@@ -1364,7 +1491,9 @@ fn render_mnemonic_diff(
     // Add last instruction of previous block if it exists
     if let Some(prev_blk) = prev_block {
         if let Some(instr) = prev_blk.instructions.last() {
-            let prev_display_id = before_id_map.get(&prev_blk.block_id).unwrap_or(&prev_blk.block_id);
+            let prev_display_id = before_id_map
+                .get(&prev_blk.block_id)
+                .unwrap_or(&prev_blk.block_id);
             let imm_str = instr
                 .immediate
                 .as_ref()
@@ -1380,7 +1509,7 @@ fn render_mnemonic_diff(
             // Calculate padding for this hint line
             let pc_part = format!("{:#06x}: ", instr.pc);
             let current_width = pc_part.len() + instr.opcode.len() + imm_str.len();
-            let padding_needed = (max_instr_width + 2).saturating_sub(current_width);
+            let padding_needed = (max_instr_width).saturating_sub(current_width);
 
             let mut spans = vec![
                 Span::styled(pc_part, Style::default().fg(Color::DarkGray)),
@@ -1393,8 +1522,10 @@ fn render_mnemonic_diff(
             }
 
             spans.push(Span::styled(
-                format!("; Block {} ends", prev_display_id),
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                format!("  ; Block {} ends", prev_display_id),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             ));
 
             before_lines.push(Line::from(spans));
@@ -1421,7 +1552,7 @@ fn render_mnemonic_diff(
         let imm_part = &imm_str;
 
         let current_width = pc_part.len() + opcode_part.len() + imm_part.len();
-        let padding_needed = (max_instr_width + 2).saturating_sub(current_width); // +2 for spacing before comment
+        let padding_needed = (max_instr_width).saturating_sub(current_width); // +2 for spacing before comment
 
         let mut spans = vec![
             Span::styled(pc_part, Style::default().fg(Color::DarkGray)),
@@ -1437,12 +1568,31 @@ fn render_mnemonic_diff(
         if idx == 0 && before_block.start_pc == 0 {
             spans.push(Span::styled(
                 "  ; Bytecode starts",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             ));
         }
 
         // Track if we need to add a "maybe block" hint line
         let mut maybe_block_hint: Option<usize> = None;
+
+        // Check if this is a PUSH4 with a function selector
+        if instr.opcode == "PUSH4" {
+            if let Some(ref immediate) = instr.immediate {
+                let hex_str = immediate.trim_start_matches("0x");
+                if let Ok(selector_value) = u32::from_str_radix(hex_str, 16) {
+                    if let Some(function_sig) = selector_names.get(&selector_value) {
+                        spans.push(Span::styled(
+                            format!("  ; {}", function_sig),
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::ITALIC),
+                        ));
+                    }
+                }
+            }
+        }
 
         // Check if this is a PUSH followed by JUMP/JUMPI to add jump target comment
         if instr.opcode.starts_with("PUSH") && !instr.opcode.starts_with("PUSH0") {
@@ -1452,12 +1602,19 @@ fn render_mnemonic_diff(
                     if let Some(ref immediate) = instr.immediate {
                         let hex_str = immediate.trim_start_matches("0x");
                         if let Ok(jump_target_pc) = usize::from_str_radix(hex_str, 16) {
-                            if let Some(target_block) = all_before_blocks.iter().find(|b| b.start_pc == jump_target_pc) {
+                            if let Some(target_block) = all_before_blocks
+                                .iter()
+                                .find(|b| b.start_pc == jump_target_pc)
+                            {
                                 // Jump target is at the start of a block
-                                let target_display_id = before_id_map.get(&target_block.block_id).unwrap_or(&target_block.block_id);
+                                let target_display_id = before_id_map
+                                    .get(&target_block.block_id)
+                                    .unwrap_or(&target_block.block_id);
                                 spans.push(Span::styled(
                                     format!("  ; jump to Block {}", target_display_id),
-                                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                                    Style::default()
+                                        .fg(Color::DarkGray)
+                                        .add_modifier(Modifier::ITALIC),
                                 ));
                             } else {
                                 // Jump target doesn't match any block start - check if it falls within a block
@@ -1466,17 +1623,23 @@ fn render_mnemonic_diff(
                                 });
 
                                 if let Some(container) = containing_block {
-                                    let container_display_id = *before_id_map.get(&container.block_id).unwrap_or(&container.block_id);
+                                    let container_display_id = *before_id_map
+                                        .get(&container.block_id)
+                                        .unwrap_or(&container.block_id);
                                     spans.push(Span::styled(
                                         "  ; jump to ???",
-                                        Style::default().fg(Color::Red).add_modifier(Modifier::ITALIC),
+                                        Style::default()
+                                            .fg(Color::Red)
+                                            .add_modifier(Modifier::ITALIC),
                                     ));
                                     maybe_block_hint = Some(container_display_id);
                                 } else {
                                     // Jump target is completely outside any block
                                     spans.push(Span::styled(
                                         "  ; jump to ???",
-                                        Style::default().fg(Color::Red).add_modifier(Modifier::ITALIC),
+                                        Style::default()
+                                            .fg(Color::Red)
+                                            .add_modifier(Modifier::ITALIC),
                                     ));
                                 }
                             }
@@ -1491,10 +1654,12 @@ fn render_mnemonic_diff(
         // Add the "maybe block" hint on a separate line if needed
         if let Some(display_id) = maybe_block_hint {
             before_lines.push(Line::from(vec![
-                Span::raw(" ".repeat(max_instr_width + 2)),
+                Span::raw(" ".repeat(max_instr_width)),
                 Span::styled(
-                    format!("; (maybe Block {})", display_id),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
+                    format!("  ; (maybe Block {})", display_id),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::ITALIC),
                 ),
             ]));
         }
@@ -1509,7 +1674,9 @@ fn render_mnemonic_diff(
     if let Some(next_blk) = next_block {
         // Get the first instruction of the next block
         if let Some(instr) = next_blk.instructions.first() {
-            let next_display_id = before_id_map.get(&next_blk.block_id).unwrap_or(&next_blk.block_id);
+            let next_display_id = before_id_map
+                .get(&next_blk.block_id)
+                .unwrap_or(&next_blk.block_id);
             let imm_str = instr
                 .immediate
                 .as_ref()
@@ -1525,7 +1692,7 @@ fn render_mnemonic_diff(
             // Calculate padding for this hint line
             let pc_part = format!("{:#06x}: ", instr.pc);
             let current_width = pc_part.len() + instr.opcode.len() + imm_str.len();
-            let padding_needed = (max_instr_width + 2).saturating_sub(current_width);
+            let padding_needed = (max_instr_width).saturating_sub(current_width);
 
             let mut spans = vec![
                 Span::styled(pc_part, Style::default().fg(Color::DarkGray)),
@@ -1538,8 +1705,10 @@ fn render_mnemonic_diff(
             }
 
             spans.push(Span::styled(
-                format!("; Block {} starts", next_display_id),
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                format!("  ; Block {} starts", next_display_id),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             ));
 
             before_lines.push(Line::from(spans));
@@ -1553,7 +1722,9 @@ fn render_mnemonic_diff(
             ),
             Span::styled(
                 "; end of bytecode",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             ),
         ]));
     }
@@ -1569,13 +1740,13 @@ fn render_mnemonic_diff(
         let mut after_lines: Vec<Line> = Vec::new();
 
         // Add last instruction of previous block if it exists
-        let prev_block = all_after_blocks
-            .iter()
-            .find(|b| b.end_pc == after.start_pc);
+        let prev_block = all_after_blocks.iter().find(|b| b.end_pc == after.start_pc);
 
         if let Some(prev_blk) = prev_block {
             if let Some(instr) = prev_blk.instructions.last() {
-                let prev_display_id = after_id_map.get(&prev_blk.block_id).unwrap_or(&prev_blk.block_id);
+                let prev_display_id = after_id_map
+                    .get(&prev_blk.block_id)
+                    .unwrap_or(&prev_blk.block_id);
                 let imm_str = instr
                     .immediate
                     .as_ref()
@@ -1591,7 +1762,7 @@ fn render_mnemonic_diff(
                 // Calculate padding for this hint line
                 let pc_part = format!("{:#06x}: ", instr.pc);
                 let current_width = pc_part.len() + instr.opcode.len() + imm_str.len();
-                let padding_needed = (max_instr_width + 2).saturating_sub(current_width);
+                let padding_needed = (max_instr_width).saturating_sub(current_width);
 
                 let mut spans = vec![
                     Span::styled(pc_part, Style::default().fg(Color::DarkGray)),
@@ -1604,8 +1775,10 @@ fn render_mnemonic_diff(
                 }
 
                 spans.push(Span::styled(
-                    format!("; Block {} ends", prev_display_id),
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    format!("  ; Block {} ends", prev_display_id),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
                 ));
 
                 after_lines.push(Line::from(spans));
@@ -1632,7 +1805,7 @@ fn render_mnemonic_diff(
             let imm_part = &imm_str;
 
             let current_width = pc_part.len() + opcode_part.len() + imm_part.len();
-            let padding_needed = (max_instr_width + 2).saturating_sub(current_width); // +2 for spacing before comment
+            let padding_needed = (max_instr_width).saturating_sub(current_width); // +2 for spacing before comment
 
             let mut spans = vec![
                 Span::styled(pc_part, Style::default().fg(Color::DarkGray)),
@@ -1648,12 +1821,31 @@ fn render_mnemonic_diff(
             if idx == 0 && after.start_pc == 0 {
                 spans.push(Span::styled(
                     "  ; Bytecode starts",
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
                 ));
             }
 
             // Track if we need to add a "maybe block" hint line
             let mut maybe_block_hint: Option<usize> = None;
+
+            // Check if this is a PUSH4 with a function selector
+            if instr.opcode == "PUSH4" {
+                if let Some(ref immediate) = instr.immediate {
+                    let hex_str = immediate.trim_start_matches("0x");
+                    if let Ok(selector_value) = u32::from_str_radix(hex_str, 16) {
+                        if let Some(function_sig) = selector_names.get(&selector_value) {
+                            spans.push(Span::styled(
+                                format!("  ; {}", function_sig),
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::ITALIC),
+                            ));
+                        }
+                    }
+                }
+            }
 
             // Check if this is a PUSH followed by JUMP/JUMPI to add jump target comment
             if instr.opcode.starts_with("PUSH") && !instr.opcode.starts_with("PUSH0") {
@@ -1663,12 +1855,19 @@ fn render_mnemonic_diff(
                         if let Some(ref immediate) = instr.immediate {
                             let hex_str = immediate.trim_start_matches("0x");
                             if let Ok(jump_target_pc) = usize::from_str_radix(hex_str, 16) {
-                                if let Some(target_block) = all_after_blocks.iter().find(|b| b.start_pc == jump_target_pc) {
+                                if let Some(target_block) = all_after_blocks
+                                    .iter()
+                                    .find(|b| b.start_pc == jump_target_pc)
+                                {
                                     // Jump target is at the start of a block
-                                    let target_display_id = after_id_map.get(&target_block.block_id).unwrap_or(&target_block.block_id);
+                                    let target_display_id = after_id_map
+                                        .get(&target_block.block_id)
+                                        .unwrap_or(&target_block.block_id);
                                     spans.push(Span::styled(
                                         format!("  ; jump to Block {}", target_display_id),
-                                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                                        Style::default()
+                                            .fg(Color::DarkGray)
+                                            .add_modifier(Modifier::ITALIC),
                                     ));
                                 } else {
                                     // Jump target doesn't match any block start - check if it falls within a block
@@ -1677,17 +1876,23 @@ fn render_mnemonic_diff(
                                     });
 
                                     if let Some(container) = containing_block {
-                                        let container_display_id = *after_id_map.get(&container.block_id).unwrap_or(&container.block_id);
+                                        let container_display_id = *after_id_map
+                                            .get(&container.block_id)
+                                            .unwrap_or(&container.block_id);
                                         spans.push(Span::styled(
                                             "  ; jump to ???",
-                                            Style::default().fg(Color::Red).add_modifier(Modifier::ITALIC),
+                                            Style::default()
+                                                .fg(Color::Red)
+                                                .add_modifier(Modifier::ITALIC),
                                         ));
                                         maybe_block_hint = Some(container_display_id);
                                     } else {
                                         // Jump target is completely outside any block
                                         spans.push(Span::styled(
                                             "  ; jump to ???",
-                                            Style::default().fg(Color::Red).add_modifier(Modifier::ITALIC),
+                                            Style::default()
+                                                .fg(Color::Red)
+                                                .add_modifier(Modifier::ITALIC),
                                         ));
                                     }
                                 }
@@ -1705,7 +1910,9 @@ fn render_mnemonic_diff(
                     Span::raw(" ".repeat(max_instr_width + 2)),
                     Span::styled(
                         format!("; (maybe Block {})", display_id),
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::ITALIC),
                     ),
                 ]));
             }
@@ -1713,14 +1920,14 @@ fn render_mnemonic_diff(
 
         // Add block end line showing next instruction
         // Find the next block that starts at end_pc
-        let next_block = all_after_blocks
-            .iter()
-            .find(|b| b.start_pc == after.end_pc);
+        let next_block = all_after_blocks.iter().find(|b| b.start_pc == after.end_pc);
 
         if let Some(next_blk) = next_block {
             // Get the first instruction of the next block
             if let Some(instr) = next_blk.instructions.first() {
-                let next_display_id = after_id_map.get(&next_blk.block_id).unwrap_or(&next_blk.block_id);
+                let next_display_id = after_id_map
+                    .get(&next_blk.block_id)
+                    .unwrap_or(&next_blk.block_id);
                 let imm_str = instr
                     .immediate
                     .as_ref()
@@ -1736,7 +1943,7 @@ fn render_mnemonic_diff(
                 // Calculate padding for this hint line
                 let pc_part = format!("{:#06x}: ", instr.pc);
                 let current_width = pc_part.len() + instr.opcode.len() + imm_str.len();
-                let padding_needed = (max_instr_width + 2).saturating_sub(current_width);
+                let padding_needed = (max_instr_width).saturating_sub(current_width);
 
                 let mut spans = vec![
                     Span::styled(pc_part, Style::default().fg(Color::DarkGray)),
@@ -1749,8 +1956,10 @@ fn render_mnemonic_diff(
                 }
 
                 spans.push(Span::styled(
-                    format!("; Block {} starts", next_display_id),
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    format!("  ; Block {} starts", next_display_id),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
                 ));
 
                 after_lines.push(Line::from(spans));
@@ -1764,7 +1973,9 @@ fn render_mnemonic_diff(
                 ),
                 Span::styled(
                     "; end of bytecode",
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
                 ),
             ]));
         }
@@ -1798,7 +2009,8 @@ fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
 
     // Create block ID mapping for display IDs and reverse mapping (display_id -> block_index)
     let before_id_map = create_block_id_mapping(&step.before.blocks);
-    let mut display_to_idx: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut display_to_idx: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
     for (idx, block) in before_blocks.iter().enumerate() {
         if let Some(&display_id) = before_id_map.get(&block.block_id) {
             display_to_idx.insert(display_id, idx);
@@ -1815,7 +2027,9 @@ fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
             .iter()
             .find(|b| b.block_id == before_block.block_id);
 
-        let display_id = before_id_map.get(&before_block.block_id).unwrap_or(&before_block.block_id);
+        let display_id = before_id_map
+            .get(&before_block.block_id)
+            .unwrap_or(&before_block.block_id);
 
         lines.push(Line::from(vec![
             Span::styled("Block ID: ", Style::default().fg(Color::Yellow)),
@@ -1823,7 +2037,8 @@ fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
         ]));
 
         // Add section information
-        if let Some(section_name) = find_section_at_pc(before_block.start_pc, &app.mapping.sections) {
+        if let Some(section_name) = find_section_at_pc(before_block.start_pc, &app.mapping.sections)
+        {
             lines.push(Line::from(vec![
                 Span::styled("Section: ", Style::default().fg(Color::Yellow)),
                 Span::raw(section_name),
@@ -1851,7 +2066,12 @@ fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
         if is_dispatcher_block {
             lines.push(Line::from(vec![
                 Span::styled("Type: ", Style::default().fg(Color::Yellow)),
-                Span::styled("Dispatcher Block", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Dispatcher Block",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]));
 
             // Show total selector count if available
@@ -1900,7 +2120,9 @@ fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
 
             for ref_info in referenced_blocks.iter().take(5) {
                 let status_marker = if ref_info.valid { "✓" } else { "✗" };
-                let ref_display_id = before_id_map.get(&ref_info.block_id).unwrap_or(&ref_info.block_id);
+                let ref_display_id = before_id_map
+                    .get(&ref_info.block_id)
+                    .unwrap_or(&ref_info.block_id);
 
                 // Record this as a clickable reference
                 let line_num = lines.len() as u16;
@@ -1915,22 +2137,34 @@ fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
                     lines.push(Line::from(vec![
                         Span::raw(format!(
                             "  {} {} {}@ {:#06x} → {:#06x} ",
-                            status_marker, block_str, padding, ref_info.before_pc, ref_info.after_pc
+                            status_marker,
+                            block_str,
+                            padding,
+                            ref_info.before_pc,
+                            ref_info.after_pc
                         )),
                         Span::styled(
                             "[jump]",
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED),
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::UNDERLINED),
                         ),
                     ]));
                 } else {
                     lines.push(Line::from(vec![
                         Span::raw(format!(
                             "  {} {} {}@ {:#06x} → {:#06x} ",
-                            status_marker, block_str, padding, ref_info.before_pc, ref_info.after_pc
+                            status_marker,
+                            block_str,
+                            padding,
+                            ref_info.before_pc,
+                            ref_info.after_pc
                         )),
                         Span::styled(
                             "[removed]",
-                            Style::default().fg(Color::Red).add_modifier(Modifier::UNDERLINED),
+                            Style::default()
+                                .fg(Color::Red)
+                                .add_modifier(Modifier::UNDERLINED),
                         ),
                     ]));
                 }
@@ -1981,7 +2215,9 @@ fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
                         )),
                         Span::styled(
                             "[jump]",
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED),
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::UNDERLINED),
                         ),
                     ]));
                 } else {
@@ -1992,7 +2228,9 @@ fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
                         )),
                         Span::styled(
                             "[removed]",
-                            Style::default().fg(Color::Red).add_modifier(Modifier::UNDERLINED),
+                            Style::default()
+                                .fg(Color::Red)
+                                .add_modifier(Modifier::UNDERLINED),
                         ),
                     ]));
                 }

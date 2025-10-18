@@ -13,7 +13,9 @@ azoth-core = { path = "../core" }
 azoth-transform = { path = "../transforms" }
 clap = { workspace = true, features = ["derive"] }
 hex.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha3.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
