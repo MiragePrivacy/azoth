@@ -1185,13 +1185,12 @@ fn render_block_diff(f: &mut Frame, area: Rect, app: &mut App) {
 
     let step = &app.mapping.transform_steps[app.selected_step];
 
-    // Create three-column layout: [blocks] [diff] [output]
-    let chunks = Layout::default()
+    // Create two-column layout: [blocks] [diff+info]
+    let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(20), // Block list
-            Constraint::Percentage(50), // Mnemonic diff
-            Constraint::Percentage(30), // Output/results
+            Constraint::Percentage(80), // Mnemonic diff + block info
         ])
         .split(area);
 
@@ -1203,12 +1202,12 @@ fn render_block_diff(f: &mut Frame, area: Rect, app: &mut App) {
     let search_active = app.search_mode == SearchMode::Active || !app.search_results.is_empty();
 
     // Cache block list area for mouse interaction
-    app.block_list_area = Some(chunks[0]);
+    app.block_list_area = Some(main_chunks[0]);
 
     // Render block list on the left
     render_block_list(
         f,
-        chunks[0],
+        main_chunks[0],
         &before_blocks,
         app.selected_block,
         &app.search_results,
@@ -1216,7 +1215,16 @@ fn render_block_diff(f: &mut Frame, area: Rect, app: &mut App) {
         &app.mapping.sections,
     );
 
-    // Render mnemonic diff in the middle
+    // Split right side into diff (top) and block info (bottom)
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(70), // Mnemonic diff
+            Constraint::Percentage(30), // Block info
+        ])
+        .split(main_chunks[1]);
+
+    // Render mnemonic diff on top
     if app.selected_block < before_blocks.len() {
         let selected_before_block = before_blocks[app.selected_block];
 
@@ -1229,7 +1237,7 @@ fn render_block_diff(f: &mut Frame, area: Rect, app: &mut App) {
 
         render_mnemonic_diff(
             f,
-            chunks[1],
+            right_chunks[0],
             selected_before_block,
             selected_after_block,
             &step.before.blocks,
@@ -1245,12 +1253,12 @@ fn render_block_diff(f: &mut Frame, area: Rect, app: &mut App) {
             .map(|b| b.instructions.len())
             .unwrap_or(0);
         let max_instructions = before_count.max(after_count) as u16;
-        let visible_lines = chunks[1].height.saturating_sub(2);
+        let visible_lines = right_chunks[0].height.saturating_sub(2);
         app.mnemonic_scroll_max = max_instructions.saturating_sub(visible_lines);
     }
 
-    // Render output/results on the right
-    render_block_output(f, chunks[2], app);
+    // Render block info on bottom
+    render_block_output(f, right_chunks[1], app);
 }
 
 /// Renders the block list (left panel)
@@ -1305,13 +1313,12 @@ fn render_block_list(
                 .copied()
                 .unwrap_or(idx);
 
+            let adjusted_pc = get_adjusted_pc(block.start_pc, sections);
             let content = format!(
-                "Block {:>width$} @ {:#06x}{}\n{} instr, {} bytes",
+                "Block {:>width$} @ {:#06x}{}",
                 display_id,
-                block.start_pc,
+                adjusted_pc,
                 section_str,
-                block.instruction_count,
-                block.byte_size,
                 width = padding_width
             );
 
@@ -1385,6 +1392,23 @@ fn find_section_at_pc<'a>(
     })
 }
 
+/// Gets the adjusted PC value, resetting to 0 at the start of the runtime section
+fn get_adjusted_pc(
+    pc: usize,
+    sections: &Option<Vec<azoth_transform::mapping::SectionInfo>>,
+) -> usize {
+    if let Some(secs) = sections.as_ref() {
+        // Find the runtime section
+        if let Some(runtime_section) = secs.iter().find(|s| s.kind.to_lowercase() == "runtime") {
+            // If PC is in runtime or later sections, subtract the runtime offset
+            if pc >= runtime_section.offset {
+                return pc - runtime_section.offset;
+            }
+        }
+    }
+    pc
+}
+
 /// Renders the mnemonic diff (middle panel)
 fn render_mnemonic_diff(
     f: &mut Frame,
@@ -1410,9 +1434,12 @@ fn render_mnemonic_diff(
         .map(|s| format!(" [{}]", s))
         .unwrap_or_default();
 
+    let adjusted_start = get_adjusted_pc(before_block.start_pc, sections);
+    let adjusted_end = get_adjusted_pc(before_block.end_pc, sections);
+
     let title = format!(
         "Block {} | PC {:#06x}..{:#06x}{}",
-        display_id, before_block.start_pc, before_block.end_pc, section_str
+        display_id, adjusted_start, adjusted_end, section_str
     );
 
     // Create side-by-side diff
@@ -1444,6 +1471,7 @@ fn render_mnemonic_diff(
         .instructions
         .iter()
         .map(|instr| {
+            let adjusted_pc = get_adjusted_pc(instr.pc, sections);
             let imm_str = instr
                 .immediate
                 .as_ref()
@@ -1455,7 +1483,7 @@ fn render_mnemonic_diff(
                     }
                 })
                 .unwrap_or_default();
-            let line = format!("{:#06x}: {}{}", instr.pc, &instr.opcode, imm_str);
+            let line = format!("{:#06x}: {}{}", adjusted_pc, &instr.opcode, imm_str);
             line.len()
         })
         .max()
@@ -1466,6 +1494,7 @@ fn render_mnemonic_diff(
             .instructions
             .iter()
             .map(|instr| {
+                let adjusted_pc = get_adjusted_pc(instr.pc, sections);
                 let imm_str = instr
                     .immediate
                     .as_ref()
@@ -1477,7 +1506,7 @@ fn render_mnemonic_diff(
                         }
                     })
                     .unwrap_or_default();
-                let line = format!("{:#06x}: {}{}", instr.pc, &instr.opcode, imm_str);
+                let line = format!("{:#06x}: {}{}", adjusted_pc, &instr.opcode, imm_str);
                 line.len()
             })
             .max()
@@ -1507,7 +1536,8 @@ fn render_mnemonic_diff(
                 .unwrap_or_default();
 
             // Calculate padding for this hint line
-            let pc_part = format!("{:#06x}: ", instr.pc);
+            let adjusted_pc = get_adjusted_pc(instr.pc, sections);
+            let pc_part = format!("{:#06x}: ", adjusted_pc);
             let current_width = pc_part.len() + instr.opcode.len() + imm_str.len();
             let padding_needed = (max_instr_width).saturating_sub(current_width);
 
@@ -1547,7 +1577,8 @@ fn render_mnemonic_diff(
             .unwrap_or_default();
 
         // Build the full instruction line with proper padding
-        let pc_part = format!("{:#06x}: ", instr.pc);
+        let adjusted_pc = get_adjusted_pc(instr.pc, sections);
+        let pc_part = format!("{:#06x}: ", adjusted_pc);
         let opcode_part = &instr.opcode;
         let imm_part = &imm_str;
 
@@ -1602,9 +1633,17 @@ fn render_mnemonic_diff(
                     if let Some(ref immediate) = instr.immediate {
                         let hex_str = immediate.trim_start_matches("0x");
                         if let Ok(jump_target_pc) = usize::from_str_radix(hex_str, 16) {
+                            // Determine which section the current instruction is in
+                            let current_section = find_section_at_pc(instr.pc, sections);
+
+                            // Find matching block by comparing against adjusted PCs
+                            // Only search blocks in the same section as the current instruction
                             if let Some(target_block) = all_before_blocks
                                 .iter()
-                                .find(|b| b.start_pc == jump_target_pc)
+                                .find(|b| {
+                                    let block_section = find_section_at_pc(b.start_pc, sections);
+                                    block_section == current_section && get_adjusted_pc(b.start_pc, sections) == jump_target_pc
+                                })
                             {
                                 // Jump target is at the start of a block
                                 let target_display_id = before_id_map
@@ -1619,7 +1658,13 @@ fn render_mnemonic_diff(
                             } else {
                                 // Jump target doesn't match any block start - check if it falls within a block
                                 let containing_block = all_before_blocks.iter().find(|b| {
-                                    jump_target_pc >= b.start_pc && jump_target_pc < b.end_pc
+                                    let block_section = find_section_at_pc(b.start_pc, sections);
+                                    if block_section != current_section {
+                                        return false;
+                                    }
+                                    let adjusted_start = get_adjusted_pc(b.start_pc, sections);
+                                    let adjusted_end = get_adjusted_pc(b.end_pc, sections);
+                                    jump_target_pc >= adjusted_start && jump_target_pc < adjusted_end
                                 });
 
                                 if let Some(container) = containing_block {
@@ -1690,7 +1735,8 @@ fn render_mnemonic_diff(
                 .unwrap_or_default();
 
             // Calculate padding for this hint line
-            let pc_part = format!("{:#06x}: ", instr.pc);
+            let adjusted_pc = get_adjusted_pc(instr.pc, sections);
+            let pc_part = format!("{:#06x}: ", adjusted_pc);
             let current_width = pc_part.len() + instr.opcode.len() + imm_str.len();
             let padding_needed = (max_instr_width).saturating_sub(current_width);
 
@@ -1800,7 +1846,8 @@ fn render_mnemonic_diff(
                 .unwrap_or_default();
 
             // Build the full instruction line with proper padding
-            let pc_part = format!("{:#06x}: ", instr.pc);
+            let adjusted_pc = get_adjusted_pc(instr.pc, sections);
+            let pc_part = format!("{:#06x}: ", adjusted_pc);
             let opcode_part = &instr.opcode;
             let imm_part = &imm_str;
 
@@ -1855,9 +1902,17 @@ fn render_mnemonic_diff(
                         if let Some(ref immediate) = instr.immediate {
                             let hex_str = immediate.trim_start_matches("0x");
                             if let Ok(jump_target_pc) = usize::from_str_radix(hex_str, 16) {
+                                // Determine which section the current instruction is in
+                                let current_section = find_section_at_pc(instr.pc, sections);
+
+                                // Find matching block by comparing against adjusted PCs
+                                // Only search blocks in the same section as the current instruction
                                 if let Some(target_block) = all_after_blocks
                                     .iter()
-                                    .find(|b| b.start_pc == jump_target_pc)
+                                    .find(|b| {
+                                        let block_section = find_section_at_pc(b.start_pc, sections);
+                                        block_section == current_section && get_adjusted_pc(b.start_pc, sections) == jump_target_pc
+                                    })
                                 {
                                     // Jump target is at the start of a block
                                     let target_display_id = after_id_map
@@ -1872,7 +1927,13 @@ fn render_mnemonic_diff(
                                 } else {
                                     // Jump target doesn't match any block start - check if it falls within a block
                                     let containing_block = all_after_blocks.iter().find(|b| {
-                                        jump_target_pc >= b.start_pc && jump_target_pc < b.end_pc
+                                        let block_section = find_section_at_pc(b.start_pc, sections);
+                                        if block_section != current_section {
+                                            return false;
+                                        }
+                                        let adjusted_start = get_adjusted_pc(b.start_pc, sections);
+                                        let adjusted_end = get_adjusted_pc(b.end_pc, sections);
+                                        jump_target_pc >= adjusted_start && jump_target_pc < adjusted_end
                                     });
 
                                     if let Some(container) = containing_block {
@@ -1993,19 +2054,20 @@ fn render_mnemonic_diff(
     }
 }
 
-/// Renders the output/results panel (right panel)
+/// Renders the output/results panel (bottom panel with 2 columns)
 fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
     if app.selected_step >= app.mapping.transform_steps.len() {
         return;
     }
 
-    // Cache the output area for mouse interaction
-    app.output_area = Some(area);
     app.output_block_refs.clear();
+    let selected_step = app.selected_step;
+    let selected_block = app.selected_block;
 
-    let step = &app.mapping.transform_steps[app.selected_step];
+    let step = &app.mapping.transform_steps[selected_step];
     let before_blocks: Vec<&azoth_transform::mapping::BlockInfo> =
         step.before.blocks.iter().collect();
+    let sections = &app.mapping.sections;
 
     // Create block ID mapping for display IDs and reverse mapping (display_id -> block_index)
     let before_id_map = create_block_id_mapping(&step.before.blocks);
@@ -2017,10 +2079,47 @@ fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
+    // Split into two columns
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(50), // Left: Info + Before + After
+            Constraint::Percentage(50), // Right: References
+        ])
+        .split(area);
+
+    // Cache the references column area for mouse interaction (right column only)
+    app.output_area = Some(columns[1]);
+
+    // Render each column
+    render_info_column(f, columns[0], selected_block, &before_blocks, &before_id_map, step, sections);
+    render_references_column(
+        f,
+        columns[1],
+        &mut app.output_block_refs,
+        selected_block,
+        &before_blocks,
+        &before_id_map,
+        &display_to_idx,
+        step,
+        sections,
+    );
+}
+
+/// Renders the info column: Block ID, Section, Type, Before, After, and Changes
+fn render_info_column(
+    f: &mut Frame,
+    area: Rect,
+    selected_block: usize,
+    before_blocks: &[&azoth_transform::mapping::BlockInfo],
+    before_id_map: &std::collections::HashMap<usize, usize>,
+    step: &azoth_transform::mapping::TransformStep,
+    sections: &Option<Vec<azoth_transform::mapping::SectionInfo>>,
+) {
     let mut lines = vec![];
 
-    if app.selected_block < before_blocks.len() {
-        let before_block = before_blocks[app.selected_block];
+    if selected_block < before_blocks.len() {
+        let before_block = before_blocks[selected_block];
         let after_block = step
             .after
             .blocks
@@ -2037,7 +2136,7 @@ fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
         ]));
 
         // Add section information
-        if let Some(section_name) = find_section_at_pc(before_block.start_pc, &app.mapping.sections)
+        if let Some(section_name) = find_section_at_pc(before_block.start_pc, sections)
         {
             lines.push(Line::from(vec![
                 Span::styled("Section: ", Style::default().fg(Color::Yellow)),
@@ -2090,9 +2189,11 @@ fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
             "Before:",
             Style::default().fg(Color::Red),
         )));
+        let adjusted_start = get_adjusted_pc(before_block.start_pc, sections);
+        let adjusted_end = get_adjusted_pc(before_block.end_pc, sections);
         lines.push(Line::from(format!(
             "  PC: {:#06x}..{:#06x}",
-            before_block.start_pc, before_block.end_pc
+            adjusted_start, adjusted_end
         )));
         lines.push(Line::from(format!(
             "  Instructions: {}",
@@ -2100,149 +2201,7 @@ fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
         )));
         lines.push(Line::from(format!("  Bytes: {}", before_block.byte_size)));
 
-        // Find blocks that this block jumps to
-        let referenced_blocks = find_referenced_blocks(before_block, &before_blocks, step);
-        if !referenced_blocks.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                format!("References {} block(s):", referenced_blocks.len()),
-                Style::default().fg(Color::Yellow),
-            )));
-
-            // Find max block ID width for padding
-            let max_block_id_width = referenced_blocks
-                .iter()
-                .take(5)
-                .filter_map(|ref_info| before_id_map.get(&ref_info.block_id))
-                .map(|id| id.to_string().len())
-                .max()
-                .unwrap_or(1);
-
-            for ref_info in referenced_blocks.iter().take(5) {
-                let status_marker = if ref_info.valid { "✓" } else { "✗" };
-                let ref_display_id = before_id_map
-                    .get(&ref_info.block_id)
-                    .unwrap_or(&ref_info.block_id);
-
-                // Record this as a clickable reference
-                let line_num = lines.len() as u16;
-                if let Some(&block_idx) = display_to_idx.get(ref_display_id) {
-                    app.output_block_refs.push((line_num, block_idx));
-                }
-
-                let block_str = format!("Block {}", ref_display_id);
-                let padding = " ".repeat(max_block_id_width - ref_display_id.to_string().len());
-
-                if ref_info.valid {
-                    lines.push(Line::from(vec![
-                        Span::raw(format!(
-                            "  {} {} {}@ {:#06x} → {:#06x} ",
-                            status_marker,
-                            block_str,
-                            padding,
-                            ref_info.before_pc,
-                            ref_info.after_pc
-                        )),
-                        Span::styled(
-                            "[jump]",
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::UNDERLINED),
-                        ),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![
-                        Span::raw(format!(
-                            "  {} {} {}@ {:#06x} → {:#06x} ",
-                            status_marker,
-                            block_str,
-                            padding,
-                            ref_info.before_pc,
-                            ref_info.after_pc
-                        )),
-                        Span::styled(
-                            "[removed]",
-                            Style::default()
-                                .fg(Color::Red)
-                                .add_modifier(Modifier::UNDERLINED),
-                        ),
-                    ]));
-                }
-            }
-            if referenced_blocks.len() > 5 {
-                lines.push(Line::from(format!(
-                    "  ... and {} more",
-                    referenced_blocks.len() - 5
-                )));
-            }
-        }
-
-        // Find blocks that reference this block (by checking for jumps to start_pc)
-        let referencing_blocks = find_referencing_blocks(before_block, &before_blocks, step);
-        if !referencing_blocks.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                format!("Referenced by {} block(s):", referencing_blocks.len()),
-                Style::default().fg(Color::Cyan),
-            )));
-
-            // Find max block ID width for padding
-            let max_block_id_width = referencing_blocks
-                .iter()
-                .take(5)
-                .filter_map(|(ref_block_id, _, _)| before_id_map.get(ref_block_id))
-                .map(|id| id.to_string().len())
-                .max()
-                .unwrap_or(1);
-
-            for (ref_block_id, ref_start_pc, exists_in_after) in referencing_blocks.iter().take(5) {
-                let ref_display_id = before_id_map.get(ref_block_id).unwrap_or(ref_block_id);
-
-                // Record as clickable - blocks exist in before state even if removed in after
-                let line_num = lines.len() as u16;
-                if let Some(&block_idx) = display_to_idx.get(ref_display_id) {
-                    app.output_block_refs.push((line_num, block_idx));
-                }
-
-                let block_str = format!("Block {}", ref_display_id);
-                let padding = " ".repeat(max_block_id_width - ref_display_id.to_string().len());
-
-                if *exists_in_after {
-                    lines.push(Line::from(vec![
-                        Span::raw(format!(
-                            "  {} {}@ {:#06x} ",
-                            block_str, padding, ref_start_pc
-                        )),
-                        Span::styled(
-                            "[jump]",
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::UNDERLINED),
-                        ),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![
-                        Span::raw(format!(
-                            "  {} {}@ {:#06x} ",
-                            block_str, padding, ref_start_pc
-                        )),
-                        Span::styled(
-                            "[removed]",
-                            Style::default()
-                                .fg(Color::Red)
-                                .add_modifier(Modifier::UNDERLINED),
-                        ),
-                    ]));
-                }
-            }
-            if referencing_blocks.len() > 5 {
-                lines.push(Line::from(format!(
-                    "  ... and {} more",
-                    referencing_blocks.len() - 5
-                )));
-            }
-        }
-
+        // Add After section
         lines.push(Line::from(""));
         if let Some(after) = after_block {
             lines.push(Line::from(Span::styled(
@@ -2277,43 +2236,261 @@ fn render_block_output(f: &mut Frame, area: Rect, app: &mut App) {
                 Style::default().fg(Color::Red),
             )));
         }
+    } else {
+        lines.push(Line::from("No block selected"));
     }
-
-    // Calculate scroll max
-    let total_lines = lines.len() as u16;
-    let visible_lines = area.height.saturating_sub(2); // Account for borders
-    app.output_scroll_max = total_lines.saturating_sub(visible_lines);
 
     let paragraph = Paragraph::new(lines)
         .block(
             Block::default()
                 .title("Block Information")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Magenta)),
+                .border_style(Style::default().fg(Color::Yellow)),
         )
-        .scroll((app.output_scroll, 0))
         .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, area);
+}
 
-    // Render scrollbar if needed
-    if total_lines > visible_lines {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓"));
-
-        let mut scrollbar_state = ScrollbarState::new(app.output_scroll_max as usize)
-            .position(app.output_scroll as usize);
-
-        f.render_stateful_widget(
-            scrollbar,
-            area.inner(ratatui::layout::Margin {
-                vertical: 1,
-                horizontal: 0,
-            }),
-            &mut scrollbar_state,
-        );
+/// Renders the references column: Referenced blocks and Referencing blocks (split vertically)
+fn render_references_column(
+    f: &mut Frame,
+    area: Rect,
+    output_block_refs: &mut Vec<(u16, usize)>,
+    selected_block: usize,
+    before_blocks: &[&azoth_transform::mapping::BlockInfo],
+    before_id_map: &std::collections::HashMap<usize, usize>,
+    display_to_idx: &std::collections::HashMap<usize, usize>,
+    step: &azoth_transform::mapping::TransformStep,
+    sections: &Option<Vec<azoth_transform::mapping::SectionInfo>>,
+) {
+    if selected_block >= before_blocks.len() {
+        let paragraph = Paragraph::new(vec![Line::from("No block selected")])
+            .block(
+                Block::default()
+                    .title("References")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            );
+        f.render_widget(paragraph, area);
+        return;
     }
+
+    let before_block = before_blocks[selected_block];
+
+    // Find blocks that this block jumps to and blocks that reference this block
+    let referenced_blocks = find_referenced_blocks(before_block, before_blocks, step, sections);
+    let referencing_blocks = find_referencing_blocks(before_block, before_blocks, step);
+
+    // Split vertically into two sections
+    let sections_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(50), // References (top)
+            Constraint::Percentage(50), // Referenced by (bottom)
+        ])
+        .split(area);
+
+    // Calculate offsets for click handling
+    // Click handler calculates: clicked_line = row.saturating_sub(area.y + 1)
+    // where area is columns[1] (the references column with no outer border)
+    // So clicked_line 0 = first pixel inside the column = top section's top border
+    // clicked_line 1 = first content line of top section
+
+    // Top section: border at clicked_line 0, content starts at clicked_line 1
+    let top_offset = 0; // First line is at offset 0, but we add 1 when recording (for border)
+    render_references_section(
+        f,
+        sections_layout[0],
+        output_block_refs,
+        &referenced_blocks,
+        before_id_map,
+        display_to_idx,
+        sections,
+        top_offset,
+    );
+
+    // Bottom section: starts at clicked_line = top_section.height
+    let bottom_offset = sections_layout[0].height;
+    render_referenced_by_section(
+        f,
+        sections_layout[1],
+        output_block_refs,
+        &referencing_blocks,
+        before_id_map,
+        display_to_idx,
+        sections,
+        bottom_offset,
+    );
+}
+
+/// Renders the "References X blocks" section
+fn render_references_section(
+    f: &mut Frame,
+    area: Rect,
+    output_block_refs: &mut Vec<(u16, usize)>,
+    referenced_blocks: &[BlockReference],
+    before_id_map: &std::collections::HashMap<usize, usize>,
+    display_to_idx: &std::collections::HashMap<usize, usize>,
+    sections: &Option<Vec<azoth_transform::mapping::SectionInfo>>,
+    y_offset: u16,
+) {
+    let mut lines = vec![];
+
+    if !referenced_blocks.is_empty() {
+        // Find max block ID width for padding
+        let max_block_id_width = referenced_blocks
+            .iter()
+            .filter_map(|ref_info| before_id_map.get(&ref_info.block_id))
+            .map(|id| id.to_string().len())
+            .max()
+            .unwrap_or(1);
+
+        for ref_info in referenced_blocks.iter() {
+            let status_marker = if ref_info.valid { "✓" } else { "✗" };
+            let ref_display_id = before_id_map
+                .get(&ref_info.block_id)
+                .unwrap_or(&ref_info.block_id);
+
+            let block_str = format!("Block {}", ref_display_id);
+            let padding = " ".repeat(max_block_id_width - ref_display_id.to_string().len());
+
+            let adjusted_before_pc = get_adjusted_pc(ref_info.before_pc, sections);
+            let adjusted_after_pc = get_adjusted_pc(ref_info.after_pc, sections);
+
+            // Record this as a clickable reference BEFORE pushing the line
+            // lines.len() is the current line about to be added
+            let line_num = y_offset + lines.len() as u16;
+            if let Some(&block_idx) = display_to_idx.get(ref_display_id) {
+                output_block_refs.push((line_num, block_idx));
+            }
+
+            if ref_info.valid {
+                lines.push(Line::from(vec![
+                    Span::raw(format!(
+                        "{} {} {}@ {:#06x} → {:#06x} ",
+                        status_marker,
+                        block_str,
+                        padding,
+                        adjusted_before_pc,
+                        adjusted_after_pc
+                    )),
+                    Span::styled(
+                        "[jump]",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw(format!(
+                        "{} {} {}@ {:#06x} → {:#06x} ",
+                        status_marker,
+                        block_str,
+                        padding,
+                        adjusted_before_pc,
+                        adjusted_after_pc
+                    )),
+                    Span::styled(
+                        "[removed]",
+                        Style::default()
+                            .fg(Color::Red)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ),
+                ]));
+            }
+        }
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(format!("References {} blocks", referenced_blocks.len()))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(paragraph, area);
+}
+
+/// Renders the "Referenced by X blocks" section
+fn render_referenced_by_section(
+    f: &mut Frame,
+    area: Rect,
+    output_block_refs: &mut Vec<(u16, usize)>,
+    referencing_blocks: &[(usize, usize, bool)],
+    before_id_map: &std::collections::HashMap<usize, usize>,
+    display_to_idx: &std::collections::HashMap<usize, usize>,
+    sections: &Option<Vec<azoth_transform::mapping::SectionInfo>>,
+    y_offset: u16,
+) {
+    let mut lines = vec![];
+
+    if !referencing_blocks.is_empty() {
+        // Find max block ID width for padding
+        let max_block_id_width = referencing_blocks
+            .iter()
+            .filter_map(|(ref_block_id, _, _)| before_id_map.get(ref_block_id))
+            .map(|id| id.to_string().len())
+            .max()
+            .unwrap_or(1);
+
+        for (ref_block_id, ref_start_pc, exists_in_after) in referencing_blocks.iter() {
+            let ref_display_id = before_id_map.get(ref_block_id).unwrap_or(ref_block_id);
+
+            let block_str = format!("Block {}", ref_display_id);
+            let padding = " ".repeat(max_block_id_width - ref_display_id.to_string().len());
+            let adjusted_ref_pc = get_adjusted_pc(*ref_start_pc, sections);
+
+            // Record as clickable BEFORE pushing the line
+            // lines.len() is the current line about to be added
+            let line_num = y_offset + lines.len() as u16;
+            if let Some(&block_idx) = display_to_idx.get(ref_display_id) {
+                output_block_refs.push((line_num, block_idx));
+            }
+
+            if *exists_in_after {
+                lines.push(Line::from(vec![
+                    Span::raw(format!(
+                        "{} {}@ {:#06x} ",
+                        block_str, padding, adjusted_ref_pc
+                    )),
+                    Span::styled(
+                        "[jump]",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw(format!(
+                        "{} {}@ {:#06x} ",
+                        block_str, padding, adjusted_ref_pc
+                    )),
+                    Span::styled(
+                        "[removed]",
+                        Style::default()
+                            .fg(Color::Red)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ),
+                ]));
+            }
+        }
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(format!("Referenced by {} blocks", referencing_blocks.len()))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(paragraph, area);
 }
 
 /// Information about a block reference with validation.
@@ -2338,6 +2515,7 @@ fn find_referenced_blocks(
     source_block: &azoth_transform::mapping::BlockInfo,
     all_before_blocks: &[&azoth_transform::mapping::BlockInfo],
     step: &azoth_transform::mapping::TransformStep,
+    sections: &Option<Vec<azoth_transform::mapping::SectionInfo>>,
 ) -> Vec<BlockReference> {
     let mut references = Vec::new();
     let instructions = &source_block.instructions;
@@ -2357,10 +2535,17 @@ fn find_referenced_blocks(
                 // Remove 0x prefix if present and parse as hex
                 let hex_str = immediate.trim_start_matches("0x");
                 if let Ok(jump_target_pc) = usize::from_str_radix(hex_str, 16) {
-                    // Find the target block in before state
+                    // Determine which section the current instruction is in
+                    let current_section = find_section_at_pc(current.pc, sections);
+
+                    // Find the target block in before state by comparing against adjusted PCs
+                    // Only search blocks in the same section
                     if let Some(target_block) = all_before_blocks
                         .iter()
-                        .find(|b| b.start_pc == jump_target_pc)
+                        .find(|b| {
+                            let block_section = find_section_at_pc(b.start_pc, sections);
+                            block_section == current_section && get_adjusted_pc(b.start_pc, sections) == jump_target_pc
+                        })
                     {
                         // Check if the block still exists in after state with same block_id
                         let after_block = step
