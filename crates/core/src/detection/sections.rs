@@ -486,6 +486,8 @@ fn detect_codecopy_return_pattern(instructions: &[Instruction]) -> Option<(usize
     let mut runtime_start = None;
 
     // Look backwards from CODECOPY for PUSH instructions
+    // CODECOPY stack layout: [destOffset, offset, size] where offset is where runtime starts,
+    // and size is how many bytes to copy. Scanning backwards, we encounter them in reverse order.
     for instruction in (0..codecopy_idx).rev().take(10) {
         if matches!(
             instructions[instruction].op,
@@ -493,12 +495,12 @@ fn detect_codecopy_return_pattern(instructions: &[Instruction]) -> Option<(usize
         ) && let Some(immediate) = &instructions[instruction].imm
             && let Ok(value) = usize::from_str_radix(immediate, 16)
         {
-            if runtime_len.is_none() && value > 0 && value < 100000 {
-                // First reasonable value could be runtime length
-                runtime_len = Some(value);
-            } else if runtime_start.is_none() && value > 0 && value < 100000 {
-                // Second reasonable value could be runtime start
+            if runtime_start.is_none() && value > 0 && value < 100000 {
+                // First reasonable value (scanning backwards) is the offset where runtime starts
                 runtime_start = Some(value);
+            } else if runtime_len.is_none() && value > 0 && value < 100000 {
+                // Second reasonable value is the size of the runtime code
+                runtime_len = Some(value);
             }
 
             if runtime_len.is_some() && runtime_start.is_some() {
