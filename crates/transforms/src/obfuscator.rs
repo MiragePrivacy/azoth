@@ -212,7 +212,20 @@ pub async fn obfuscate_bytecode(
     // Initialize mapping if requested
     let mut obfuscation_mapping = if config.generate_mappings {
         let original_hex = hex::encode(&bytes);
-        Some(ObfuscationMapping::new(original_hex, original_size))
+        let mut mapping = ObfuscationMapping::new(original_hex, original_size);
+
+        // Add section information
+        let section_infos: Vec<crate::mapping::SectionInfo> = sections
+            .iter()
+            .map(|s| crate::mapping::SectionInfo {
+                kind: format!("{:?}", s.kind),
+                offset: s.offset,
+                len: s.len,
+            })
+            .collect();
+        mapping.set_sections(section_infos);
+
+        Some(mapping)
     } else {
         None
     };

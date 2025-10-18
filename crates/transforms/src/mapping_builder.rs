@@ -306,7 +306,7 @@ fn extract_semantic_changes(
     let mut has_changes = false;
     let mut selector_mapping = None;
     let mut jump_target_remapping = HashMap::new();
-    let annotations = HashMap::new();
+    let mut annotations = HashMap::new();
 
     // Extract function selector mapping for FunctionDispatcher transform
     if transform_name == "FunctionDispatcher" {
@@ -316,6 +316,20 @@ fn extract_semantic_changes(
                 .map(|(k, v)| (format!("{:08x}", k), v.clone()))
                 .collect();
             selector_mapping = Some(mapped);
+            has_changes = true;
+        }
+
+        // Add dispatcher block information to annotations
+        if !cfg_ir.dispatcher_blocks.is_empty() {
+            let block_ids: Vec<String> = cfg_ir
+                .dispatcher_blocks
+                .iter()
+                .map(|id| id.to_string())
+                .collect();
+            annotations.insert(
+                "dispatcher_blocks".to_string(),
+                block_ids.join(","),
+            );
             has_changes = true;
         }
     }

@@ -9,6 +9,20 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Information about a bytecode section.
+///
+/// Captures the boundaries and type of different sections in the bytecode
+/// such as init code, runtime code, and auxiliary data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SectionInfo {
+    /// Type of section (Init, Runtime, Auxdata, etc.)
+    pub kind: String,
+    /// Start offset in bytes
+    pub offset: usize,
+    /// Length in bytes
+    pub len: usize,
+}
+
 /// Complete mapping output for an obfuscation session.
 ///
 /// Contains all transformations applied to the bytecode, with detailed tracking
@@ -27,6 +41,9 @@ pub struct ObfuscationMapping {
     pub transform_steps: Vec<TransformStep>,
     /// Overall program counter mapping from original to final bytecode
     pub final_pc_mapping: HashMap<usize, usize>,
+    /// Bytecode sections detected in the original bytecode
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sections: Option<Vec<SectionInfo>>,
 }
 
 /// Captures the state changes from a single obfuscation transform.
@@ -225,7 +242,16 @@ impl ObfuscationMapping {
             final_size: 0,
             transform_steps: Vec::new(),
             final_pc_mapping: HashMap::new(),
+            sections: None,
         }
+    }
+
+    /// Sets section information for the mapping.
+    ///
+    /// # Arguments
+    /// * `sections` - Detected bytecode sections from the original bytecode
+    pub fn set_sections(&mut self, sections: Vec<SectionInfo>) {
+        self.sections = Some(sections);
     }
 
     /// Adds a transform step to the mapping.

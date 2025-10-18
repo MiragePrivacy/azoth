@@ -90,6 +90,9 @@ pub struct CfgIrBundle {
     /// Last PC mapping from the most recent reindexing operation.
     /// Maps old PC → new PC after structural changes.
     pub last_pc_mapping: HashMap<usize, usize>,
+    /// Set of logical_ids for blocks that were part of the original function dispatcher.
+    /// Only populated when dispatcher transform is applied.
+    pub dispatcher_blocks: std::collections::HashSet<usize>,
 }
 
 /// Builds a CFG with IR in SSA form from decoded instructions and sections.
@@ -142,6 +145,7 @@ pub fn build_cfg_ir(
         sections: sections.to_vec(),
         selector_mapping: None, // Initially empty, set by transforms
         last_pc_mapping: HashMap::new(), // Initially empty
+        dispatcher_blocks: std::collections::HashSet::new(), // Initially empty
     })
 }
 
@@ -196,6 +200,7 @@ fn build_cfg_ir_with_logical_ids(
         sections: sections.to_vec(),
         selector_mapping: None,
         last_pc_mapping: HashMap::new(),
+        dispatcher_blocks: std::collections::HashSet::new(),
     })
 }
 
@@ -215,6 +220,7 @@ impl CfgIrBundle {
     ) -> Result<(), Error> {
         let clean_report = self.clean_report.clone();
         let selector_mapping = self.selector_mapping.clone(); // Preserve mapping
+        let dispatcher_blocks = self.dispatcher_blocks.clone(); // Preserve dispatcher blocks
         let new_bundle = build_cfg_ir(&instructions, sections, clean_report)?;
 
         self.cfg = new_bundle.cfg;
@@ -223,6 +229,7 @@ impl CfgIrBundle {
         self.sections = new_bundle.sections;
         self.selector_mapping = selector_mapping; // Restore mapping
         self.last_pc_mapping = HashMap::new(); // Reset after rebuild
+        self.dispatcher_blocks = dispatcher_blocks; // Restore dispatcher blocks
 
         Ok(())
     }
@@ -247,6 +254,7 @@ impl CfgIrBundle {
     ) -> Result<(), Error> {
         let clean_report = self.clean_report.clone();
         let selector_mapping = self.selector_mapping.clone();
+        let dispatcher_blocks = self.dispatcher_blocks.clone();
         let new_bundle = build_cfg_ir_with_logical_ids(&instructions, sections, clean_report, pc_to_logical_id)?;
 
         self.cfg = new_bundle.cfg;
@@ -255,6 +263,7 @@ impl CfgIrBundle {
         self.sections = new_bundle.sections;
         self.selector_mapping = selector_mapping;
         self.last_pc_mapping = HashMap::new();
+        self.dispatcher_blocks = dispatcher_blocks;
 
         Ok(())
     }
