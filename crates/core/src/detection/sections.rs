@@ -370,41 +370,25 @@ pub fn validate_sections(sections: &[Section], total_len: usize) -> Result<(), E
 /// # Returns
 /// Optional tuple of (offset, length) if Auxdata is found, None otherwise.
 fn detect_auxdata(bytes: &[u8]) -> Option<(usize, usize)> {
-    const MARKER: &[u8] = &[0xa1, 0x65, 0x62, 0x7a, 0x7a, 0x72]; // a165627a7a72
     let len = bytes.len();
-    if len < MARKER.len() + 2 {
+
+    if len < 2 {
         tracing::debug!("Bytecode too short for auxdata: len={}", len);
         return None;
     }
 
-    // Canonical path: trust len_raw when it is plausible
-    let len_raw = u16::from_be_bytes([bytes[len - 2], bytes[len - 1]]) as usize;
-    if len_raw > 0 && len_raw + 2 <= len && bytes[len - len_raw - 2..len - 2].starts_with(MARKER) {
-        let off = len - len_raw - 2;
+    let auxdata_length = u16::from_be_bytes([bytes[len - 2], bytes[len - 1]]) as usize;
+
+    if len < 2 + auxdata_length {
         tracing::debug!(
-            "Auxdata detected (canonical): offset={}, len={}",
-            off,
-            len_raw + 2
+            "Malformed bytecode: detected auxdata length={}, actual bytecode length (excluding the last two bytes)={}",
+            auxdata_length,
+            len - 2
         );
-        return Some((off, len_raw + 2));
+        return None;
     }
 
-    // Fallback: scan last ≤64 bytes for the marker
-    let tail_start = len.saturating_sub(64 + MARKER.len());
-    for off in (tail_start..=len - MARKER.len()).rev() {
-        if bytes[off..off + MARKER.len()] == *MARKER {
-            let aux_len = len - off;
-            tracing::debug!(
-                "Auxdata detected (fallback): offset={}, len={}",
-                off,
-                aux_len
-            );
-            return Some((off, aux_len)); // Marker to EOF
-        }
-    }
-
-    tracing::debug!("No auxdata marker found");
-    None
+    Some((len - 2 - auxdata_length, auxdata_length))
 }
 
 /// Detects Padding section before Auxdata.
@@ -592,5 +576,23 @@ fn detect_constructor_args(
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hex::FromHex;
+
+    use super::*;
+
+    const STORAGE_BYTECODE: &str = "6080604052348015600e575f5ffd5b50603e80601a5f395ff3fe60806040525f5ffdfea2646970667358221220e8c66682f723c073c8c5ec2c0de0795c9b8b64e310482b13bc56a554d057842b64736f6c634300081e0033";
+
+    #[test]
+    fn detect_auxdata_works() {
+        let bytecode = Vec::from_hex(STORAGE_BYTECODE).unwrap();
+        let (auxdata_offset, auxdata_length) = detect_auxdata(&bytecode).unwrap();
+
+        assert!(auxdata_offset == 35);
+        assert!(auxdata_length == 51);
     }
 }
