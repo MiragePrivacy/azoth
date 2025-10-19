@@ -296,7 +296,8 @@ impl FunctionDispatcher {
                 let target_for_push = selector_info.target_address;
 
                 // Generate comparison with PC-relative internal jumps
-                let comparison_block = self.create_token_comparison(token, target_for_push, base_offset)?;
+                let comparison_block =
+                    self.create_token_comparison(token, target_for_push, base_offset)?;
 
                 // Debug: log the first comparison block details
                 if idx == 0 {
@@ -305,7 +306,10 @@ impl FunctionDispatcher {
                         selector_info.selector
                     );
                     debug!("  Token: 0x{}", hex::encode(token));
-                    debug!("  Runtime-relative target PC (for PUSH): 0x{:x}", target_for_push);
+                    debug!(
+                        "  Runtime-relative target PC (for PUSH): 0x{:x}",
+                        target_for_push
+                    );
                     debug!("  Comparison block instructions:");
                     for (i, instr) in comparison_block.iter().enumerate() {
                         debug!("    [{}] {:?} {:?}", i, instr.op, instr.imm);
@@ -416,7 +420,7 @@ impl FunctionDispatcher {
         instructions.extend(vec![
             self.create_instruction(Opcode::POP, None)?, // []  (remove token)
             self.create_push_instruction(absolute_target, Some(target_push_bytes))?, // [absolute target PC]
-            self.create_instruction(Opcode::JUMP, None)?, // JUMP
+            self.create_instruction(Opcode::JUMP, None)?,                            // JUMP
         ]);
 
         // After_i label for the next comparison
@@ -880,15 +884,17 @@ impl Transform for FunctionDispatcher {
                     );
                     debug!(
                         "    Draining indices [{}..{}) from block",
-                        block_dispatcher_start,
-                        block_dispatcher_end
+                        block_dispatcher_start, block_dispatcher_end
                     );
 
                     if block_dispatcher_start < instructions.len()
                         && block_dispatcher_end > block_dispatcher_start
                     {
                         instructions.drain(block_dispatcher_start..block_dispatcher_end);
-                        debug!("    After drain: {} instructions remain", instructions.len());
+                        debug!(
+                            "    After drain: {} instructions remain",
+                            instructions.len()
+                        );
                         *max_stack = (*max_stack).max(needed_stack);
                     }
                 }
@@ -915,7 +921,11 @@ impl Transform for FunctionDispatcher {
 
             // Update affected_blocks to exclude removed blocks
             affected_blocks.retain(|(block_idx, _, _)| !empty_blocks.contains(block_idx));
-            debug!("  Removed {} empty blocks, {} affected blocks remain", empty_blocks.len(), affected_blocks.len());
+            debug!(
+                "  Removed {} empty blocks, {} affected blocks remain",
+                empty_blocks.len(),
+                affected_blocks.len()
+            );
 
             // Insert the disguised dispatcher into the first affected block
             debug!("=== Inserting New Dispatcher ===");
@@ -941,7 +951,8 @@ impl Transform for FunctionDispatcher {
                     instructions.insert(insertion_point + i, new_instruction);
                 }
 
-                let net_change = instructions.len() as isize - orig_len_first as isize + (end - start) as isize;
+                let net_change =
+                    instructions.len() as isize - orig_len_first as isize + (end - start) as isize;
                 debug!(
                     "    Block after insert: {} instructions (net change: {:+})",
                     instructions.len(),

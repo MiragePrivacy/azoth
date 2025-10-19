@@ -358,8 +358,12 @@ fn detect_auxdata(bytes: &[u8]) -> Option<(usize, usize)> {
 
     let auxdata_length = u16::from_be_bytes([bytes[len - 2], bytes[len - 1]]) as usize;
 
-    if len< 2 + auxdata_length {
-        tracing::debug!("Malformed bytecode: detected auxdata length={}, actual bytecode length (excluding the last two bytes)={}", auxdata_length, len - 2);
+    if len < 2 + auxdata_length {
+        tracing::debug!(
+            "Malformed bytecode: detected auxdata length={}, actual bytecode length (excluding the last two bytes)={}",
+            auxdata_length,
+            len - 2
+        );
         return None;
     }
 
@@ -543,7 +547,7 @@ mod tests {
     use super::*;
 
     const STORAGE_BYTECODE: &str = "6080604052348015600e575f5ffd5b50603e80601a5f395ff3fe60806040525f5ffdfea2646970667358221220e8c66682f723c073c8c5ec2c0de0795c9b8b64e310482b13bc56a554d057842b64736f6c634300081e0033";
-    
+
     #[test]
     fn detect_auxdata_works() {
         let bytecode = Vec::from_hex(STORAGE_BYTECODE).unwrap();
