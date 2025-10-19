@@ -282,3 +282,6 @@ mod escrow;
 
 #[cfg(test)]
 mod test_original;
+
+#[cfg(test)]
+mod test_counter;

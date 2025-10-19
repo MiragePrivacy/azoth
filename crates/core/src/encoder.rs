@@ -154,10 +154,10 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
 ///
 /// # Arguments
 /// * `runtime` - The cleaned runtime bytecode as a slice of bytes.
-/// * `report` - The `CleanReport` containing metadata about removed sections.
+/// * `report` - The `CleanReport` containing metadata about removed sections (mutable to update init code).
 ///
 /// # Returns
 /// The reassembled bytecode as a `Vec<u8>`.
-pub fn rebuild(runtime: &[u8], report: &CleanReport) -> Vec<u8> {
+pub fn rebuild(runtime: &[u8], report: &mut CleanReport) -> Vec<u8> {
     report.reassemble(runtime)
 }

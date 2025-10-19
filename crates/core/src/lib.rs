@@ -106,7 +106,37 @@ pub async fn process_bytecode_to_cfg(
     let (instructions, _, _, bytes) = decoder::decode_bytecode(bytecode, is_file).await?;
     let sections = detection::locate_sections(&bytes, &instructions)?;
     let (_, report) = strip::strip_bytecode(&bytes, &sections)?;
-    let cfg_bundle = cfg_ir::build_cfg_ir(&instructions, &sections, report)?;
+
+    // CRITICAL FIX: Filter instructions to only runtime section before building CFG
+    // The CFG should only contain runtime code, not init code or metadata
+    let runtime_section = sections
+        .iter()
+        .find(|s| matches!(s.kind, detection::SectionKind::Runtime))
+        .ok_or("No Runtime section found in bytecode")?;
+
+    let runtime_start_pc = runtime_section.offset;
+    let runtime_end_pc = runtime_section.offset + runtime_section.len;
+
+    tracing::debug!(
+        "Filtering instructions to runtime section: PC range [{}, {})",
+        runtime_start_pc,
+        runtime_end_pc
+    );
+
+    let runtime_instructions: Vec<decoder::Instruction> = instructions
+        .iter()
+        .filter(|instr| instr.pc >= runtime_start_pc && instr.pc < runtime_end_pc)
+        .cloned()
+        .collect();
+
+    tracing::debug!(
+        "Filtered from {} total instructions to {} runtime instructions",
+        instructions.len(),
+        runtime_instructions.len()
+    );
+
+    // Build CFG from ONLY runtime instructions
+    let cfg_bundle = cfg_ir::build_cfg_ir(&runtime_instructions, &sections, report, &bytes)?;
 
     Ok((cfg_bundle, instructions, sections, bytes))
 }

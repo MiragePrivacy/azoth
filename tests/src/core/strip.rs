@@ -14,7 +14,7 @@ async fn test_round_trip() {
         .unwrap();
     let sections = detection::locate_sections(&bytecode, &instructions).unwrap();
 
-    let (clean_runtime, report) = strip_bytecode(&bytecode, &sections).unwrap();
+    let (clean_runtime, mut report) = strip_bytecode(&bytecode, &sections).unwrap();
     let rebuilt = report.reassemble(&clean_runtime);
 
     assert_eq!(bytecode, rebuilt, "Round-trip failed");
@@ -38,7 +38,7 @@ async fn test_runtime_only() {
         .unwrap();
     let sections = detection::locate_sections(&bytecode, &instructions).unwrap();
 
-    let (clean_runtime, report) = strip_bytecode(&bytecode, &sections).unwrap();
+    let (clean_runtime, mut report) = strip_bytecode(&bytecode, &sections).unwrap();
     let rebuilt = report.reassemble(&clean_runtime);
 
     assert_eq!(bytecode, rebuilt, "Round-trip failed");

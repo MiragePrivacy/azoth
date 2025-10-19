@@ -16,7 +16,7 @@ async fn test_collect_metrics_simple() {
     let (instructions, _, _, bytes) = decoder::decode_bytecode(bytecode, false).await.unwrap();
     let sections = detection::locate_sections(&bytes, &instructions).unwrap();
     let (_clean_runtime, report) = strip::strip_bytecode(&bytes, &sections).unwrap();
-    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone()).unwrap();
+    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone(), &bytes).unwrap();
 
     let metrics = collect_metrics(&cfg_ir, &report).expect("Metrics computation failed");
     assert_eq!(metrics.byte_len, 6, "Byte length mismatch");
@@ -43,7 +43,7 @@ async fn test_collect_metrics_single_block() {
     let (instructions, _, _, bytes) = decoder::decode_bytecode(bytecode, false).await.unwrap();
     let sections = detection::locate_sections(&bytes, &instructions).unwrap();
     let (_clean_runtime, report) = strip::strip_bytecode(&bytes, &sections).unwrap();
-    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone()).unwrap();
+    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone(), &bytes).unwrap();
 
     let metrics = collect_metrics(&cfg_ir, &report).expect("Metrics computation failed");
     assert_eq!(metrics.byte_len, 3, "Byte length mismatch");
@@ -67,7 +67,7 @@ async fn test_collect_metrics_branching() {
 
     let sections = detection::locate_sections(&bytes, &instructions).unwrap();
     let (_clean_runtime, report) = strip::strip_bytecode(&bytes, &sections).unwrap();
-    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone()).unwrap();
+    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone(), &bytes).unwrap();
 
     let metrics = collect_metrics(&cfg_ir, &report).expect("Metrics computation failed");
     assert_eq!(metrics.byte_len, 8, "Byte length mismatch");
@@ -107,7 +107,7 @@ async fn test_collect_metrics_no_body_blocks() {
 
     let sections = detection::locate_sections(&bytes, &instructions).unwrap();
     let (_clean_runtime, report) = strip::strip_bytecode(&bytes, &sections).unwrap();
-    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone()).unwrap();
+    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone(), &bytes).unwrap();
 
     let m = collect_metrics(&cfg_ir, &report).expect("single STOP is still code");
     assert_eq!(m.block_cnt, 1, "Single STOP should form one body block");
@@ -127,7 +127,7 @@ async fn test_compare_metrics() {
 
     let sections = detection::locate_sections(&bytes, &instructions).unwrap();
     let (_clean_runtime, report) = strip::strip_bytecode(&bytes, &sections).unwrap();
-    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone()).unwrap();
+    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone(), &bytes).unwrap();
     let metrics_before = collect_metrics(&cfg_ir, &report).unwrap();
 
     let bytecode_after = "0x600160015601"; // PUSH1 0x01, PUSH1 0x01, ADD
@@ -137,7 +137,7 @@ async fn test_compare_metrics() {
 
     let sections = detection::locate_sections(&bytes, &instructions).unwrap();
     let (_clean_runtime, report) = strip::strip_bytecode(&bytes, &sections).unwrap();
-    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone()).unwrap();
+    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone(), &bytes).unwrap();
     let metrics_after = collect_metrics(&cfg_ir, &report).unwrap();
 
     let score = compare(&metrics_before, &metrics_after);
@@ -156,7 +156,7 @@ async fn test_potency_edge_increase() {
         .unwrap();
     let sections = detection::locate_sections(&bytes, &instructions).unwrap();
     let (_clean_runtime, report) = strip::strip_bytecode(&bytes, &sections).unwrap();
-    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone()).unwrap();
+    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone(), &bytes).unwrap();
     let metrics_simple = collect_metrics(&cfg_ir, &report).unwrap();
 
     let bytecode_complex = "0x6000600157600256"; // PUSH1 0x00, JUMPI, JUMPDEST, STOP
@@ -165,7 +165,7 @@ async fn test_potency_edge_increase() {
         .unwrap();
     let sections = detection::locate_sections(&bytes, &instructions).unwrap();
     let (_clean_runtime, report) = strip::strip_bytecode(&bytes, &sections).unwrap();
-    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone()).unwrap();
+    let cfg_ir = cfg_ir::build_cfg_ir(&instructions, &sections, report.clone(), &bytes).unwrap();
     let metrics_complex = collect_metrics(&cfg_ir, &report).unwrap();
 
     assert!(

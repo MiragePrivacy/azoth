@@ -30,7 +30,7 @@ impl super::Command for CfgArgs {
         let (instructions, _, _, bytes) = decode_bytecode(&self.input, is_file).await?;
         let sections = locate_sections(&bytes, &instructions)?;
         let (_clean_runtime, clean_report) = strip_bytecode(&bytes, &sections)?;
-        let cfg_ir = build_cfg_ir(&instructions, &sections, clean_report)?;
+        let cfg_ir = build_cfg_ir(&instructions, &sections, clean_report, &bytes)?;
 
         let dot = generate_dot(&cfg_ir);
         if let Some(out_path) = self.output {

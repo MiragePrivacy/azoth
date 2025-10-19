@@ -294,7 +294,7 @@ pub async fn extract_semantics_from_bytecode(
     let (_clean_runtime, clean_report) = strip::strip_bytecode(bytecode, &sections)
         .map_err(|e| Error::BytecodeAnalysis(format!("Failed to strip bytecode: {e}")))?;
 
-    let cfg_bundle = cfg_ir::build_cfg_ir(&instructions, &sections, clean_report)
+    let cfg_bundle = cfg_ir::build_cfg_ir(&instructions, &sections, clean_report, bytecode)
         .map_err(|e| Error::BytecodeAnalysis(format!("Failed to build CFG: {e}")))?;
 
     extract_semantics(&cfg_bundle)
@@ -1215,6 +1215,7 @@ pub mod tests {
             clean_report: create_empty_clean_report(),
             sections: vec![],
             selector_mapping: None,
+            original_bytecode: vec![],
         };
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
 
@@ -1257,6 +1258,7 @@ pub mod tests {
             clean_report: create_empty_clean_report(),
             sections: vec![],
             selector_mapping: None,
+            original_bytecode: vec![],
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
@@ -1274,6 +1276,7 @@ pub mod tests {
             clean_report: create_empty_clean_report(),
             sections: vec![],
             selector_mapping: None,
+            original_bytecode: vec![],
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
