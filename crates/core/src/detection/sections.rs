@@ -42,7 +42,11 @@ impl Section {
 }
 
 /// Locates all non-overlapping, offset-ordered sections in the bytecode.
-pub fn locate_sections(bytes: &[u8], instructions: &[Instruction]) -> Result<Vec<Section>, Error> {
+pub fn locate_sections(
+    bytes: &[u8],
+    instructions: &[Instruction],
+    runtime_bytes: &[u8],
+) -> Result<Vec<Section>, Error> {
     let mut sections = Vec::new();
     let total_len = bytes.len();
 
@@ -75,7 +79,7 @@ pub fn locate_sections(bytes: &[u8], instructions: &[Instruction]) -> Result<Vec
 
     // Pass C: Detect Init -> Runtime split using dispatcher pattern
     let (mut init_end, mut runtime_start, mut runtime_len) =
-        detect_init_runtime_split(instructions).unwrap_or((0, 0, aux_offset));
+        detect_init_runtime_split(bytes, runtime_bytes).unwrap_or((0, 0, aux_offset));
 
     tracing::debug!(
         "Initial detection: init_end={}, runtime_start={}, runtime_len={}",
@@ -423,15 +427,28 @@ fn detect_padding(instructions: &[Instruction], aux_offset: usize) -> Option<(us
 ///
 /// # Returns
 /// Optional tuple of (init_end, runtime_start, runtime_len) if pattern is found, None otherwise.
-fn detect_init_runtime_split(instructions: &[Instruction]) -> Option<(usize, usize, usize)> {
-    // Try the strict pattern first (for backwards compatibility)
-    if let Some(result) = detect_strict_deployment_pattern(instructions) {
-        return Some(result);
+fn detect_init_runtime_split(
+    deployment_bytes: &[u8],
+    runtime_bytes: &[u8],
+) -> Option<(usize, usize, usize)> {
+    if runtime_bytes.len() < 20 {
+        return None;
     }
 
-    // Fallback: Look for any CODECOPY + RETURN pattern
-    if let Some(result) = detect_codecopy_return_pattern(instructions) {
-        return Some(result);
+    let needle = &runtime_bytes[..20];
+    let runtime_offset = match deployment_bytes
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        Some(offset) => offset,
+        None => return None,
+    };
+
+    let remaining_runtime = &runtime_bytes[20..];
+    let remaining_deployment = &deployment_bytes[runtime_offset + 20..];
+
+    if remaining_deployment.starts_with(remaining_runtime) {
+        return Some((runtime_offset - 1, runtime_offset, runtime_bytes.len()));
     }
 
     None
@@ -586,13 +603,34 @@ mod tests {
     use super::*;
 
     const STORAGE_BYTECODE: &str = "6080604052348015600e575f5ffd5b50603e80601a5f395ff3fe60806040525f5ffdfea2646970667358221220e8c66682f723c073c8c5ec2c0de0795c9b8b64e310482b13bc56a554d057842b64736f6c634300081e0033";
+    const COUNTER_RUNTIME: &str = include_str!("../../../../test-data/counter/counter_runtime.hex");
+    const COUNTER_DEPLOYMENT: &str =
+        include_str!("../../../../test-data/counter/counter_deployment.hex");
+
+    fn decode_hex(s: &str) -> Vec<u8> {
+        Vec::from_hex(s.trim()).expect("valid hex")
+    }
 
     #[test]
     fn detect_auxdata_works() {
         let bytecode = Vec::from_hex(STORAGE_BYTECODE).unwrap();
         let (auxdata_offset, auxdata_length) = detect_auxdata(&bytecode).unwrap();
 
-        assert!(auxdata_offset == 35);
-        assert!(auxdata_length == 51);
+        assert_eq!(auxdata_offset, 35);
+        assert_eq!(auxdata_length, 51);
+    }
+
+    #[tokio::test]
+    async fn detect_init_runtime_split_works() {
+        let deployment_bytes = &decode_hex(COUNTER_DEPLOYMENT);
+        let runtime_bytes = &decode_hex(COUNTER_RUNTIME);
+        let (init_end, runtime_start, runtime_length) =
+            detect_init_runtime_split(&deployment_bytes, &runtime_bytes).unwrap();
+
+        assert_eq!(init_end, 27);
+        assert_eq!(deployment_bytes[init_end], 0xfe);
+        assert_eq!(deployment_bytes[runtime_start], runtime_bytes[0]);
+        assert_eq!(deployment_bytes.last(), runtime_bytes.last());
+        assert_eq!(runtime_length, 481);
     }
 }
