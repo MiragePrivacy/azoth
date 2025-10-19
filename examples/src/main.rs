@@ -6,7 +6,8 @@ use azoth_transform::PassConfig;
 use serde_json::json;
 use std::fs;
 
-const MIRAGE_ESCROW_PATH: &str = "escrow-bytecode/artifacts/bytecode.hex";
+const MIRAGE_ESCROW_DEPLOYMENT_PATH: &str = "escrow-bytecode/artifacts/deployment_bytecode.hex";
+const MIRAGE_ESCROW_RUNTIME_PATH: &str = "escrow-bytecode/artifacts/runtime_bytecode.hex";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -14,7 +15,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("=================================================");
 
     // Load contract bytecode
-    let original_bytecode = load_mirage_contract()?;
+    let original_bytecode = load_mirage_contract(MIRAGE_ESCROW_DEPLOYMENT_PATH)?;
+    let runtime_bytecode = load_mirage_contract(MIRAGE_ESCROW_RUNTIME_PATH)?;
     let seed_k2 =
         Seed::from_hex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")?;
 
@@ -22,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // SENDER: Compile with obfuscation O(S, K2)
     println!("\nSENDER: Compiling contract with obfuscation...");
-    let obfuscation_result = apply_mirage_obfuscation(&original_bytecode, &seed_k2).await?;
+    let obfuscation_result = apply_mirage_obfuscation(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
     let obfuscated_bytecode = hex::decode(
         obfuscation_result
             .obfuscated_bytecode
@@ -52,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // VERIFIER: Verify bytecode integrity
     println!("\nVERIFIER: Verifying deterministic compilation with K2...");
-    let recompilation_result = apply_mirage_obfuscation(&original_bytecode, &seed_k2).await?;
+    let recompilation_result = apply_mirage_obfuscation(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
     let recompiled_bytecode = hex::decode(
         recompilation_result
             .obfuscated_bytecode
@@ -95,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Deterministic compilation verification
     println!("\nDETERMINISTIC COMPILATION TEST:");
-    verify_deterministic_compilation_test(&original_bytecode, &seed_k2).await?;
+    verify_deterministic_compilation_test(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
 
     // Generate comprehensive report
     let report = generate_workflow_report(
@@ -122,9 +124,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 /// Load Escrow contract bytecode from submodule artifact
-fn load_mirage_contract() -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    let content = fs::read_to_string(MIRAGE_ESCROW_PATH)
-        .map_err(|_| format!("Failed to load bytecode from {MIRAGE_ESCROW_PATH}\nRun './run_escrow.sh' to update submodule"))?;
+fn load_mirage_contract(bytecode_address: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    let content = fs::read_to_string(bytecode_address)
+        .map_err(|_| format!("Failed to load bytecode from {bytecode_address}\nRun './run_escrow.sh' to update submodule"))?;
 
     let clean_bytecode = content.trim().strip_prefix("0x").unwrap_or(content.trim());
 
@@ -138,15 +140,17 @@ fn load_mirage_contract() -> Result<Vec<u8>, Box<dyn std::error::Error + Send + 
 /// Apply Mirage obfuscation transforms using the unified pipeline
 async fn apply_mirage_obfuscation(
     bytecode: &[u8],
+    runtime_bytecode: &[u8],
     seed_k2: &Seed,
 ) -> Result<ObfuscationResult, Box<dyn std::error::Error + Send + Sync>> {
     let hex_input = format!("0x{}", hex::encode(bytecode));
+    let hex_runtime = format!("0x{}", hex::encode(runtime_bytecode));
 
     // Create Mirage-specific transform configuration
     let config = create_mirage_config(seed_k2);
 
     // Use the unified obfuscation pipeline
-    obfuscate_bytecode(&hex_input, config).await
+    obfuscate_bytecode(&hex_input, &hex_runtime, config).await
 }
 
 /// Create Mirage-specific obfuscation configuration
@@ -248,10 +252,11 @@ fn calculate_gas_percentage_increase(original: u64, new: u64) -> f64 {
 /// Verify deterministic compilation produces identical results
 async fn verify_deterministic_compilation_test(
     bytecode: &[u8],
+    runtime_bytecode: &[u8],
     seed: &Seed,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let result1 = apply_mirage_obfuscation(bytecode, seed).await?;
-    let result2 = apply_mirage_obfuscation(bytecode, seed).await?;
+    let result1 = apply_mirage_obfuscation(bytecode, runtime_bytecode, seed).await?;
+    let result2 = apply_mirage_obfuscation(bytecode, runtime_bytecode, seed).await?;
 
     if result1.obfuscated_bytecode != result2.obfuscated_bytecode {
         return Err("Same seed produced different bytecode - not deterministic!".into());
@@ -260,7 +265,7 @@ async fn verify_deterministic_compilation_test(
 
     // Test different seeds produce different results
     let different_seed = Seed::generate();
-    let diff_result = apply_mirage_obfuscation(bytecode, &different_seed).await?;
+    let diff_result = apply_mirage_obfuscation(bytecode, runtime_bytecode,&different_seed).await?;
     if result1.obfuscated_bytecode == diff_result.obfuscated_bytecode {
         return Err("Different seeds produced identical bytecode!".into());
     }
