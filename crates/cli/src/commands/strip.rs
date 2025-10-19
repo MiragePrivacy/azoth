@@ -16,6 +16,8 @@ use std::path::Path;
 pub struct StripArgs {
     /// Input bytecode as a hex string (0x...) or file path containing EVM bytecode.
     pub input: String,
+    /// Input runtime bytecode as a hex string (0x...) or file path containing EVM bytecode.
+    pub runtime: String,
     /// Output raw cleaned runtime hex instead of JSON report
     #[arg(long)]
     raw: bool,
@@ -27,7 +29,9 @@ impl super::Command for StripArgs {
     async fn execute(self) -> Result<(), Box<dyn Error>> {
         let is_file = !self.input.starts_with("0x") && Path::new(&self.input).is_file();
         let (instructions, _, _, bytes) = decode_bytecode(&self.input, is_file).await?;
-        let sections = locate_sections(&bytes, &instructions)?;
+        let is_file = !self.input.starts_with("0x") && Path::new(&self.runtime).is_file();
+        let (_, _, _, runtime_bytes) = decode_bytecode(&self.runtime, is_file).await?;
+        let sections = locate_sections(&bytes, &instructions, &runtime_bytes)?;
         let (clean_runtime, report) = strip_bytecode(&bytes, &sections)?;
 
         if self.raw {

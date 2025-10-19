@@ -95,7 +95,7 @@ pub async fn process_bytecode_to_cfg(
     bytecode: &str,
     is_file: bool,
     runtime_bytecode: &str,
-    runtime_is_file: bool
+    runtime_is_file: bool,
 ) -> std::result::Result<
     (
         cfg_ir::CfgIrBundle,
@@ -106,7 +106,8 @@ pub async fn process_bytecode_to_cfg(
     Box<dyn std::error::Error + Send + Sync>,
 > {
     let (instructions, _, _, bytes) = decoder::decode_bytecode(bytecode, is_file).await?;
-    let (_, _, _, runtime_bytes) = decoder::decode_bytecode(runtime_bytecode, runtime_is_file).await?;
+    let (_, _, _, runtime_bytes) =
+        decoder::decode_bytecode(runtime_bytecode, runtime_is_file).await?;
     let sections = detection::locate_sections(&bytes, &instructions, &runtime_bytes)?;
     let (_, report) = strip::strip_bytecode(&bytes, &sections)?;
 

@@ -24,7 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // SENDER: Compile with obfuscation O(S, K2)
     println!("\nSENDER: Compiling contract with obfuscation...");
-    let obfuscation_result = apply_mirage_obfuscation(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
+    let obfuscation_result =
+        apply_mirage_obfuscation(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
     let obfuscated_bytecode = hex::decode(
         obfuscation_result
             .obfuscated_bytecode
@@ -54,7 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // VERIFIER: Verify bytecode integrity
     println!("\nVERIFIER: Verifying deterministic compilation with K2...");
-    let recompilation_result = apply_mirage_obfuscation(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
+    let recompilation_result =
+        apply_mirage_obfuscation(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
     let recompiled_bytecode = hex::decode(
         recompilation_result
             .obfuscated_bytecode
@@ -124,7 +126,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 /// Load Escrow contract bytecode from submodule artifact
-fn load_mirage_contract(bytecode_address: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+fn load_mirage_contract(
+    bytecode_address: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     let content = fs::read_to_string(bytecode_address)
         .map_err(|_| format!("Failed to load bytecode from {bytecode_address}\nRun './run_escrow.sh' to update submodule"))?;
 
@@ -265,7 +269,7 @@ async fn verify_deterministic_compilation_test(
 
     // Test different seeds produce different results
     let different_seed = Seed::generate();
-    let diff_result = apply_mirage_obfuscation(bytecode, runtime_bytecode,&different_seed).await?;
+    let diff_result = apply_mirage_obfuscation(bytecode, runtime_bytecode, &different_seed).await?;
     if result1.obfuscated_bytecode == diff_result.obfuscated_bytecode {
         return Err("Different seeds produced identical bytecode!".into());
     }
