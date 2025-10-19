@@ -205,8 +205,23 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
             "Stack tracking found {} selector-target pairs",
             selectors.len()
         );
+
+        // Find the actual start of the dispatcher by looking backwards from extraction_start
+        // for the dispatcher preamble (callvalue check, calldata size check, etc.)
+        let dispatcher_start = find_dispatcher_preamble(instructions, extraction_start);
+
+        tracing::debug!(
+            "Dispatcher range: preamble starts at {}, extraction at {}, selectors end at ~{}",
+            dispatcher_start,
+            extraction_start,
+            selectors
+                .last()
+                .map(|s| s.instruction_index)
+                .unwrap_or(extraction_start)
+        );
+
         Some(DispatcherInfo {
-            start_offset: extraction_start,
+            start_offset: dispatcher_start,
             end_offset: selectors
                 .last()
                 .map(|s| s.instruction_index + 10)
@@ -254,6 +269,75 @@ fn find_extraction_pattern(instructions: &[Instruction]) -> Option<(usize, usize
         }
     }
     None
+}
+
+/// Finds the actual start of the dispatcher by scanning backwards from the extraction pattern
+/// to locate the dispatcher preamble (free memory pointer, callvalue check, etc.).
+fn find_dispatcher_preamble(instructions: &[Instruction], extraction_start: usize) -> usize {
+    // Common preamble patterns in Solidity dispatchers:
+    // 1. Free memory pointer setup: PUSH1 0x80 PUSH1 0x40 MSTORE
+    // 2. Callvalue check: CALLVALUE DUP1 ISZERO PUSH2 ... JUMPI
+    // 3. Calldatasize check: PUSH1 0x04 CALLDATASIZE LT
+
+    // For runtime-only bytecode, the dispatcher typically starts at instruction 0
+    // with the free memory pointer setup
+    if extraction_start >= 3 && instructions.len() >= 3 {
+        // Check for free memory pointer pattern at the very beginning
+        if instructions[0].op == Opcode::PUSH(1)
+            && instructions[0].imm.as_deref() == Some("80")
+            && instructions[1].op == Opcode::PUSH(1)
+            && instructions[1].imm.as_deref() == Some("40")
+            && instructions[2].op == Opcode::MSTORE
+        {
+            tracing::debug!(
+                "Found dispatcher preamble at instruction 0 (free memory pointer setup)"
+            );
+            return 0;
+        }
+    }
+
+    // If no clear preamble pattern found at start, scan backwards from extraction
+    // looking for CALLVALUE check or CALLDATASIZE check
+    let search_start = extraction_start.saturating_sub(20).max(0);
+
+    for i in search_start..extraction_start {
+        if i + 2 < instructions.len() {
+            let instrs = &instructions[i..];
+
+            // Check for: CALLVALUE DUP1 ISZERO
+            if instrs[0].op == Opcode::CALLVALUE
+                && instrs[1].op == Opcode::DUP(1)
+                && instrs[2].op == Opcode::ISZERO
+            {
+                tracing::debug!(
+                    "Found dispatcher preamble at instruction {} (callvalue check)",
+                    i
+                );
+                return i;
+            }
+
+            // Check for: PUSH1 0x04 CALLDATASIZE
+            if instrs[0].op == Opcode::PUSH(1)
+                && instrs[0].imm.as_deref() == Some("04")
+                && instrs[1].op == Opcode::CALLDATASIZE
+            {
+                tracing::debug!(
+                    "Found dispatcher preamble at instruction {} (calldatasize check)",
+                    i
+                );
+                return i;
+            }
+        }
+    }
+
+    // Fallback: if we can't find a clear preamble pattern, start a bit before extraction
+    // This is safer than starting at 0 blindly or at extraction_start
+    let fallback_start = extraction_start.saturating_sub(10);
+    tracing::debug!(
+        "Could not find clear preamble pattern, using fallback start at instruction {}",
+        fallback_start
+    );
+    fallback_start
 }
 
 /// Quick check for dispatcher presence without extracting selector details.

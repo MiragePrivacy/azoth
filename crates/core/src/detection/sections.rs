@@ -134,6 +134,27 @@ pub fn locate_sections(bytes: &[u8], instructions: &[Instruction]) -> Result<Vec
         });
     }
 
+    // Adjust init_end to include small gaps (padding bytes) if no constructor args detected
+    let adjusted_init_end = if !has_constructor_args
+        && runtime_start > init_end
+        && runtime_start > 0
+    {
+        let gap = runtime_start - init_end;
+        if gap < 4 {
+            tracing::debug!(
+                "Including {} padding byte(s) between init_end ({}) and runtime_start ({}) in init section",
+                gap,
+                init_end,
+                runtime_start
+            );
+            runtime_start
+        } else {
+            init_end
+        }
+    } else {
+        init_end
+    };
+
     // Only push Padding if ConstructorArgs is not present
     if !has_constructor_args && let Some((pad_offset, pad_len)) = padding {
         tracing::debug!("Padding detected: offset={}, len={}", pad_offset, pad_len);
@@ -145,7 +166,7 @@ pub fn locate_sections(bytes: &[u8], instructions: &[Instruction]) -> Result<Vec
     }
 
     // Pass E: Create sections based on detected boundaries
-    if init_end == 0 && runtime_start == 0 {
+    if adjusted_init_end == 0 && runtime_start == 0 {
         // True runtime-only contract
         tracing::debug!("Runtime-only bytecode detected");
         sections.push(Section {
@@ -155,12 +176,12 @@ pub fn locate_sections(bytes: &[u8], instructions: &[Instruction]) -> Result<Vec
         });
     } else {
         // Deployment bytecode (original or obfuscated)
-        if init_end > 0 {
-            tracing::debug!("Creating Init section: offset=0, len={}", init_end);
+        if adjusted_init_end > 0 {
+            tracing::debug!("Creating Init section: offset=0, len={}", adjusted_init_end);
             sections.push(Section {
                 kind: SectionKind::Init,
                 offset: 0,
-                len: init_end,
+                len: adjusted_init_end,
             });
         }
         if runtime_len > 0 && runtime_start < aux_offset {
@@ -549,8 +570,26 @@ fn detect_constructor_args(
     runtime_start: usize,
     aux_offset: usize,
 ) -> Option<(usize, usize)> {
+    // Minimum threshold for constructor args (4 bytes minimum)
+    // Constructor arguments are ABI-encoded and typically at least 32 bytes,
+    // but we use a conservative threshold of 4 bytes to avoid treating
+    // single padding bytes (like 0xfe) as constructor arguments
+    const MIN_CONSTRUCTOR_ARGS_SIZE: usize = 4;
+
     if runtime_start > 0 && init_end < runtime_start && runtime_start < aux_offset {
-        Some((init_end, runtime_start - init_end))
+        let gap_size = runtime_start - init_end;
+        if gap_size >= MIN_CONSTRUCTOR_ARGS_SIZE {
+            Some((init_end, gap_size))
+        } else {
+            tracing::debug!(
+                "Gap between init_end ({}) and runtime_start ({}) is only {} bytes, too small for constructor args (min: {}), treating as padding or part of init",
+                init_end,
+                runtime_start,
+                gap_size,
+                MIN_CONSTRUCTOR_ARGS_SIZE
+            );
+            None
+        }
     } else {
         None
     }

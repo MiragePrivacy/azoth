@@ -84,6 +84,9 @@ pub struct CfgIrBundle {
     /// Mapping of original function selectors to obfuscated tokens.
     /// Only populated when token-based dispatcher transform is applied.
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
+    /// Original bytecode before any modifications.
+    /// Used by reindex_pcs to preserve INVALID opcode bytes.
+    pub original_bytecode: Vec<u8>,
 }
 
 /// Builds a CFG with IR in SSA form from decoded instructions and sections.
@@ -95,6 +98,7 @@ pub struct CfgIrBundle {
 /// * `instructions` - Decoded EVM instructions from `decoder.rs`.
 /// * `sections` - Detected sections from `detection.rs`.
 /// * `clean_report` - Report from `strip.rs` for reassembly.
+/// * `original_bytecode` - Original bytecode bytes for INVALID opcode preservation.
 ///
 /// # Returns
 /// A `Result` containing the `CfgIrBundle` or a `Error` if construction fails.
@@ -102,6 +106,7 @@ pub fn build_cfg_ir(
     instructions: &[Instruction],
     sections: &[Section],
     clean_report: crate::strip::CleanReport,
+    original_bytecode: &[u8],
 ) -> Result<CfgIrBundle, Error> {
     tracing::debug!(
         "Starting CFG-IR construction with {} instructions",
@@ -116,7 +121,7 @@ pub fn build_cfg_ir(
     let mut cfg = DiGraph::new();
     let _entry_idx = cfg.add_node(Block::Entry);
     let _exit_idx = cfg.add_node(Block::Exit);
-    let (edges, pc_to_block) = build_edges(&blocks, instructions, &mut cfg)?;
+    let (edges, pc_to_block) = build_edges(&blocks, instructions, &mut cfg, sections)?;
     cfg.extend_with_edges(edges);
     tracing::debug!("Built CFG with {} nodes", cfg.node_count());
 
@@ -135,6 +140,7 @@ pub fn build_cfg_ir(
         clean_report: report,
         sections: sections.to_vec(),
         selector_mapping: None, // Initially empty, set by transforms
+        original_bytecode: original_bytecode.to_vec(),
     })
 }
 
@@ -154,7 +160,12 @@ impl CfgIrBundle {
     ) -> Result<(), Error> {
         let clean_report = self.clean_report.clone();
         let selector_mapping = self.selector_mapping.clone(); // Preserve mapping
-        let new_bundle = build_cfg_ir(&instructions, sections, clean_report)?;
+        let new_bundle = build_cfg_ir(
+            &instructions,
+            sections,
+            clean_report,
+            &self.original_bytecode,
+        )?;
 
         self.cfg = new_bundle.cfg;
         self.pc_to_block = new_bundle.pc_to_block;
@@ -185,6 +196,14 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
         "Starting block splitting with {} instructions, {} JUMPDESTs",
         instructions.len(),
         jumpdest_pcs.len()
+    );
+
+    // Log some JUMPDEST PCs for debugging
+    let mut jd_list: Vec<_> = jumpdest_pcs.iter().cloned().collect();
+    jd_list.sort();
+    tracing::debug!(
+        "First 20 JUMPDEST PCs: {:?}",
+        &jd_list[..jd_list.len().min(20)]
     );
 
     for instruction in instructions {
@@ -322,6 +341,7 @@ type BuildEdgesResult = Result<
 /// * `blocks` - Vector of blocks from `split_blocks`.
 /// * `instructions` - Decoded EVM instructions.
 /// * `cfg` - The CFG graph to populate with nodes and edges.
+/// * `sections` - Detected bytecode sections for coordinate conversion.
 ///
 /// # Returns
 /// A `Result` containing a tuple of edge definitions and a PC-to-block mapping, or a `Error`.
@@ -329,10 +349,33 @@ fn build_edges(
     blocks: &[Block],
     _instructions: &[Instruction],
     cfg: &mut DiGraph<Block, EdgeType>,
+    sections: &[Section],
 ) -> BuildEdgesResult {
     let mut edges = Vec::new();
     let mut pc_to_block = HashMap::new();
     let mut node_map = HashMap::new();
+
+    // Determine runtime section bounds for coordinate conversion
+    let runtime_section = sections
+        .iter()
+        .find(|s| matches!(s.kind, crate::detection::SectionKind::Runtime));
+
+    let (runtime_start, runtime_end) = if let Some(section) = runtime_section {
+        tracing::debug!(
+            "Runtime section found in build_edges: offset={:#x}, len={}, range=[{:#x}, {:#x})",
+            section.offset,
+            section.len,
+            section.offset,
+            section.offset + section.len
+        );
+        (section.offset, section.offset + section.len)
+    } else {
+        tracing::warn!(
+            "NO runtime section found in build_edges! sections.len()={}",
+            sections.len()
+        );
+        (0, 0)
+    };
 
     // Add body blocks to graph
     for block in blocks {
@@ -384,11 +427,37 @@ fn build_edges(
 
             let last_instr = &instructions[instructions.len() - 1];
 
+            // Check if this block is in the runtime section
+            let block_in_runtime =
+                runtime_start > 0 && *start_pc >= runtime_start && *start_pc < runtime_end;
+
             let last_opcode = last_instr.op;
             match last_opcode {
                 Opcode::JUMP => {
                     // C) Extract target from [PUSHx imm][JUMP] pattern
-                    if let Some(target_pc) = extract_jump_target_from_block(instructions) {
+                    if let Some(mut target_pc) = extract_jump_target_from_block(instructions) {
+                        let original_target = target_pc;
+                        // CRITICAL: If this block is in runtime, the target is runtime-relative
+                        // and needs to be converted to absolute for node_map lookup
+                        if block_in_runtime {
+                            target_pc += runtime_start;
+                            tracing::debug!(
+                                "Converting runtime-relative JUMP target: 0x{:x} + 0x{:x} = 0x{:x} (block at 0x{:x})",
+                                original_target,
+                                runtime_start,
+                                target_pc,
+                                start_pc
+                            );
+                        } else {
+                            tracing::debug!(
+                                "Block at 0x{:x} NOT in runtime (start=0x{:x}, end=0x{:x}, block_start=0x{:x})",
+                                start_pc,
+                                runtime_start,
+                                runtime_end,
+                                start_pc
+                            );
+                        }
+
                         if let Some(&target_idx) = node_map.get(&target_pc) {
                             edges.push((start_idx, target_idx, EdgeType::Jump));
                             tracing::debug!(
@@ -399,10 +468,16 @@ fn build_edges(
                                 target_pc
                             );
                         } else {
+                            // Find nearest JUMPDESTs for debugging
+                            let nearby: Vec<_> = node_map
+                                .keys()
+                                .filter(|&&pc| (target_pc as isize - pc as isize).abs() < 50)
+                                .collect();
                             tracing::warn!(
-                                "JUMP target {:#x} not found in node_map (from block pc={:#x})",
+                                "JUMP target {:#x} not found in node_map (from block pc={:#x}). Nearby blocks: {:?}",
                                 target_pc,
-                                start_pc
+                                start_pc,
+                                nearby
                             );
                         }
                     }
@@ -411,16 +486,21 @@ fn build_edges(
                 }
                 Opcode::JUMPI => {
                     // C) Extract target from [PUSHx imm][JUMPI] pattern
-                    if let Some(target_pc) = extract_jump_target_from_block(instructions)
-                        && let Some(&target_idx) = node_map.get(&target_pc)
-                    {
-                        edges.push((start_idx, target_idx, EdgeType::BranchTrue));
-                        tracing::debug!(
-                            "JUMPI true edge: block {} -> block {} (target={:#x})",
-                            start_idx.index(),
-                            target_idx.index(),
-                            target_pc
-                        );
+                    if let Some(mut target_pc) = extract_jump_target_from_block(instructions) {
+                        // Convert runtime-relative to absolute if in runtime section
+                        if block_in_runtime {
+                            target_pc += runtime_start;
+                        }
+
+                        if let Some(&target_idx) = node_map.get(&target_pc) {
+                            edges.push((start_idx, target_idx, EdgeType::BranchTrue));
+                            tracing::debug!(
+                                "JUMPI true edge: block {} -> block {} (target={:#x})",
+                                start_idx.index(),
+                                target_idx.index(),
+                                target_pc
+                            );
+                        }
                     }
 
                     // False branch: next sequential block
@@ -574,6 +654,10 @@ impl CfgIrBundle {
     /// The returned mapping can be used to patch jump immediates that reference absolute
     /// PCs to ensure they point to the correct locations after reindexing.
     ///
+    /// For INVALID opcodes without immediate values, this method preserves their original
+    /// byte values from the original bytecode before reindexing, ensuring they can be
+    /// correctly encoded even after their PC changes.
+    ///
     /// # Returns
     /// A `Result` containing a `HashMap` mapping old PC values to new PC values, or an
     /// `Error` if reindexing fails.
@@ -614,6 +698,23 @@ impl CfgIrBundle {
                 new_pc_to_block.insert(new_start_pc, node_idx);
 
                 for instruction in instructions.iter_mut() {
+                    // CRITICAL: For INVALID opcodes, preserve the original byte value in imm field
+                    // BEFORE reindexing. After reindexing, the new PC won't correspond to the
+                    // original bytecode position, so the encoder won't be able to look up the byte.
+                    if matches!(instruction.op, Opcode::INVALID)
+                        && instruction.imm.is_none()
+                        && instruction.pc < self.original_bytecode.len()
+                    {
+                        let original_byte = self.original_bytecode[instruction.pc];
+                        instruction.imm = Some(format!("{:02x}", original_byte));
+                        tracing::debug!(
+                            "Preserved INVALID byte 0x{:02x} at old PC 0x{:x} before reindexing to 0x{:x}",
+                            original_byte,
+                            instruction.pc,
+                            current_pc
+                        );
+                    }
+
                     // Record old→new PC mapping BEFORE we overwrite
                     pc_map.insert(instruction.pc, current_pc);
                     instruction.pc = current_pc;
@@ -656,6 +757,18 @@ impl CfgIrBundle {
     pub fn rebuild_edges_for_block(&mut self, node_idx: NodeIndex) -> Result<(), Error> {
         tracing::debug!("Rebuilding edges for block {}", node_idx.index());
 
+        // Determine runtime section bounds for coordinate conversion
+        let runtime_section = self
+            .sections
+            .iter()
+            .find(|s| matches!(s.kind, crate::detection::SectionKind::Runtime));
+
+        let (runtime_start, runtime_end) = if let Some(section) = runtime_section {
+            (section.offset, section.offset + section.len)
+        } else {
+            (0, 0)
+        };
+
         // Remove all outgoing edges from this block
         let outgoing_edges: Vec<_> = self
             .cfg
@@ -668,7 +781,17 @@ impl CfgIrBundle {
         }
 
         // Analyze the block to determine new edges
-        if let Some(Block::Body { instructions, .. }) = self.cfg.node_weight(node_idx) {
+        if let Some(Block::Body {
+            instructions,
+            start_pc,
+            ..
+        }) = self.cfg.node_weight(node_idx)
+        {
+            let block_start_pc = *start_pc;
+            let block_in_runtime = runtime_start > 0
+                && block_start_pc >= runtime_start
+                && block_start_pc < runtime_end;
+
             let last_instr = instructions.last();
 
             if let Some(last_instr) = last_instr {
@@ -676,7 +799,13 @@ impl CfgIrBundle {
                 match last_opcode {
                     Opcode::JUMP => {
                         // Unconditional jump - find target and create Jump edge
-                        if let Some(target_pc) = self.extract_jump_target(instructions) {
+                        if let Some(mut target_pc) = self.extract_jump_target(instructions) {
+                            // CRITICAL: If this block is in runtime, the target is runtime-relative
+                            // and needs to be converted to absolute for pc_to_block lookup
+                            if block_in_runtime {
+                                target_pc += runtime_start;
+                            }
+
                             if let Some(&target_idx) = self.pc_to_block.get(&target_pc) {
                                 self.cfg.add_edge(node_idx, target_idx, EdgeType::Jump);
                                 tracing::debug!(
@@ -695,17 +824,27 @@ impl CfgIrBundle {
                     }
                     Opcode::JUMPI => {
                         // Conditional jump - create both true and false branches
-                        if let Some(target_pc) = self.extract_jump_target(instructions)
-                            && let Some(&target_idx) = self.pc_to_block.get(&target_pc)
-                        {
-                            self.cfg
-                                .add_edge(node_idx, target_idx, EdgeType::BranchTrue);
-                            tracing::debug!(
-                                "Added JUMPI true edge: {} -> {} (PC: 0x{:x})",
-                                node_idx.index(),
-                                target_idx.index(),
-                                target_pc
-                            );
+                        if let Some(mut target_pc) = self.extract_jump_target(instructions) {
+                            // Convert runtime-relative to absolute if in runtime section
+                            if block_in_runtime {
+                                target_pc += runtime_start;
+                            }
+
+                            if let Some(&target_idx) = self.pc_to_block.get(&target_pc) {
+                                self.cfg
+                                    .add_edge(node_idx, target_idx, EdgeType::BranchTrue);
+                                tracing::debug!(
+                                    "Added JUMPI true edge: {} -> {} (PC: 0x{:x})",
+                                    node_idx.index(),
+                                    target_idx.index(),
+                                    target_pc
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "JUMPI target PC 0x{:x} not found in pc_to_block mapping",
+                                    target_pc
+                                );
+                            }
                         }
 
                         // Add false branch to next sequential block (only if it doesn't already exist)
@@ -945,9 +1084,37 @@ impl CfgIrBundle {
     ) -> Result<(), Error> {
         tracing::debug!("Patching jump immediates after PC reindexing");
 
+        // Find the runtime section to handle runtime-relative jump targets
+        let runtime_section = self
+            .sections
+            .iter()
+            .find(|s| matches!(s.kind, crate::detection::SectionKind::Runtime));
+
+        let (runtime_start, runtime_end) = if let Some(section) = runtime_section {
+            (section.offset, section.offset + section.len)
+        } else {
+            (0, 0) // No runtime section, treat all as absolute
+        };
+
+        if runtime_start > 0 {
+            tracing::debug!(
+                "Runtime section detected at [0x{:x}, 0x{:x}) - will handle runtime-relative jumps",
+                runtime_start,
+                runtime_end
+            );
+        }
+
         // Now patch the instructions using the correct old->new PC mapping
         for node_idx in self.cfg.node_indices().collect::<Vec<_>>() {
-            if let Block::Body { instructions, .. } = &mut self.cfg[node_idx] {
+            if let Block::Body {
+                instructions,
+                start_pc,
+                ..
+            } = &mut self.cfg[node_idx]
+            {
+                let block_in_runtime =
+                    runtime_start > 0 && *start_pc >= runtime_start && *start_pc < runtime_end;
+
                 for i in 0..instructions.len().saturating_sub(1) {
                     let push_opcode = instructions[i].op;
 
@@ -978,49 +1145,71 @@ impl CfgIrBundle {
                     let next_opcode = instructions[i + 1].op;
                     if matches!(next_opcode, Opcode::JUMP | Opcode::JUMPI)
                         && let Some(immediate) = &instructions[i].imm
-                        && let Ok(old_target) = usize::from_str_radix(immediate, 16)
+                        && let Ok(old_target_imm) = usize::from_str_radix(immediate, 16)
                     {
-                        // Use the provided old->new PC mapping
-                        if let Some(&new_target) = pc_mapping.get(&old_target)
-                            && new_target != old_target
-                        {
-                            // Preserve the original PUSH opcode size
-                            let original_push_size = if let Opcode::PUSH(n) = push_opcode {
-                                n as usize
+                        // CRITICAL: If this jump is in the runtime section, the immediate value
+                        // is runtime-relative (starting from 0), not absolute. We need to convert
+                        // it to absolute for the pc_mapping lookup, then convert back.
+                        let old_target_absolute = if block_in_runtime {
+                            // Runtime-relative immediate -> absolute PC
+                            old_target_imm + runtime_start
+                        } else {
+                            // Already absolute
+                            old_target_imm
+                        };
+
+                        // Look up the new absolute PC in the mapping
+                        if let Some(&new_target_absolute) = pc_mapping.get(&old_target_absolute) {
+                            // Convert back to runtime-relative if needed
+                            let new_target_imm = if block_in_runtime {
+                                // Absolute PC -> runtime-relative immediate
+                                new_target_absolute.saturating_sub(runtime_start)
                             } else {
-                                1
+                                new_target_absolute
                             };
 
-                            // Verify the new value fits
-                            let bytes_needed = if new_target == 0 {
-                                1
-                            } else {
-                                (64 - (new_target as u64).leading_zeros()).div_ceil(8) as usize
-                            };
+                            if new_target_imm != old_target_imm {
+                                // Preserve the original PUSH opcode size
+                                let original_push_size = if let Opcode::PUSH(n) = push_opcode {
+                                    n as usize
+                                } else {
+                                    1
+                                };
 
-                            if bytes_needed > original_push_size {
-                                return Err(Error::InvalidImmediate(format!(
-                                    "Patched target 0x{:x} requires {} bytes but PUSH({}) only has {} bytes",
-                                    new_target,
-                                    bytes_needed,
-                                    original_push_size,
+                                // Verify the new value fits
+                                let bytes_needed = if new_target_imm == 0 {
+                                    1
+                                } else {
+                                    (64 - (new_target_imm as u64).leading_zeros()).div_ceil(8)
+                                        as usize
+                                };
+
+                                if bytes_needed > original_push_size {
+                                    return Err(Error::InvalidImmediate(format!(
+                                        "Patched target 0x{:x} requires {} bytes but PUSH({}) only has {} bytes",
+                                        new_target_imm,
+                                        bytes_needed,
+                                        original_push_size,
+                                        original_push_size
+                                    )));
+                                }
+
+                                // Keep the same PUSH size, just update the immediate
+                                instructions[i].imm = Some(format!(
+                                    "{:0width$x}",
+                                    new_target_imm,
+                                    width = original_push_size * 2
+                                ));
+
+                                tracing::debug!(
+                                    "Patched jump immediate: 0x{:x} -> 0x{:x} (absolute: 0x{:x} -> 0x{:x}, kept PUSH({}))",
+                                    old_target_imm,
+                                    new_target_imm,
+                                    old_target_absolute,
+                                    new_target_absolute,
                                     original_push_size
-                                )));
+                                );
                             }
-
-                            // Keep the same PUSH size, just update the immediate
-                            instructions[i].imm = Some(format!(
-                                "{:0width$x}",
-                                new_target,
-                                width = original_push_size * 2
-                            ));
-
-                            tracing::debug!(
-                                "Patched jump immediate: 0x{:x} -> 0x{:x} (kept PUSH({}))",
-                                old_target,
-                                new_target,
-                                original_push_size
-                            );
                         }
                     }
                 }

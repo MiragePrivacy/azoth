@@ -273,19 +273,28 @@ pub async fn obfuscate_bytecode(
         tracing::debug!("  {}", log_entry);
     }
 
-    // Step 5: Extract and encode instructions
+    // Step 5: Reindex PCs to start from 0 (needed when CFG was built from runtime-only instructions)
+    tracing::debug!("  Reindexing PCs to normalize to 0-based addressing");
+    let pc_mapping = cfg_ir.reindex_pcs()?;
+    tracing::debug!("  PC reindexing complete: {} mappings", pc_mapping.len());
+
+    // Patch jump immediates using the PC mapping
+    cfg_ir.patch_jump_immediates(&pc_mapping)?;
+    tracing::debug!("  Patched jump immediates after PC reindexing");
+
+    // Step 6: Extract and encode instructions
     let all_instructions = extract_instructions_from_cfg(&cfg_ir);
     tracing::debug!(
         "  Extracted {} instructions from CFG",
         all_instructions.len()
     );
 
-    // Step 6: Encode back to bytecode (always with original for unknown opcode preservation)
+    // Step 7: Encode back to bytecode (always with original for unknown opcode preservation)
     let obfuscated_bytes = encoder::encode(&all_instructions, &bytes)?;
 
     tracing::debug!("  Encoded to {} bytes", obfuscated_bytes.len());
 
-    // Step 7: Reassemble final bytecode
+    // Step 8: Reassemble final bytecode
     let final_bytecode = cfg_ir.clean_report.reassemble(&obfuscated_bytes);
     let obfuscated_size = final_bytecode.len();
 
@@ -348,6 +357,20 @@ pub async fn obfuscate_bytecode(
     };
 
     // Step 11: Build result
+    tracing::debug!("=== Building ObfuscationResult ===");
+    if let Some(ref mapping) = cfg_ir.selector_mapping {
+        tracing::debug!("Selector mapping has {} entries:", mapping.len());
+        for (selector, token) in mapping {
+            tracing::debug!(
+                "  Selector 0x{:08x} -> Token 0x{}",
+                selector,
+                hex::encode(token)
+            );
+        }
+    } else {
+        tracing::debug!("No selector mapping in result");
+    }
+
     Ok(ObfuscationResult {
         obfuscated_bytecode: format!("0x{}", hex::encode(&final_bytecode)),
         original_size,

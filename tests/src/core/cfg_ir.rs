@@ -11,7 +11,8 @@ async fn test_build_cfg_ir_simple() {
     let sections = detection::locate_sections(&bytes, &instructions).unwrap();
     let (_clean_runtime, report) = strip::strip_bytecode(&bytes, &sections).unwrap();
 
-    let cfg_ir = build_cfg_ir(&instructions, &sections, report).expect("CFG builder failed");
+    let cfg_ir =
+        build_cfg_ir(&instructions, &sections, report, &bytes).expect("CFG builder failed");
     assert_eq!(cfg_ir.cfg.node_count(), 4); // Entry, two blocks, Exit
     assert_eq!(cfg_ir.pc_to_block.len(), 2); // Two body blocks mapped
 }
@@ -26,7 +27,8 @@ async fn test_build_cfg_ir_straight_line() {
     let sections = detection::locate_sections(&bytes, &instructions).unwrap();
     let (_clean_runtime, report) = strip::strip_bytecode(&bytes, &sections).unwrap();
 
-    let cfg_ir = build_cfg_ir(&instructions, &sections, report).expect("CFG builder failed");
+    let cfg_ir =
+        build_cfg_ir(&instructions, &sections, report, &bytes).expect("CFG builder failed");
     assert_eq!(cfg_ir.cfg.node_count(), 3); // Entry, single block, Exit
     assert_eq!(cfg_ir.cfg.edge_count(), 2); // Entry->block, block->Exit
 }
@@ -41,7 +43,8 @@ async fn test_build_cfg_ir_diamond() {
     let sections = detection::locate_sections(&bytes, &instructions).unwrap();
     let (_clean_runtime, report) = strip::strip_bytecode(&bytes, &sections).unwrap();
 
-    let cfg_ir = build_cfg_ir(&instructions, &sections, report).expect("CFG builder failed");
+    let cfg_ir =
+        build_cfg_ir(&instructions, &sections, report, &bytes).expect("CFG builder failed");
     assert_eq!(cfg_ir.cfg.node_count(), 4); // Entry, two blocks, Exit
     assert_eq!(cfg_ir.cfg.edge_count(), 2); // Entry->block1, BranchFalse
 }
@@ -56,7 +59,8 @@ async fn test_build_cfg_ir_loop() {
     let sections = detection::locate_sections(&bytes, &instructions).unwrap();
     let (_clean_runtime, report) = strip::strip_bytecode(&bytes, &sections).unwrap();
 
-    let cfg_ir = build_cfg_ir(&instructions, &sections, report).expect("CFG builder failed");
+    let cfg_ir =
+        build_cfg_ir(&instructions, &sections, report, &bytes).expect("CFG builder failed");
     assert_eq!(cfg_ir.cfg.node_count(), 4); // Entry, two blocks, Exit
     assert_eq!(cfg_ir.cfg.edge_count(), 3); // Entry->block0, block0->block2, block2->Exit
 }
@@ -71,6 +75,7 @@ async fn test_build_cfg_ir_malformed() {
     let sections = detection::locate_sections(&bytes, &instructions).unwrap();
     let (_clean_runtime, report) = strip::strip_bytecode(&bytes, &sections).unwrap();
 
-    let cfg_ir = build_cfg_ir(&instructions, &sections, report).expect("CFG builder succeeded");
+    let cfg_ir =
+        build_cfg_ir(&instructions, &sections, report, &bytes).expect("CFG builder succeeded");
     assert_eq!(cfg_ir.cfg.node_count(), 3); // Entry, lone block, Exit
 }

@@ -296,7 +296,8 @@ impl FunctionDispatcher {
                 let target_for_push = selector_info.target_address;
 
                 // Generate comparison with PC-relative internal jumps
-                let comparison_block = self.create_token_comparison(token, target_for_push, base_offset)?;
+                let comparison_block =
+                    self.create_token_comparison(token, target_for_push, base_offset)?;
 
                 // Debug: log the first comparison block details
                 if idx == 0 {
@@ -305,7 +306,10 @@ impl FunctionDispatcher {
                         selector_info.selector
                     );
                     debug!("  Token: 0x{}", hex::encode(token));
-                    debug!("  Runtime-relative target PC (for PUSH): 0x{:x}", target_for_push);
+                    debug!(
+                        "  Runtime-relative target PC (for PUSH): 0x{:x}",
+                        target_for_push
+                    );
                     debug!("  Comparison block instructions:");
                     for (i, instr) in comparison_block.iter().enumerate() {
                         debug!("    [{}] {:?} {:?}", i, instr.op, instr.imm);
@@ -387,14 +391,15 @@ impl FunctionDispatcher {
         //   PUSH delta
         //   PC                   // <-- PC at position p, returns p (its own address, per EVM spec)
         //   ADD                  // at p+1
-        //   SWAP1                // at p+2
-        //   JUMPI                // at p+3
-        //   POP                  // at p+4
-        //   PUSH(n) target       // at p+5 (opcode) through p+5+n (immediate)
-        //   JUMP                 // at p+6+n
-        //   JUMPDEST             // at p+7+n <-- landing target
+        //   JUMPI                // at p+2
+        //   POP                  // at p+3
+        //   PUSH(n) target       // at p+4 (opcode) through p+4+n (immediate)
+        //   JUMP                 // at p+5+n
+        //   JUMPDEST             // at p+6+n <-- landing target
         //
-        // PC returns p (its own address), so delta = (p+7+n) - p = 7 + n
+        // PC returns p (its own address). Because the PUSH opcode itself occupies
+        // one byte before the immediate, the landing position is 7 + n bytes
+        // ahead of the PC instruction.
         let delta_to_after: u64 = (7 + target_push_bytes) as u64;
 
         // Comparison (keeps stack tidy for both paths)
@@ -408,7 +413,7 @@ impl FunctionDispatcher {
             self.create_push_instruction(delta_to_after, None)?, // [token, !match?, delta]
             self.create_instruction(Opcode::PC, None)?,          // [token, !match?, delta, pc]
             self.create_instruction(Opcode::ADD, None)?,         // [token, !match?, pc+delta]
-            self.create_instruction(Opcode::SWAP(1), None)?,     // [token, pc+delta, !match?]
+            // JUMPI pops (dest, condition); no SWAP needed because ADD leaves them in that order
             self.create_instruction(Opcode::JUMPI, None)?, // jump if !match, else fall through (stack now [token])
         ]);
 
@@ -416,7 +421,7 @@ impl FunctionDispatcher {
         instructions.extend(vec![
             self.create_instruction(Opcode::POP, None)?, // []  (remove token)
             self.create_push_instruction(absolute_target, Some(target_push_bytes))?, // [absolute target PC]
-            self.create_instruction(Opcode::JUMP, None)?, // JUMP
+            self.create_instruction(Opcode::JUMP, None)?,                            // JUMP
         ]);
 
         // After_i label for the next comparison
@@ -646,25 +651,49 @@ impl Transform for FunctionDispatcher {
                 &targets[..targets.len().min(5)]
             );
 
-            // Step 3: Vote for base = jumpdest - target
+            // Step 3: Vote for base offset using JUMPDEST voting
+            // The dispatcher uses: absolute_pc = base + target_offset
+            // For each (target, jumpdest) pair, we calculate base_candidate = jumpdest - target
+            // and count votes to find the most common base offset.
+            //
+            // jumpdests only contains runtime section JUMPDESTs, so any base that
+            // receives votes will necessarily map targets to valid runtime JUMPDESTs.
             let mut votes: HashMap<u32, usize> = HashMap::new();
+            let runtime_start_u32 = runtime_start as u32;
+            let min_reasonable_base = runtime_start_u32.saturating_sub(0x80); // Allow 128 bytes below
+            let max_reasonable_base = runtime_start_u32.saturating_add(0x2000); // Allow 8192 bytes above
+
             for &target in &targets {
                 for &jd in &jumpdests {
                     if jd >= target {
                         let base_candidate = jd - target;
-                        // Sanity window: base should be reasonable (0 for runtime-only, or typical range)
-                        // Allow 0 for runtime-only bytecode where targets are already absolute
-                        if base_candidate == 0 || (0x80..=0x1000).contains(&base_candidate) {
+                        if base_candidate == 0
+                            || (base_candidate >= min_reasonable_base
+                                && base_candidate <= max_reasonable_base)
+                        {
                             *votes.entry(base_candidate).or_default() += 1;
                         }
                     }
                 }
             }
 
-            // Step 4: Pick the base with most votes
+            // Step 4: Pick the base with most votes, with tiebreaker for closest to runtime_start
+            // When there's a tie in vote count, prefer the base closest to runtime_start
+            // (typical Solidity dispatchers use runtime-relative targets where base = runtime_start)
             let (&best_base, &vote_count) = votes
                 .iter()
-                .max_by_key(|(_, &count)| count)
+                .max_by(|(base_a, &count_a), (base_b, &count_b)| {
+                    // Primary: compare vote counts
+                    match count_a.cmp(&count_b) {
+                        std::cmp::Ordering::Equal => {
+                            // Tiebreaker: prefer base closer to runtime_start
+                            let dist_a = base_a.abs_diff(runtime_start_u32);
+                            let dist_b = base_b.abs_diff(runtime_start_u32);
+                            dist_b.cmp(&dist_a) // Reverse: smaller distance is better
+                        }
+                        other => other,
+                    }
+                })
                 .ok_or_else(|| {
                     Error::Generic(
                         "dispatcher: no valid base candidates found from JUMPDEST voting".into(),
@@ -880,25 +909,34 @@ impl Transform for FunctionDispatcher {
                     );
                     debug!(
                         "    Draining indices [{}..{}) from block",
-                        block_dispatcher_start,
-                        block_dispatcher_end
+                        block_dispatcher_start, block_dispatcher_end
                     );
 
                     if block_dispatcher_start < instructions.len()
                         && block_dispatcher_end > block_dispatcher_start
                     {
                         instructions.drain(block_dispatcher_start..block_dispatcher_end);
-                        debug!("    After drain: {} instructions remain", instructions.len());
+                        debug!(
+                            "    After drain: {} instructions remain",
+                            instructions.len()
+                        );
                         *max_stack = (*max_stack).max(needed_stack);
                     }
                 }
             }
 
             // Remove empty blocks from the CFG to avoid PC reindexing issues
+            // IMPORTANT: Preserve the FIRST affected block even if empty - we need it for dispatcher insertion
             debug!("=== Removing Empty Blocks ===");
+            let first_affected = affected_blocks.first().map(|(idx, _, _)| *idx);
             let empty_blocks: Vec<_> = affected_blocks
                 .iter()
                 .filter(|(block_idx, _, _)| {
+                    // Skip the first affected block - we need it for insertion
+                    if Some(*block_idx) == first_affected {
+                        debug!("    Preserving first affected block {} even if empty (needed for dispatcher insertion)", block_idx.index());
+                        return false;
+                    }
                     if let Some(Block::Body { instructions, .. }) = ir.cfg.node_weight(*block_idx) {
                         instructions.is_empty()
                     } else {
@@ -915,7 +953,18 @@ impl Transform for FunctionDispatcher {
 
             // Update affected_blocks to exclude removed blocks
             affected_blocks.retain(|(block_idx, _, _)| !empty_blocks.contains(block_idx));
-            debug!("  Removed {} empty blocks, {} affected blocks remain", empty_blocks.len(), affected_blocks.len());
+            debug!(
+                "  Removed {} empty blocks, {} affected blocks remain",
+                empty_blocks.len(),
+                affected_blocks.len()
+            );
+
+            // Check if we have any blocks left to insert into
+            if affected_blocks.is_empty() {
+                debug!("  No affected blocks remain after removing empty blocks");
+                debug!("  Skipping dispatcher insertion - all dispatcher blocks were removed");
+                return Ok(false);
+            }
 
             // Insert the disguised dispatcher into the first affected block
             debug!("=== Inserting New Dispatcher ===");
@@ -941,7 +990,8 @@ impl Transform for FunctionDispatcher {
                     instructions.insert(insertion_point + i, new_instruction);
                 }
 
-                let net_change = instructions.len() as isize - orig_len_first as isize + (end - start) as isize;
+                let net_change =
+                    instructions.len() as isize - orig_len_first as isize + (end - start) as isize;
                 debug!(
                     "    Block after insert: {} instructions (net change: {:+})",
                     instructions.len(),
@@ -1100,6 +1150,14 @@ impl Transform for FunctionDispatcher {
             }
 
             // Store the mapping in the CFG bundle
+            debug!("=== Storing selector_mapping in IR ===");
+            for (selector, token) in &mapping {
+                debug!(
+                    "  Selector 0x{:08x} -> Token 0x{}",
+                    selector,
+                    hex::encode(token)
+                );
+            }
             ir.selector_mapping = Some(mapping);
 
             debug!("=== FunctionDispatcher Transform Complete ===");
