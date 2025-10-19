@@ -377,18 +377,18 @@ fn detect_auxdata(bytes: &[u8]) -> Option<(usize, usize)> {
         return None;
     }
 
-    let auxdata_length = u16::from_be_bytes([bytes[len - 2], bytes[len - 1]]) as usize;
+    let auxdata_cbor_length = u16::from_be_bytes([bytes[len - 2], bytes[len - 1]]) as usize;
 
-    if len < 2 + auxdata_length {
+    if len < 2 + auxdata_cbor_length {
         tracing::debug!(
-            "Malformed bytecode: detected auxdata length={}, actual bytecode length (excluding the last two bytes)={}",
-            auxdata_length,
+            "Malformed bytecode: detected auxdata CBOR length={}, actual bytecode length (excluding length bytes)={}",
+            auxdata_cbor_length,
             len - 2
         );
         return None;
     }
 
-    Some((len - 2 - auxdata_length, auxdata_length))
+    Some((len - 2 - auxdata_cbor_length, auxdata_cbor_length + 2))
 }
 
 /// Detects Padding section before Auxdata.
