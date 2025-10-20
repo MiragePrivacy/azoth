@@ -12,12 +12,15 @@ use revm::state::AccountInfo;
 use revm::{Context, DatabaseCommit, ExecuteEvm, MainBuilder, MainContext};
 use std::collections::HashMap;
 
-const COUNTER_BYTECODE: &str = "0x6080604052348015600e575f5ffd5b506101d98061001c5f395ff3fe608060405234801561000f575f5ffd5b506004361061004a575f3560e01c806306661abd1461004e578063371303c01461006c5780636d4ce63c14610076578063b3bcfa8214610094575b5f5ffd5b61005661009e565b60405161006391906100f7565b60405180910390f35b6100746100a3565b005b61007e6100bd565b60405161008b91906100f7565b60405180910390f35b61009c6100c5565b005b5f5481565b60015f5f8282546100b4919061013d565b92505081905550565b5f5f54905090565b60015f5f8282546100d69190610170565b92505081905550565b5f819050919050565b6100f1816100df565b82525050565b5f60208201905061010a5f8301846100e8565b92915050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52601160045260245ffd5b5f610147826100df565b9150610152836100df565b925082820190508082111561016a57610169610110565b5b92915050565b5f61017a826100df565b9150610185836100df565b925082820390508181111561019d5761019c610110565b5b9291505056fea264697066735822122078c44612ebfc52f8c09e96e351b62f1c6feebaa2694fa7d29431ccb4ae9ed15064736f6c634300081c0033";
+const COUNTER_DEPLOYMENT_BYTECODE: &str =
+    include_str!("../../bytecode/counter/counter_deployment.hex");
 
-const SELECTOR_COUNT: u32 = 0x06661abd;
-const SELECTOR_INC: u32 = 0x371303c0;
-const SELECTOR_GET: u32 = 0x6d4ce63c;
-const SELECTOR_DEC: u32 = 0xb3bcfa82;
+#[allow(dead_code)]
+const COUNTER_RUNTIME_BYTECODE: &str = include_str!("../../bytecode/counter/counter_runtime.hex");
+
+const SELECTOR_SET_NUMBER: u32 = 0x3fb5c1cb;
+const SELECTOR_NUMBER: u32 = 0x8381f58a;
+const SELECTOR_INCREMENT: u32 = 0xd09de08a;
 
 fn selector_token(mapping: &HashMap<u32, Vec<u8>>, selector: u32) -> Result<Bytes> {
     let token = mapping
@@ -53,9 +56,10 @@ async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
         .with_max_level(tracing::Level::DEBUG)
         .try_init();
 
-    let obfuscation_result = obfuscate_bytecode(COUNTER_BYTECODE, ObfuscationConfig::default())
-        .await
-        .map_err(|e| eyre!("Failed to obfuscate counter bytecode: {}", e))?;
+    let obfuscation_result =
+        obfuscate_bytecode(COUNTER_DEPLOYMENT_BYTECODE, ObfuscationConfig::default())
+            .await
+            .map_err(|e| eyre!("Bytecode transformation failed: {}", e))?;
 
     assert!(
         obfuscation_result
@@ -70,24 +74,21 @@ async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
         .as_ref()
         .ok_or_else(|| eyre!("Selector mapping missing from obfuscation result"))?;
 
-    let count_token = selector_token(selector_mapping, SELECTOR_COUNT)?;
-    let get_token = selector_token(selector_mapping, SELECTOR_GET)?;
-    let inc_token = selector_token(selector_mapping, SELECTOR_INC)?;
-    let dec_token = selector_token(selector_mapping, SELECTOR_DEC)?;
+    let set_number_token = selector_token(selector_mapping, SELECTOR_SET_NUMBER)?;
+    let number_token = selector_token(selector_mapping, SELECTOR_NUMBER)?;
+    let increment_token = selector_token(selector_mapping, SELECTOR_INCREMENT)?;
 
     println!(
-        "Selector tokens (first 4 bytes):\n  count: {}\n  get:   {}\n  inc:   {}\n  dec:   {}",
-        hex_encode(&count_token[..4.min(count_token.len())]),
-        hex_encode(&get_token[..4.min(get_token.len())]),
-        hex_encode(&inc_token[..4.min(inc_token.len())]),
-        hex_encode(&dec_token[..4.min(dec_token.len())])
+        "Selector tokens (first 4 bytes):\n  setNumber: {}\n  number:    {}\n  increment: {}",
+        hex_encode(&set_number_token[..4.min(set_number_token.len())]),
+        hex_encode(&number_token[..4.min(number_token.len())]),
+        hex_encode(&increment_token[..4.min(increment_token.len())])
     );
     println!(
-        "Token lengths: count={}, get={}, inc={}, dec={}",
-        count_token.len(),
-        get_token.len(),
-        inc_token.len(),
-        dec_token.len()
+        "Token lengths: setNumber={}, number={}, increment={}",
+        set_number_token.len(),
+        number_token.len(),
+        increment_token.len()
     );
 
     let mut db = InMemoryDB::default();
@@ -176,7 +177,7 @@ async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
         caller: deployer,
         gas_limit: 5_000_000,
         kind: TxKind::Call(contract_address),
-        data: get_token.clone(),
+        data: number_token.clone(),
         value: U256::ZERO,
         nonce,
         ..Default::default()
@@ -185,68 +186,32 @@ async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
 
     let read_before = evm
         .transact(read_tx)
-        .map_err(|e| eyre!("Initial get() failed: {:?}", e))?;
+        .map_err(|e| eyre!("Initial number() failed: {:?}", e))?;
     evm.db_mut().commit(read_before.state.clone());
 
     let initial_value = match read_before.result {
         ExecutionResult::Success { output, .. } => match output {
             Output::Call(data) => {
-                println!("get() raw output: {}", hex_encode(&data));
+                println!("number() raw output: {}", hex_encode(&data));
                 parse_u256(&data)
             }
-            _ => return Err(eyre!("Unexpected output for get() call")),
+            _ => return Err(eyre!("Unexpected output for number() call")),
         },
         ExecutionResult::Revert { output, .. } => {
-            return Err(eyre!("Initial get() reverted: {:?}", output));
+            return Err(eyre!("Initial number() reverted: {:?}", output));
         }
         ExecutionResult::Halt { reason, .. } => {
-            return Err(eyre!("Initial get() halted: {:?}", reason));
+            return Err(eyre!("Initial number() halted: {:?}", reason));
         }
     };
-    println!("Counter value before increment (get): {}", initial_value);
+    println!("Counter initial value: {}", initial_value);
 
-    let count_tx = TxEnv {
-        caller: deployer,
-        gas_limit: 5_000_000,
-        kind: TxKind::Call(contract_address),
-        data: count_token.clone(),
-        value: U256::ZERO,
-        nonce,
-        ..Default::default()
-    };
-    nonce += 1;
-
-    let count_before = evm
-        .transact(count_tx)
-        .map_err(|e| eyre!("count() call failed: {:?}", e))?;
-    evm.db_mut().commit(count_before.state.clone());
-
-    let count_value_before = match count_before.result {
-        ExecutionResult::Success { output, .. } => match output {
-            Output::Call(data) => {
-                println!("count() raw output: {}", hex_encode(&data));
-                parse_u256(&data)
-            }
-            _ => return Err(eyre!("Unexpected output for count() call")),
-        },
-        ExecutionResult::Revert { output, .. } => {
-            return Err(eyre!("count() reverted: {:?}", output));
-        }
-        ExecutionResult::Halt { reason, .. } => {
-            return Err(eyre!("count() halted: {:?}", reason));
-        }
-    };
-    println!(
-        "Counter value before increment (count): {}",
-        count_value_before
-    );
-    assert_eq!(initial_value, count_value_before);
-
+    // Call increment()
     let inc_tx = TxEnv {
         caller: deployer,
         gas_limit: 5_000_000,
         kind: TxKind::Call(contract_address),
-        data: inc_token.clone(),
+        data: increment_token.clone(),
         value: U256::ZERO,
         nonce,
         ..Default::default()
@@ -255,25 +220,26 @@ async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
 
     let inc_result = evm
         .transact(inc_tx)
-        .map_err(|e| eyre!("inc() call failed: {:?}", e))?;
+        .map_err(|e| eyre!("increment() call failed: {:?}", e))?;
 
     evm.db_mut().commit(inc_result.state.clone());
 
     match inc_result.result {
         ExecutionResult::Success { .. } => {}
         ExecutionResult::Revert { output, .. } => {
-            return Err(eyre!("inc() reverted: {:?}", output));
+            return Err(eyre!("increment() reverted: {:?}", output));
         }
         ExecutionResult::Halt { reason, .. } => {
-            return Err(eyre!("inc() halted: {:?}", reason));
+            return Err(eyre!("increment() halted: {:?}", reason));
         }
     }
 
+    // Read value after increment
     let read_after_tx = TxEnv {
         caller: deployer,
         gas_limit: 5_000_000,
         kind: TxKind::Call(contract_address),
-        data: get_token.clone(),
+        data: number_token.clone(),
         value: U256::ZERO,
         nonce,
         ..Default::default()
@@ -282,59 +248,66 @@ async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
 
     let read_after = evm
         .transact(read_after_tx)
-        .map_err(|e| eyre!("Second get() failed: {:?}", e))?;
+        .map_err(|e| eyre!("number() after increment failed: {:?}", e))?;
     evm.db_mut().commit(read_after.state.clone());
 
     let after_value = match read_after.result {
         ExecutionResult::Success { output, .. } => match output {
             Output::Call(data) => {
-                println!("get() after inc raw output: {}", hex_encode(&data));
+                println!("number() after increment raw output: {}", hex_encode(&data));
                 parse_u256(&data)
             }
-            _ => return Err(eyre!("Unexpected output for second get() call")),
+            _ => return Err(eyre!("Unexpected output for number() call")),
         },
         ExecutionResult::Revert { output, .. } => {
-            return Err(eyre!("Second get() reverted: {:?}", output));
+            return Err(eyre!("number() after increment reverted: {:?}", output));
         }
         ExecutionResult::Halt { reason, .. } => {
-            return Err(eyre!("Second get() halted: {:?}", reason));
+            return Err(eyre!("number() after increment halted: {:?}", reason));
         }
     };
     println!("Counter value after increment: {}", after_value);
     assert_eq!(after_value, initial_value.saturating_add(U256::from(1u64)));
 
-    let dec_tx = TxEnv {
+    // Call setNumber(42)
+    let new_value = U256::from(42u64);
+    let mut calldata = vec![0u8; 36];
+    calldata[..4].copy_from_slice(&set_number_token[..4]);
+    calldata[4..36].copy_from_slice(&new_value.to_be_bytes::<32>());
+
+    let set_tx = TxEnv {
         caller: deployer,
         gas_limit: 5_000_000,
         kind: TxKind::Call(contract_address),
-        data: dec_token.clone(),
+        data: Bytes::from(calldata),
         value: U256::ZERO,
         nonce,
         ..Default::default()
     };
     nonce += 1;
 
-    let dec_result = evm
-        .transact(dec_tx)
-        .map_err(|e| eyre!("dec() call failed: {:?}", e))?;
+    let set_result = evm
+        .transact(set_tx)
+        .map_err(|e| eyre!("setNumber() call failed: {:?}", e))?;
 
-    evm.db_mut().commit(dec_result.state.clone());
+    evm.db_mut().commit(set_result.state.clone());
 
-    match dec_result.result {
+    match set_result.result {
         ExecutionResult::Success { .. } => {}
         ExecutionResult::Revert { output, .. } => {
-            return Err(eyre!("dec() reverted: {:?}", output));
+            return Err(eyre!("setNumber() reverted: {:?}", output));
         }
         ExecutionResult::Halt { reason, .. } => {
-            return Err(eyre!("dec() halted: {:?}", reason));
+            return Err(eyre!("setNumber() halted: {:?}", reason));
         }
     }
 
+    // Read final value
     let read_final_tx = TxEnv {
         caller: deployer,
         gas_limit: 5_000_000,
         kind: TxKind::Call(contract_address),
-        data: get_token,
+        data: number_token,
         value: U256::ZERO,
         nonce,
         ..Default::default()
@@ -342,27 +315,27 @@ async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
 
     let read_final = evm
         .transact(read_final_tx)
-        .map_err(|e| eyre!("Final get() failed: {:?}", e))?;
+        .map_err(|e| eyre!("Final number() failed: {:?}", e))?;
     evm.db_mut().commit(read_final.state.clone());
 
-    let restored_value = match read_final.result {
+    let final_value = match read_final.result {
         ExecutionResult::Success { output, .. } => match output {
             Output::Call(data) => {
-                println!("get() after dec raw output: {}", hex_encode(&data));
+                println!("number() after setNumber raw output: {}", hex_encode(&data));
                 parse_u256(&data)
             }
-            _ => return Err(eyre!("Unexpected output for final get() call")),
+            _ => return Err(eyre!("Unexpected output for final number() call")),
         },
         ExecutionResult::Revert { output, .. } => {
-            return Err(eyre!("Final get() reverted: {:?}", output));
+            return Err(eyre!("Final number() reverted: {:?}", output));
         }
         ExecutionResult::Halt { reason, .. } => {
-            return Err(eyre!("Final get() halted: {:?}", reason));
+            return Err(eyre!("Final number() halted: {:?}", reason));
         }
     };
 
-    println!("Counter value after decrement: {}", restored_value);
-    assert_eq!(restored_value, initial_value);
+    println!("Counter value after setNumber(42): {}", final_value);
+    assert_eq!(final_value, new_value);
 
     Ok(())
 }

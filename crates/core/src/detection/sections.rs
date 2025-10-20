@@ -592,7 +592,11 @@ mod tests {
         let bytecode = Vec::from_hex(STORAGE_BYTECODE).unwrap();
         let (auxdata_offset, auxdata_length) = detect_auxdata(&bytecode).unwrap();
 
-        assert!(auxdata_offset == 35);
-        assert!(auxdata_length == 51);
+        // Auxdata section includes:
+        // - CBOR-encoded metadata (51 bytes)
+        // - 2-byte length indicator (last 2 bytes = 0x0033)
+        // Total: 53 bytes (from offset 35 to end at 88)
+        assert_eq!(auxdata_offset, 35);
+        assert_eq!(auxdata_length, 53);
     }
 }
