@@ -6,7 +6,7 @@
 
 use super::{
     mock_token_bytecode, prepare_bytecode, EscrowMappings, ObfuscatedCaller,
-    ESCROW_CONTRACT_BYTECODE, MOCK_TOKEN_ADDR,
+    ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, MOCK_TOKEN_ADDR,
 };
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use color_eyre::eyre::eyre;
@@ -29,7 +29,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     // obfuscate contract
     let config = ObfuscationConfig::default();
 
-    let obfuscation_result = obfuscate_bytecode(ESCROW_CONTRACT_BYTECODE, config)
+    let obfuscation_result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
         .await
         .map_err(|e| eyre!("Failed to obfuscate bytecode: {:?}", e))?;
 
