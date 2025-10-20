@@ -1,4 +1,6 @@
-use super::{mock_token_bytecode, prepare_bytecode, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, MOCK_TOKEN_ADDR};
+use super::{
+    mock_token_bytecode, prepare_bytecode, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, MOCK_TOKEN_ADDR,
+};
 use azoth_core::seed::Seed;
 use azoth_transform::jump_address_transformer::JumpAddressTransformer;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
@@ -375,7 +377,8 @@ async fn test_gas_consumption_analysis() -> Result<()> {
     let seed = Seed::generate();
     println!("Testing gas consumption analysis");
 
-    let (_, original_gas) = deploy_and_verify_contract_revm(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, "Original")?;
+    let (_, original_gas) =
+        deploy_and_verify_contract_revm(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, "Original")?;
 
     let transforms: Vec<Box<dyn Transform>> = vec![Box::new(Shuffle)];
     let config = create_config_with_transforms(transforms, seed);

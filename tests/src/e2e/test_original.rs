@@ -1,6 +1,8 @@
 //! Test original unobfuscated contract to verify baseline functionality
 
-use super::{mock_token_bytecode, prepare_bytecode, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, MOCK_TOKEN_ADDR};
+use super::{
+    mock_token_bytecode, prepare_bytecode, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, MOCK_TOKEN_ADDR,
+};
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use revm::bytecode::Bytecode;
@@ -19,8 +21,9 @@ async fn test_original_is_bonded() -> Result<()> {
         .try_init();
 
     // Use ORIGINAL unobfuscated bytecode
-    let original_bytecode_hex = azoth_core::normalize_hex_string(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE)
-        .map_err(|e| eyre!("Failed to normalize bytecode: {}", e))?;
+    let original_bytecode_hex =
+        azoth_core::normalize_hex_string(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE)
+            .map_err(|e| eyre!("Failed to normalize bytecode: {}", e))?;
     let original_bytecode = prepare_bytecode(&original_bytecode_hex)?;
 
     println!("Testing ORIGINAL (unobfuscated) contract...");

@@ -1,7 +1,7 @@
 use crate::function_dispatcher::FunctionDispatcher;
 use crate::{PassConfig, Transform};
 use azoth_core::seed::Seed;
-use azoth_core::{cfg_ir, decoder, detection, encoder, process_bytecode_to_cfg, Opcode};
+use azoth_core::{cfg_ir, decoder, detection, encoder, process_bytecode_to_cfg, validator, Opcode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -293,6 +293,11 @@ pub async fn obfuscate_bytecode(
     let obfuscated_bytes = encoder::encode(&all_instructions, &bytes)?;
 
     tracing::debug!("  Encoded to {} bytes", obfuscated_bytes.len());
+
+    tracing::debug!("  Validating obfuscated runtime jump targets");
+    validator::validate_jump_targets(&obfuscated_bytes)
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    tracing::debug!("  Jump validation passed");
 
     // Step 8: Reassemble final bytecode
     let final_bytecode = cfg_ir.clean_report.reassemble(&obfuscated_bytes);

@@ -31,6 +31,15 @@ pub enum Error {
     #[error("invalid block structure: {0}")]
     InvalidBlockStructure(String),
 
+    /// A JUMP/JUMPI instruction targets an invalid destination.
+    #[error("invalid jump target: pc 0x{pc:x} -> 0x{target:x}")]
+    InvalidJumpTarget {
+        /// Program counter of the jump instruction.
+        pc: usize,
+        /// Calculated destination that failed validation.
+        target: usize,
+    },
+
     /// The immediate data for a PUSH opcode is invalid.
     #[error("invalid immediate: {0}")]
     InvalidImmediate(String),
@@ -42,10 +51,6 @@ pub enum Error {
     /// Invalid seed length.
     #[error("invalid seed length: expected 64 hex chars, got {0}")]
     InvalidSeedLength(usize),
-
-    /// Invalid relay secret for HMAC.
-    #[error("invalid relay secret for HMAC")]
-    InvalidRelaySecret,
 
     /// The section configuration is invalid.
     #[error("invalid section configuration")]
