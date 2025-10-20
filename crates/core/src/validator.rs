@@ -44,7 +44,16 @@ pub async fn validate_jump_targets(bytecode: &[u8]) -> Result<()> {
             continue;
         };
 
-        if target >= bytecode.len() || !jumpdests.contains(&target) {
+        let is_valid = target < bytecode.len() && jumpdests.contains(&target);
+        if !is_valid {
+            eprintln!(
+                "  DEBUG: JUMP at PC 0x{:x} targets 0x{:x} - valid={}, in_bounds={}, has_jumpdest={}",
+                instr.pc,
+                target,
+                is_valid,
+                target < bytecode.len(),
+                jumpdests.contains(&target)
+            );
             invalid_jumps.push((instr.pc, target));
         }
     }
