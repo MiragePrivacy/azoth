@@ -25,6 +25,72 @@ use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// Operations recorded in the CFG trace.
+#[derive(Debug, Clone)]
+pub enum OperationKind {
+    Build {
+        body_blocks: usize,
+        sections: usize,
+    },
+    OverwriteBlock {
+        node: usize,
+    },
+    SetUnconditionalJump {
+        source: usize,
+        target: usize,
+    },
+    SetConditionalJump {
+        source: usize,
+        true_target: usize,
+        false_target: Option<usize>,
+    },
+    RebuildEdges {
+        node: usize,
+    },
+    WriteSymbolicImmediates {
+        node: usize,
+    },
+    ReindexPcs,
+    PatchJumpImmediates,
+    ReplaceBody {
+        instruction_count: usize,
+    },
+}
+
+/// Snapshot of the IR bundle captured after each operation.
+#[derive(Debug, Clone)]
+pub struct CfgIrSnapshot {
+    pub cfg: StableDiGraph<Block, EdgeType>,
+    pub pc_to_block: HashMap<usize, NodeIndex>,
+    pub clean_report: CleanReport,
+    pub sections: Vec<Section>,
+    pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
+    pub original_bytecode: Vec<u8>,
+    pub runtime_bounds: Option<(usize, usize)>,
+}
+
+impl From<&CfgIrBundle> for CfgIrSnapshot {
+    fn from(bundle: &CfgIrBundle) -> Self {
+        Self {
+            cfg: bundle.cfg.clone(),
+            pc_to_block: bundle.pc_to_block.clone(),
+            clean_report: bundle.clean_report.clone(),
+            sections: bundle.sections.clone(),
+            selector_mapping: bundle.selector_mapping.clone(),
+            original_bytecode: bundle.original_bytecode.clone(),
+            runtime_bounds: bundle.runtime_bounds,
+        }
+    }
+}
+
+/// Trace entry describing an applied CFG operation.
+#[derive(Debug, Clone)]
+pub struct TraceEvent {
+    pub kind: OperationKind,
+    pub snapshot: CfgIrSnapshot,
+    pub remapped_pcs: Option<HashMap<usize, usize>>,
+}
+
 /// CFG node representation.
 #[derive(Debug, Clone)]
 pub enum Block {
@@ -89,21 +155,6 @@ pub enum BlockControl {
     Terminal,
 }
 
-impl BlockControl {
-    /// Returns true when the control descriptor references a symbolic jump target.
-    #[allow(dead_code)]
-    fn is_symbolic(&self) -> bool {
-        match self {
-            BlockControl::Jump { target }
-            | BlockControl::Branch {
-                true_target: target,
-                false_target: _,
-            } => target.is_symbolic(),
-            _ => false,
-        }
-    }
-}
-
 /// Encodes where a jump leads and which coordinate system the immediate expects.
 #[derive(Debug, Clone, PartialEq)]
 pub enum JumpTarget {
@@ -119,21 +170,6 @@ pub enum JumpTarget {
         value: usize,
         encoding: JumpEncoding,
     },
-}
-
-impl JumpTarget {
-    /// Returns true if the target points to another block rather than a raw immediate.
-    fn is_symbolic(&self) -> bool {
-        matches!(self, JumpTarget::Block { .. })
-    }
-
-    /// Returns the encoding mode used by this target when materialised.
-    #[allow(dead_code)]
-    fn encoding(&self) -> JumpEncoding {
-        match self {
-            JumpTarget::Block { encoding, .. } | JumpTarget::Raw { encoding, .. } => *encoding,
-        }
-    }
 }
 
 /// Describes how to interpret the immediate used by a jump.
@@ -171,6 +207,7 @@ pub struct CfgIrBundle {
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
     pub original_bytecode: Vec<u8>,
     pub runtime_bounds: Option<(usize, usize)>,
+    pub trace: Vec<TraceEvent>,
 }
 
 impl CfgIrBundle {
@@ -200,6 +237,20 @@ impl CfgIrBundle {
         })
     }
 
+    /// Records a trace event capturing the current state of the bundle.
+    pub fn record_operation(
+        &mut self,
+        kind: OperationKind,
+        remapped_pcs: Option<HashMap<usize, usize>>,
+    ) {
+        let snapshot = CfgIrSnapshot::from(&*self);
+        self.trace.push(TraceEvent {
+            kind,
+            snapshot,
+            remapped_pcs,
+        });
+    }
+
     /// Replace the body of a block while keeping its connectivity metadata intact.
     pub fn overwrite_block(
         &mut self,
@@ -221,6 +272,7 @@ impl CfgIrBundle {
 
         self.rebuild_edges_for_block(node)?;
         self.assign_block_control(node, runtime_bounds);
+        self.record_operation(OperationKind::OverwriteBlock { node: node.index() }, None);
         Ok(())
     }
 
@@ -248,6 +300,13 @@ impl CfgIrBundle {
 
         self.rebuild_edges_for_block(source)?;
         self.write_symbolic_immediates_for_block(source)?;
+        self.record_operation(
+            OperationKind::SetUnconditionalJump {
+                source: source.index(),
+                target: target.index(),
+            },
+            None,
+        );
         Ok(())
     }
 
@@ -283,6 +342,14 @@ impl CfgIrBundle {
 
         self.rebuild_edges_for_block(source)?;
         self.write_symbolic_immediates_for_block(source)?;
+        self.record_operation(
+            OperationKind::SetConditionalJump {
+                source: source.index(),
+                true_target: true_target.index(),
+                false_target: false_target.map(|idx| idx.index()),
+            },
+            None,
+        );
         Ok(())
     }
 
@@ -303,8 +370,15 @@ impl CfgIrBundle {
         let mut rebuilt = build_cfg_ir(&instructions, sections, clean_report, &original_bytecode)?;
         rebuilt.selector_mapping = selector_mapping;
         rebuilt.original_bytecode = original_bytecode;
+        rebuilt.trace = self.trace.clone();
 
         *self = rebuilt;
+        self.record_operation(
+            OperationKind::ReplaceBody {
+                instruction_count: instructions.len(),
+            },
+            None,
+        );
         Ok(())
     }
 
@@ -411,6 +485,7 @@ impl CfgIrBundle {
 
         self.pc_to_block = new_pc_to_block;
         self.write_symbolic_immediates()?;
+        self.record_operation(OperationKind::ReindexPcs, Some(mapping.clone()));
 
         Ok(mapping)
     }
@@ -429,6 +504,7 @@ impl CfgIrBundle {
                 patch_legacy_immediates(body, runtime_bounds, pc_mapping)?;
             }
         }
+        self.record_operation(OperationKind::PatchJumpImmediates, Some(pc_mapping.clone()));
         Ok(())
     }
 
@@ -458,6 +534,12 @@ impl CfgIrBundle {
 
         self.emit_edges(node_idx, &control)?;
 
+        self.record_operation(
+            OperationKind::RebuildEdges {
+                node: node_idx.index(),
+            },
+            None,
+        );
         Ok(())
     }
 
@@ -541,6 +623,10 @@ impl CfgIrBundle {
             }
         }
 
+        self.record_operation(
+            OperationKind::WriteSymbolicImmediates { node: node.index() },
+            None,
+        );
         Ok(())
     }
 
@@ -632,7 +718,7 @@ pub fn build_cfg_ir(
 
     let pc_to_block = node_by_pc.clone();
 
-    Ok(CfgIrBundle {
+    let mut bundle = CfgIrBundle {
         cfg,
         pc_to_block,
         clean_report,
@@ -640,7 +726,21 @@ pub fn build_cfg_ir(
         selector_mapping: None,
         original_bytecode: original_bytecode.to_vec(),
         runtime_bounds,
-    })
+        trace: Vec::new(),
+    };
+    let body_blocks = bundle
+        .cfg
+        .node_indices()
+        .filter(|idx| matches!(bundle.cfg[*idx], Block::Body(_)))
+        .count();
+    bundle.record_operation(
+        OperationKind::Build {
+            body_blocks,
+            sections: sections.len(),
+        },
+        None,
+    );
+    Ok(bundle)
 }
 
 /// Extracts runtime section bounds from the detection results.

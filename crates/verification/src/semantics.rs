@@ -1205,6 +1205,7 @@ pub mod tests {
             selector_mapping: None,
             original_bytecode: vec![],
             runtime_bounds: None,
+            trace: Vec::new(),
         };
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
 
@@ -1250,6 +1251,7 @@ pub mod tests {
             selector_mapping: None,
             original_bytecode: vec![],
             runtime_bounds: None,
+            trace: Vec::new(),
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
@@ -1269,6 +1271,7 @@ pub mod tests {
             selector_mapping: None,
             original_bytecode: vec![],
             runtime_bounds: None,
+            trace: Vec::new(),
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
