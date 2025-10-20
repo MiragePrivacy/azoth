@@ -4,15 +4,9 @@ use std::collections::HashSet;
 
 use crate::{
     Opcode,
+    decoder::Instruction,
     result::{Error, Result},
 };
-
-#[derive(Debug, Clone)]
-struct SimpleInstruction {
-    pc: usize,
-    opcode: Opcode,
-    immediate: Option<Vec<u8>>,
-}
 
 /// Validate that all statically resolvable JUMP/JUMPI instructions target valid JUMPDESTs.
 ///
@@ -26,27 +20,31 @@ pub fn validate_jump_targets(bytecode: &[u8]) -> Result<()> {
     let instructions = parse_instructions(bytecode)?;
     let jumpdests: HashSet<usize> = instructions
         .iter()
-        .filter_map(|instr| matches!(instr.opcode, Opcode::JUMPDEST).then_some(instr.pc))
+        .filter_map(|instr| matches!(instr.op, Opcode::JUMPDEST).then_some(instr.pc))
         .collect();
 
     for idx in 0..instructions.len() {
         let instr = &instructions[idx];
-        if matches!(instr.opcode, Opcode::JUMP | Opcode::JUMPI) {
-            if let Some(target) = resolve_jump_target(&instructions, idx) {
-                if target >= bytecode.len() || !jumpdests.contains(&target) {
-                    return Err(Error::InvalidJumpTarget {
-                        pc: instr.pc,
-                        target,
-                    });
-                }
-            }
+        if !matches!(instr.op, Opcode::JUMP | Opcode::JUMPI) {
+            continue;
+        }
+
+        let Some(target) = resolve_jump_target(&instructions, idx) else {
+            continue;
+        };
+
+        if target >= bytecode.len() || !jumpdests.contains(&target) {
+            return Err(Error::InvalidJumpTarget {
+                pc: instr.pc,
+                target,
+            });
         }
     }
 
     Ok(())
 }
 
-fn parse_instructions(bytecode: &[u8]) -> Result<Vec<SimpleInstruction>> {
+fn parse_instructions(bytecode: &[u8]) -> Result<Vec<Instruction>> {
     let mut instructions = Vec::new();
     let mut pc = 0usize;
 
@@ -67,15 +65,15 @@ fn parse_instructions(bytecode: &[u8]) -> Result<Vec<SimpleInstruction>> {
         }
 
         let immediate = if imm_len > 0 {
-            Some(bytecode[(pc + 1)..end].to_vec())
+            Some(hex::encode(&bytecode[(pc + 1)..end]))
         } else {
             None
         };
 
-        instructions.push(SimpleInstruction {
+        instructions.push(Instruction {
             pc,
-            opcode,
-            immediate,
+            op: opcode,
+            imm: immediate,
         });
 
         pc = end;
@@ -84,7 +82,7 @@ fn parse_instructions(bytecode: &[u8]) -> Result<Vec<SimpleInstruction>> {
     Ok(instructions)
 }
 
-fn resolve_jump_target(instructions: &[SimpleInstruction], idx: usize) -> Option<usize> {
+fn resolve_jump_target(instructions: &[Instruction], idx: usize) -> Option<usize> {
     if idx == 0 {
         return None;
     }
@@ -93,33 +91,40 @@ fn resolve_jump_target(instructions: &[SimpleInstruction], idx: usize) -> Option
     let prev = &instructions[idx - 1];
 
     // Direct pattern: PUSHn <addr>; JUMP/JUMPI
-    match prev.opcode {
+    match prev.op {
         Opcode::PUSH0 => return Some(0),
         Opcode::PUSH(_) => {
-            if let Some(imm) = &prev.immediate {
-                return Some(bytes_to_usize(imm));
+            if let Some(target) = prev.imm.as_deref().and_then(imm_hex_to_usize) {
+                return Some(target);
             }
         }
         _ => {}
     }
 
     // PC-relative pattern: PUSHn <delta>; PC; ADD; JUMPI
-    if matches!(instr.opcode, Opcode::JUMPI) && idx >= 3 {
+    if matches!(instr.op, Opcode::JUMPI) && idx >= 3 {
         let push = &instructions[idx - 3];
         let pc_instr = &instructions[idx - 2];
         let add = &instructions[idx - 1];
 
-        if matches!(push.opcode, Opcode::PUSH(_))
-            && matches!(pc_instr.opcode, Opcode::PC)
-            && matches!(add.opcode, Opcode::ADD)
-            && push.immediate.is_some()
+        if matches!(push.op, Opcode::PUSH(_))
+            && matches!(pc_instr.op, Opcode::PC)
+            && matches!(add.op, Opcode::ADD)
         {
-            let delta = bytes_to_usize(push.immediate.as_ref().unwrap());
-            return Some(pc_instr.pc.saturating_add(delta));
+            return push
+                .imm
+                .as_deref()
+                .and_then(imm_hex_to_usize)
+                .map(|delta| pc_instr.pc.saturating_add(delta));
         }
     }
 
     None
+}
+
+fn imm_hex_to_usize(imm_hex: &str) -> Option<usize> {
+    let bytes = hex::decode(imm_hex).ok()?;
+    Some(bytes_to_usize(&bytes))
 }
 
 fn bytes_to_usize(bytes: &[u8]) -> usize {
