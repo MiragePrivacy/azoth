@@ -376,9 +376,6 @@ impl FunctionDispatcher {
         let token_size = token.len().clamp(1, 32);
         let token_hex = hex::encode(token);
 
-        // Calculate minimal bytes needed for the target address
-        // Using the minimal width avoids overflow issues and works correctly
-        // with the PC mapping approach (which patches immediates after reindexing)
         let absolute_target = runtime_base as u64 + target_address;
         let target_push_bytes = if absolute_target == 0 {
             1
@@ -417,7 +414,6 @@ impl FunctionDispatcher {
             self.create_instruction(Opcode::JUMPI, None)?, // jump if !match, else fall through (stack now [token])
         ]);
 
-        // Match path (fallthrough): clean stack, then jump to target
         instructions.extend(vec![
             self.create_instruction(Opcode::POP, None)?, // []  (remove token)
             self.create_push_instruction(absolute_target, Some(target_push_bytes))?, // [absolute target PC]

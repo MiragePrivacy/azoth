@@ -295,8 +295,35 @@ pub async fn obfuscate_bytecode(
     tracing::debug!("  Encoded to {} bytes", obfuscated_bytes.len());
 
     tracing::debug!("  Validating obfuscated runtime jump targets");
-    validator::validate_jump_targets(&obfuscated_bytes)
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    if let Err(e) = validator::validate_jump_targets(&obfuscated_bytes).await {
+        eprintln!("\nVALIDATION FAILED");
+        eprintln!("Error: {}", e);
+        eprintln!(
+            "Obfuscated bytecode ({} bytes): 0x{}",
+            obfuscated_bytes.len(),
+            hex::encode(&obfuscated_bytes)
+        );
+
+        // Decode and show instructions around problematic area
+        eprintln!("Decoding bytecode to show instructions...");
+        match decoder::decode_bytecode(&hex::encode(&obfuscated_bytes), false).await {
+            Ok((instructions, _, _, _)) => {
+                eprintln!("Total instructions: {}", instructions.len());
+                eprintln!("\nAll instructions:");
+                for (i, instr) in instructions.iter().enumerate() {
+                    eprintln!(
+                        "  [{:3}] PC=0x{:02x} {:?} imm={:?}",
+                        i, instr.pc, instr.op, instr.imm
+                    );
+                }
+            }
+            Err(decode_err) => {
+                eprintln!("Failed to decode bytecode: {}", decode_err);
+            }
+        }
+
+        return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
+    }
     tracing::debug!("  Jump validation passed");
 
     // Step 8: Reassemble final bytecode
