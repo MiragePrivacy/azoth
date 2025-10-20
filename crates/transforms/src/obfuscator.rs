@@ -295,7 +295,6 @@ pub async fn obfuscate_bytecode(
     tracing::debug!("  Encoded to {} bytes", obfuscated_bytes.len());
 
     tracing::debug!("  Validating obfuscated runtime jump targets");
-<<<<<<< HEAD
     if let Err(e) = validator::validate_jump_targets(&obfuscated_bytes).await {
         eprintln!("\nVALIDATION FAILED");
         eprintln!("Error: {}", e);
@@ -325,10 +324,6 @@ pub async fn obfuscate_bytecode(
 
         return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
     }
-=======
-    validator::validate_jump_targets(&obfuscated_bytes)
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
->>>>>>> 1d0b113 (chore: add validation logic)
     tracing::debug!("  Jump validation passed");
 
     // Step 8: Reassemble final bytecode
