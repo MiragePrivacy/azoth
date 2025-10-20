@@ -12,7 +12,11 @@ use revm::state::AccountInfo;
 use revm::{Context, DatabaseCommit, ExecuteEvm, MainBuilder, MainContext};
 use std::collections::HashMap;
 
-const COUNTER_BYTECODE: &str = "0x6080604052348015600e575f5ffd5b506101d98061001c5f395ff3fe608060405234801561000f575f5ffd5b506004361061004a575f3560e01c806306661abd1461004e578063371303c01461006c5780636d4ce63c14610076578063b3bcfa8214610094575b5f5ffd5b61005661009e565b60405161006391906100f7565b60405180910390f35b6100746100a3565b005b61007e6100bd565b60405161008b91906100f7565b60405180910390f35b61009c6100c5565b005b5f5481565b60015f5f8282546100b4919061013d565b92505081905550565b5f5f54905090565b60015f5f8282546100d69190610170565b92505081905550565b5f819050919050565b6100f1816100df565b82525050565b5f60208201905061010a5f8301846100e8565b92915050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52601160045260245ffd5b5f610147826100df565b9150610152836100df565b925082820190508082111561016a57610169610110565b5b92915050565b5f61017a826100df565b9150610185836100df565b925082820390508181111561019d5761019c610110565b5b9291505056fea264697066735822122078c44612ebfc52f8c09e96e351b62f1c6feebaa2694fa7d29431ccb4ae9ed15064736f6c634300081c0033";
+const COUNTER_DEPLOYMENT_BYTECODE: &str =
+    include_str!("../../bytecode/counter/counter_deployment.hex");
+
+#[allow(dead_code)]
+const COUNTER_RUNTIME_BYTECODE: &str = include_str!("../../bytecode/counter/counter_runtime.hex");
 
 const SELECTOR_COUNT: u32 = 0x06661abd;
 const SELECTOR_INC: u32 = 0x371303c0;
@@ -53,9 +57,10 @@ async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
         .with_max_level(tracing::Level::DEBUG)
         .try_init();
 
-    let obfuscation_result = obfuscate_bytecode(COUNTER_BYTECODE, ObfuscationConfig::default())
-        .await
-        .map_err(|e| eyre!("Failed to obfuscate counter bytecode: {}", e))?;
+    let obfuscation_result =
+        obfuscate_bytecode(COUNTER_DEPLOYMENT_BYTECODE, ObfuscationConfig::default())
+            .await
+            .map_err(|e| eyre!("Failed to obfuscate counter bytecode: {}", e))?;
 
     assert!(
         obfuscation_result
