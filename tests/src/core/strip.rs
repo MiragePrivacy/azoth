@@ -1,5 +1,5 @@
 use azoth_core::decoder::decode_bytecode;
-use azoth_core::detection;
+use azoth_core::detection::{self, SectionKind};
 use azoth_core::strip::strip_bytecode;
 
 const COUNTER_DEPLOYMENT_BYTECODE: &str =
@@ -44,6 +44,20 @@ async fn test_runtime_only() {
     let rebuilt = report.reassemble(&clean_runtime);
 
     assert_eq!(bytecode, rebuilt, "Round-trip failed");
-    assert_eq!(report.bytes_saved, 0, "Bytes saved should be 0");
-    assert!(report.removed.is_empty(), "Removed should be empty");
+
+    // runtime only bytecode should not have Init or ConstructorArgs sections
+    // but it may have Auxdata that gets stripped
+    for section in &report.removed {
+        assert!(
+            matches!(section.kind, SectionKind::Auxdata),
+            "Runtime-only bytecode should only strip Auxdata, not {:?}",
+            section.kind
+        );
+    }
+
+    assert_eq!(
+        report.bytes_saved,
+        bytecode.len() - clean_runtime.len(),
+        "Bytes saved mismatch"
+    );
 }
