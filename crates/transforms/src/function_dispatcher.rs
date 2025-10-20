@@ -397,10 +397,10 @@ impl FunctionDispatcher {
         //   JUMP                 // at p+5+n
         //   JUMPDEST             // at p+6+n <-- landing target
         //
-        // PC returns p (its own address). Because the PUSH opcode itself occupies
-        // one byte before the immediate, the landing position is 7 + n bytes
-        // ahead of the PC instruction.
-        let delta_to_after: u64 = (7 + target_push_bytes) as u64;
+        // PC returns `p`, the address of the `PC` opcode. The landing JUMPDEST is
+        // `PC` (1 byte) + ADD (1) + JUMPI (1) + POP (1) + PUSH(target) (1 + n) + JUMP (1)
+        // bytes ahead, so delta must be 6 + n to hit the JUMPDEST exactly.
+        let delta_to_after: u64 = (6 + target_push_bytes) as u64;
 
         // Comparison (keeps stack tidy for both paths)
         instructions.extend(vec![
