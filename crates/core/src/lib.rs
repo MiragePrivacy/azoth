@@ -5,6 +5,7 @@ pub mod encoder;
 pub mod result;
 pub mod seed;
 pub mod strip;
+pub mod validator;
 
 use hex::FromHex;
 pub use result::{Error, Result};
