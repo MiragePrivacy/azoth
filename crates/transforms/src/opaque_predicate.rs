@@ -1,6 +1,6 @@
 use crate::{Error, Result};
 use crate::{PassConfig, Transform};
-use azoth_core::cfg_ir::{Block, CfgIrBundle, EdgeType};
+use azoth_core::cfg_ir::{Block, BlockBody, BlockControl, CfgIrBundle, EdgeType};
 use azoth_core::decoder::Instruction;
 use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
@@ -45,8 +45,8 @@ impl Transform for OpaquePredicate {
             .cfg
             .node_indices()
             .filter(|&n| {
-                if let Block::Body { instructions, .. } = &ir.cfg[n] {
-                    instructions
+                if let Block::Body(body) = &ir.cfg[n] {
+                    body.instructions
                         .last()
                         .is_some_and(|instruction| self.is_non_terminal(instruction))
                 } else {
@@ -98,7 +98,7 @@ impl Transform for OpaquePredicate {
                 true_start_pc, false_start_pc
             );
 
-            let true_label = ir.cfg.add_node(Block::Body {
+            let true_label = ir.cfg.add_node(Block::Body(BlockBody {
                 start_pc: true_start_pc,
                 instructions: vec![Instruction {
                     pc: true_start_pc,
@@ -106,9 +106,10 @@ impl Transform for OpaquePredicate {
                     imm: None,
                 }],
                 max_stack: 0,
-            });
+                control: BlockControl::Unknown,
+            }));
 
-            let false_label = ir.cfg.add_node(Block::Body {
+            let false_label = ir.cfg.add_node(Block::Body(BlockBody {
                 start_pc: false_start_pc,
                 instructions: vec![
                     Instruction {
@@ -127,8 +128,8 @@ impl Transform for OpaquePredicate {
                         imm: Some(
                             original_fallthrough
                                 .map(|n| {
-                                    if let Block::Body { start_pc, .. } = &ir.cfg[n] {
-                                        format!("{start_pc:x}")
+                                    if let Block::Body(body) = &ir.cfg[n] {
+                                        format!("{:x}", body.start_pc)
                                     } else {
                                         "0".to_string()
                                     }
@@ -138,14 +139,12 @@ impl Transform for OpaquePredicate {
                     },
                 ],
                 max_stack: 1,
-            });
+                control: BlockControl::Unknown,
+            }));
 
-            if let Block::Body {
-                instructions,
-                start_pc,
-                ..
-            } = &mut ir.cfg[*block_id]
-            {
+            if let Block::Body(body) = &mut ir.cfg[*block_id] {
+                let instructions = &mut body.instructions;
+                let start_pc = body.start_pc;
                 debug!(
                     "  Block start_pc: {:#x}, {} instructions",
                     start_pc,

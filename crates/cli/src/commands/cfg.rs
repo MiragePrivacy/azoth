@@ -58,13 +58,9 @@ fn generate_dot(cfg_ir: &CfgIrBundle) -> String {
         let label = match block {
             Block::Entry => "Entry".to_string(),
             Block::Exit => "Exit".to_string(),
-            Block::Body {
-                start_pc,
-                instructions,
-                ..
-            } => {
-                let instrs: Vec<String> = instructions.iter().map(|i| i.to_string()).collect();
-                format!("Block_{}\\n{}", start_pc, instrs.join("\\n"))
+            Block::Body(body) => {
+                let instrs: Vec<String> = body.instructions.iter().map(|i| i.to_string()).collect();
+                format!("Block_{}\\n{}", body.start_pc, instrs.join("\\n"))
             }
         };
         dot.push_str(&format!("    {} [label=\"{}\"];\n", node.index(), label));

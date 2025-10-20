@@ -19,8 +19,8 @@ impl Transform for Shuffle {
             .cfg
             .node_indices()
             .filter_map(|n| {
-                if let Block::Body { start_pc, .. } = &ir.cfg[n] {
-                    Some((*start_pc, &ir.cfg[n]))
+                if let Block::Body(body) = &ir.cfg[n] {
+                    Some((body.start_pc, &ir.cfg[n]))
                 } else {
                     None
                 }
@@ -45,7 +45,8 @@ impl Transform for Shuffle {
         let mut current_pc = 0;
 
         for (_, block) in blocks {
-            if let Block::Body { instructions, .. } = block {
+            if let Block::Body(body) = block {
+                let instructions = &body.instructions;
                 for instruction in instructions {
                     program_counter_mapping.insert(instruction.pc, current_pc);
                     let mut new_instruction = instruction.clone();

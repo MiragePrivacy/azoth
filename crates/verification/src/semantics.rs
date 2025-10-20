@@ -362,17 +362,15 @@ impl SemanticAnalyzer {
 
         // Extract semantic information from existing CFG blocks
         for node_idx in cfg.node_indices() {
-            if let Some(Block::Body {
-                start_pc,
-                instructions,
-                max_stack,
-            }) = cfg.node_weight(node_idx)
-            {
+            if let Some(Block::Body(body)) = cfg.node_weight(node_idx) {
+                let start_pc = body.start_pc;
+                let instructions = &body.instructions;
+                let max_stack = body.max_stack;
                 // Extract function selectors (semantic analysis)
                 if let Some(selector) =
                     self.extract_function_selector_from_instructions(instructions)
                 {
-                    entry_points.insert(selector, *start_pc);
+                    entry_points.insert(selector, start_pc);
                 }
 
                 // Extract opcodes from instructions
@@ -410,11 +408,11 @@ impl SemanticAnalyzer {
                     .collect();
 
                 block_summaries.push(BlockSummary {
-                    start_pc: *start_pc,
+                    start_pc,
                     instruction_count: instructions.len(),
                     block_type,
                     opcodes,
-                    max_stack: *max_stack,
+                    max_stack,
                     incoming_edges,
                     outgoing_edges,
                 });
@@ -532,8 +530,8 @@ impl SemanticAnalyzer {
             }
             visited.insert(node_idx);
 
-            if let Some(Block::Body { start_pc, .. }) = cfg.node_weight(node_idx) {
-                reachable.push(*start_pc);
+            if let Some(Block::Body(body)) = cfg.node_weight(node_idx) {
+                reachable.push(body.start_pc);
             }
 
             for edge in cfg.edges_directed(node_idx, petgraph::Direction::Outgoing) {
@@ -548,9 +546,8 @@ impl SemanticAnalyzer {
         tracing::debug!("Analyzing storage access patterns");
 
         for node_idx in self.cfg_bundle.cfg.node_indices() {
-            if let Some(Block::Body { instructions, .. }) =
-                self.cfg_bundle.cfg.node_weight(node_idx)
-            {
+            if let Some(Block::Body(body)) = self.cfg_bundle.cfg.node_weight(node_idx) {
+                let instructions = &body.instructions;
                 let mut stack = Vec::new();
                 let path_conditions = Vec::new();
 
@@ -781,9 +778,8 @@ impl SemanticAnalyzer {
 
         // Use CFG structure instead of raw instructions
         for node_idx in self.cfg_bundle.cfg.node_indices() {
-            if let Some(Block::Body { instructions, .. }) =
-                self.cfg_bundle.cfg.node_weight(node_idx)
-            {
+            if let Some(Block::Body(body)) = self.cfg_bundle.cfg.node_weight(node_idx) {
+                let instructions = &body.instructions;
                 for instruction in instructions {
                     match instruction.op {
                         Opcode::DELEGATECALL => {
@@ -818,9 +814,8 @@ impl SemanticAnalyzer {
         let mut modifications = Vec::new();
 
         for node_idx in self.cfg_bundle.cfg.node_indices() {
-            if let Some(Block::Body { instructions, .. }) =
-                self.cfg_bundle.cfg.node_weight(node_idx)
-            {
+            if let Some(Block::Body(body)) = self.cfg_bundle.cfg.node_weight(node_idx) {
+                let instructions = &body.instructions;
                 for instruction in instructions {
                     if instruction.op == Opcode::SSTORE {
                         modifications.push(StateModification {
@@ -844,9 +839,8 @@ impl SemanticAnalyzer {
         let mut variable_costs = Vec::new();
 
         for node_idx in self.cfg_bundle.cfg.node_indices() {
-            if let Some(Block::Body { instructions, .. }) =
-                self.cfg_bundle.cfg.node_weight(node_idx)
-            {
+            if let Some(Block::Body(body)) = self.cfg_bundle.cfg.node_weight(node_idx) {
+                let instructions = &body.instructions;
                 for instruction in instructions {
                     // Calculate gas cost for each opcode
                     let opcode = instruction.op;
@@ -890,9 +884,8 @@ impl SemanticAnalyzer {
 
         for &block_pc in block_pcs {
             if let Some(&node_idx) = self.cfg_bundle.pc_to_block.get(&block_pc) {
-                if let Some(Block::Body { instructions, .. }) =
-                    self.cfg_bundle.cfg.node_weight(node_idx)
-                {
+                if let Some(Block::Body(body)) = self.cfg_bundle.cfg.node_weight(node_idx) {
+                    let instructions = &body.instructions;
                     for instruction in instructions {
                         match instruction.op {
                             Opcode::SSTORE => has_state_change = true,
@@ -1120,9 +1113,8 @@ impl SemanticAnalyzer {
         let selector_hex = hex::encode(selector);
 
         for node_idx in self.cfg_bundle.cfg.node_indices() {
-            if let Some(Block::Body { instructions, .. }) =
-                self.cfg_bundle.cfg.node_weight(node_idx)
-            {
+            if let Some(Block::Body(body)) = self.cfg_bundle.cfg.node_weight(node_idx) {
+                let instructions = &body.instructions;
                 for inst in instructions {
                     if inst.op == Opcode::PUSH(4) && inst.imm.as_ref() == Some(&selector_hex) {
                         return true;
@@ -1135,9 +1127,8 @@ impl SemanticAnalyzer {
 
     fn has_balance_mapping_pattern(&self) -> bool {
         for node_idx in self.cfg_bundle.cfg.node_indices() {
-            if let Some(Block::Body { instructions, .. }) =
-                self.cfg_bundle.cfg.node_weight(node_idx)
-            {
+            if let Some(Block::Body(body)) = self.cfg_bundle.cfg.node_weight(node_idx) {
+                let instructions = &body.instructions;
                 if instructions.windows(10).any(|window| {
                     window.iter().any(|inst| inst.op == Opcode::CALLDATALOAD)
                         && window.iter().any(|inst| inst.op == Opcode::KECCAK256)
@@ -1152,9 +1143,8 @@ impl SemanticAnalyzer {
 
     fn has_owner_storage_pattern(&self) -> bool {
         for node_idx in self.cfg_bundle.cfg.node_indices() {
-            if let Some(Block::Body { instructions, .. }) =
-                self.cfg_bundle.cfg.node_weight(node_idx)
-            {
+            if let Some(Block::Body(body)) = self.cfg_bundle.cfg.node_weight(node_idx) {
+                let instructions = &body.instructions;
                 if instructions.windows(5).any(|window| {
                     window.iter().any(|inst| inst.op == Opcode::CALLER)
                         && window
@@ -1170,9 +1160,8 @@ impl SemanticAnalyzer {
 
     fn has_guard_check_pattern(&self) -> bool {
         for node_idx in self.cfg_bundle.cfg.node_indices() {
-            if let Some(Block::Body { instructions, .. }) =
-                self.cfg_bundle.cfg.node_weight(node_idx)
-            {
+            if let Some(Block::Body(body)) = self.cfg_bundle.cfg.node_weight(node_idx) {
+                let instructions = &body.instructions;
                 if instructions.windows(3).any(|window| {
                     window.len() == 3
                         && window[0].op == Opcode::SLOAD
@@ -1192,7 +1181,6 @@ pub mod tests {
     use super::*;
     use azoth_core::cfg_ir::CfgIrBundle;
     use azoth_core::strip::CleanReport;
-    use petgraph::Graph;
 
     // todo(g4titanx): impl. default for cleanreport
     pub fn create_empty_clean_report() -> CleanReport {
@@ -1210,12 +1198,13 @@ pub mod tests {
     #[test]
     fn test_function_selector_extraction() {
         let cfg_bundle = CfgIrBundle {
-            cfg: petgraph::Graph::new(),
+            cfg: petgraph::stable_graph::StableGraph::new(),
             pc_to_block: HashMap::new(),
             clean_report: create_empty_clean_report(),
             sections: vec![],
             selector_mapping: None,
             original_bytecode: vec![],
+            runtime_bounds: None,
         };
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
 
@@ -1233,7 +1222,7 @@ pub mod tests {
     #[test]
     fn test_erc20_pattern_detection() {
         // Create a CFG with actual blocks containing the instruction
-        let mut cfg = Graph::new();
+        let mut cfg = petgraph::stable_graph::StableGraph::new();
         let mut pc_to_block = HashMap::new();
 
         // Create a block with the transfer function selector
@@ -1243,11 +1232,12 @@ pub mod tests {
             imm: Some("a9059cbb".to_string()), // transfer selector
         }];
 
-        let block = Block::Body {
+        let block = Block::Body(cfg_ir::BlockBody {
             start_pc: 0,
             instructions,
             max_stack: 1,
-        };
+            control: cfg_ir::BlockControl::Unknown,
+        });
 
         let node_idx = cfg.add_node(block);
         pc_to_block.insert(0, node_idx);
@@ -1259,6 +1249,7 @@ pub mod tests {
             sections: vec![],
             selector_mapping: None,
             original_bytecode: vec![],
+            runtime_bounds: None,
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
@@ -1271,12 +1262,13 @@ pub mod tests {
     #[test]
     fn test_transfer_function_detection() {
         let cfg_bundle = CfgIrBundle {
-            cfg: petgraph::Graph::new(),
+            cfg: petgraph::stable_graph::StableGraph::new(),
             pc_to_block: HashMap::new(),
             clean_report: create_empty_clean_report(),
             sections: vec![],
             selector_mapping: None,
             original_bytecode: vec![],
+            runtime_bounds: None,
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);

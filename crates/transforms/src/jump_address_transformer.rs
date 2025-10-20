@@ -77,8 +77,8 @@ impl Transform for JumpAddressTransformer {
 
         // Process each block to find and transform jump patterns
         for node_idx in ir.cfg.node_indices().collect::<Vec<_>>() {
-            if let Block::Body { instructions, .. } = &ir.cfg[node_idx] {
-                let patterns = self.find_jump_patterns(instructions);
+            if let Block::Body(body) = &ir.cfg[node_idx] {
+                let patterns = self.find_jump_patterns(&body.instructions);
 
                 if !patterns.is_empty() {
                     debug!(
@@ -156,13 +156,10 @@ impl Transform for JumpAddressTransformer {
                 node_idx.index()
             );
 
-            if let Block::Body {
-                instructions,
-                max_stack,
-                start_pc,
-                ..
-            } = &mut ir.cfg[*node_idx]
-            {
+            if let Block::Body(body) = &mut ir.cfg[*node_idx] {
+                let instructions = &mut body.instructions;
+                let max_stack = &mut body.max_stack;
+                let start_pc = body.start_pc;
                 debug!(
                     "  Block start_pc: {:#x}, {} instructions",
                     start_pc,

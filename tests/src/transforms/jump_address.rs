@@ -16,8 +16,8 @@ async fn test_jump_address_transformer() {
     // Count instructions before transformation
     let mut instruction_count_before = 0;
     for node_idx in cfg_ir.cfg.node_indices() {
-        if let azoth_core::cfg_ir::Block::Body { instructions, .. } = &cfg_ir.cfg[node_idx] {
-            instruction_count_before += instructions.len();
+        if let azoth_core::cfg_ir::Block::Body(body) = &cfg_ir.cfg[node_idx] {
+            instruction_count_before += body.instructions.len();
         }
     }
 
@@ -38,8 +38,8 @@ async fn test_jump_address_transformer() {
     // Count instructions after transformation
     let mut instruction_count_after = 0;
     for node_idx in cfg_ir.cfg.node_indices() {
-        if let azoth_core::cfg_ir::Block::Body { instructions, .. } = &cfg_ir.cfg[node_idx] {
-            instruction_count_after += instructions.len();
+        if let azoth_core::cfg_ir::Block::Body(body) = &cfg_ir.cfg[node_idx] {
+            instruction_count_after += body.instructions.len();
         }
     }
 

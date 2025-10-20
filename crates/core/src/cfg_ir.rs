@@ -1,1221 +1,1221 @@
-//! Module for constructing a Control Flow Graph (CFG) with Intermediate Representation (IR)
-//! in Static Single Assignment (SSA) form for EVM bytecode analysis.
+//! Control Flow Graph (CFG) construction and mutation utilities for Azoth.
 //!
-//! This module builds a CFG from decoded EVM instructions, representing the program's control
-//! flow as a graph of basic blocks connected by edges. It supports SSA form for stack
-//! operations, enabling analysis and obfuscation transforms. The CFG is used to analyze and modify
-//! bytecode structure, ensuring accurate block splitting and edge construction based on
-//! control flow opcodes.
+//! The original implementation blended low-level bytecode editing with graph updates, forcing
+//! transforms to juggle program counters manually. This rewrite keeps the CFG as the source of
+//! truth: blocks know how they connect, jump edges carry their coordinate system, and dedicated
+//! helpers turn symbolic targets back into concrete immediates when bytecode gets re-emitted.
+//!
+//! The guiding principles are:
+//! - **Block-first view.** Transforms describe control flow in terms of blocks. The module is
+//!   responsible for turning those relationships into PUSH/JUMP sequences.
+//! - **Single source of PC truth.** Reindexing, jump patching, and edge rebuilding all flow through
+//!   a single set of utilities, removing duplicated offset math.
+//! - **Graceful fallback.** When legacy patterns that we cannot symbolically track appear, we retain
+//!   their raw immediates so existing transforms and analyses continue to work.
 
 use crate::Opcode;
 use crate::decoder::Instruction;
-use crate::detection::Section;
+use crate::detection::{Section, SectionKind};
 use crate::is_terminal_opcode;
 use crate::result::Error;
 use crate::strip::CleanReport;
-use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::visit::EdgeRef;
+use petgraph::graph::NodeIndex;
+use petgraph::stable_graph::StableDiGraph;
+use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-/// Represents a node in the Control Flow Graph (CFG).
-///
-/// A `Block` can be an entry point, an exit point, or a body block containing a sequence of EVM
-/// instructions. Blocks partition the bytecode into logical units for analysis, with `Entry` and
-/// `Exit` serving as the start and end nodes of the CFG, respectively. Body blocks hold
-/// instructions and track the maximum stack height for Static Single Assignment (SSA) form
-/// analysis.
-#[derive(Default, Debug, Clone)]
+/// CFG node representation.
+#[derive(Debug, Clone)]
 pub enum Block {
-    /// The entry point of the CFG, representing the start of execution.
-    #[default]
     Entry,
-    /// The exit point of the CFG, representing the end of execution (e.g., STOP, RETURN).
     Exit,
-    /// A body block containing a sequence of instructions.
-    Body {
-        /// The program counter (PC) at which the block starts.
-        start_pc: usize,
-        /// The list of decoded EVM instructions in the block.
-        instructions: Vec<Instruction>,
-        /// The maximum stack height reached during execution of the block, used for SSA analysis.
-        max_stack: usize,
+    Body(BlockBody),
+}
+
+impl Default for Block {
+    /// Default block variant used when a node is initialised without explicit contents.
+    fn default() -> Self {
+        Block::Entry
+    }
+}
+
+/// Concrete contents of a body block.
+#[derive(Debug, Clone)]
+pub struct BlockBody {
+    pub start_pc: usize,
+    pub instructions: Vec<Instruction>,
+    pub max_stack: usize,
+    pub control: BlockControl,
+}
+
+impl BlockBody {
+    /// Creates an empty body block starting at the supplied PC.
+    fn new(start_pc: usize) -> Self {
+        Self {
+            start_pc,
+            instructions: Vec::new(),
+            max_stack: 0,
+            control: BlockControl::Unknown,
+        }
+    }
+
+    /// Returns true when this block resides inside the runtime section described by
+    /// `runtime_start`.
+    fn is_runtime(&self, runtime_start: Option<(usize, usize)>) -> bool {
+        if let Some((start, end)) = runtime_start {
+            return self.start_pc >= start && self.start_pc < end;
+        }
+        false
+    }
+}
+
+/// High-level view of how a block exits.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlockControl {
+    /// The block has not been analysed yet.
+    Unknown,
+    /// Execution falls through to the next block.
+    Fallthrough,
+    /// An unconditional jump.
+    Jump { target: JumpTarget },
+    /// Conditional branch where `true_target` receives the BranchTrue edge and `false_target`
+    /// receives BranchFalse (or fallthrough).
+    Branch {
+        true_target: JumpTarget,
+        false_target: JumpTarget,
+    },
+    /// STOP/RETURN/REVERT/INVALID/etc.
+    Terminal,
+}
+
+impl BlockControl {
+    /// Returns true when the control descriptor references a symbolic jump target.
+    #[allow(dead_code)]
+    fn is_symbolic(&self) -> bool {
+        match self {
+            BlockControl::Jump { target }
+            | BlockControl::Branch {
+                true_target: target,
+                false_target: _,
+            } => target.is_symbolic(),
+            _ => false,
+        }
+    }
+}
+
+/// Encodes where a jump leads and which coordinate system the immediate expects.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JumpTarget {
+    /// Link to an actual block. The coordinate system indicates how the PUSH immediate should be
+    /// encoded (absolute PC or runtime-relative offset).
+    Block {
+        node: NodeIndex,
+        encoding: JumpEncoding,
+    },
+    /// Raw value recorded in the bytecode. Used when we cannot yet express the target in terms of a
+    /// block (e.g., PC-relative patterns or indirect jumps).
+    Raw {
+        value: usize,
+        encoding: JumpEncoding,
     },
 }
 
-/// Represents the type of edge connecting blocks in the CFG.
-///
-/// Edges define the control flow between blocks, indicating how execution can transition from one
-/// block to another. Different edge types correspond to different control flow mechanisms in EVM
-/// bytecode, such as sequential execution, jumps, or conditional branches.
+impl JumpTarget {
+    /// Returns true if the target points to another block rather than a raw immediate.
+    fn is_symbolic(&self) -> bool {
+        matches!(self, JumpTarget::Block { .. })
+    }
+
+    /// Returns the encoding mode used by this target when materialised.
+    #[allow(dead_code)]
+    fn encoding(&self) -> JumpEncoding {
+        match self {
+            JumpTarget::Block { encoding, .. } | JumpTarget::Raw { encoding, .. } => *encoding,
+        }
+    }
+}
+
+/// Describes how to interpret the immediate used by a jump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpEncoding {
+    /// Immediate stores an absolute PC.
+    Absolute,
+    /// Immediate stores a runtime-relative offset (0 at start of runtime section).
+    RuntimeRelative,
+    /// PC-relative patterns (e.g., PUSH delta; PC; ADD; JUMP). These are symbolic already and must
+    /// not be rewritten automatically.
+    PcRelative,
+}
+
+/// Edge types mirror the legacy representation to avoid touching downstream consumers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EdgeType {
-    /// Sequential execution to the next block (e.g., after non-terminal instructions).
     Fallthrough,
-    /// Unconditional jump to a target block (e.g., JUMP instruction).
     Jump,
-    /// Conditional branch taken when the condition is true (e.g., JUMPI true branch).
     BranchTrue,
-    /// Conditional branch taken when the condition is false (e.g., JUMPI false branch).
     BranchFalse,
 }
 
-/// A unique identifier for a value in SSA form.
-///
-/// Each `ValueId` represents a distinct value produced by an instruction (e.g., a PUSH operation)
-/// and is used to track data flow through the stack in the CFG's SSA representation.
+/// Single SSA identifier (currently only used to track stack heights).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValueId(usize);
 
-/// Bundle of CFG and associated metadata for analysis.
-///
-/// Contains the control flow graph, a mapping of program counters to block indices, and a
-/// `CleanReport` for reassembling bytecode.
+/// Bundle returned by `build_cfg_ir` and handed to every transform.
 #[derive(Debug, Clone)]
 pub struct CfgIrBundle {
-    /// Graph representing the CFG with blocks as nodes and edges as control flow.
-    pub cfg: DiGraph<Block, EdgeType>,
-    /// Mapping of program counters to block indices.
+    pub cfg: StableDiGraph<Block, EdgeType>,
     pub pc_to_block: HashMap<usize, NodeIndex>,
-    /// Report detailing the stripping process for bytecode reassembly.
     pub clean_report: CleanReport,
-    /// Detected bytecode sections (Init, Runtime, Auxdata, etc.)
     pub sections: Vec<Section>,
-    /// Mapping of original function selectors to obfuscated tokens.
-    /// Only populated when token-based dispatcher transform is applied.
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
-    /// Original bytecode before any modifications.
-    /// Used by reindex_pcs to preserve INVALID opcode bytes.
     pub original_bytecode: Vec<u8>,
-}
-
-/// Builds a CFG with IR in SSA form from decoded instructions and sections.
-///
-/// Constructs a control flow graph by splitting instructions into blocks, building edges based on
-/// control flow, and assigning SSA values to track stack operations.
-///
-/// # Arguments
-/// * `instructions` - Decoded EVM instructions from `decoder.rs`.
-/// * `sections` - Detected sections from `detection.rs`.
-/// * `clean_report` - Report from `strip.rs` for reassembly.
-/// * `original_bytecode` - Original bytecode bytes for INVALID opcode preservation.
-///
-/// # Returns
-/// A `Result` containing the `CfgIrBundle` or a `Error` if construction fails.
-pub fn build_cfg_ir(
-    instructions: &[Instruction],
-    sections: &[Section],
-    clean_report: crate::strip::CleanReport,
-    original_bytecode: &[u8],
-) -> Result<CfgIrBundle, Error> {
-    tracing::debug!(
-        "Starting CFG-IR construction with {} instructions",
-        instructions.len()
-    );
-
-    // Split blocks
-    let blocks = split_blocks(instructions)?;
-    tracing::debug!("Split into {} blocks", blocks.len());
-
-    // Build edges
-    let mut cfg = DiGraph::new();
-    let _entry_idx = cfg.add_node(Block::Entry);
-    let _exit_idx = cfg.add_node(Block::Exit);
-    let (edges, pc_to_block) = build_edges(&blocks, instructions, &mut cfg, sections)?;
-    cfg.extend_with_edges(edges);
-    tracing::debug!("Built CFG with {} nodes", cfg.node_count());
-
-    // Stack-SSA walk
-    let report = clean_report;
-    assign_ssa_values(&mut cfg, &pc_to_block, instructions)?;
-    tracing::debug!("Assigned SSA values and computed stack heights");
-
-    debug_assert!(
-        cfg.node_count() >= 2,
-        "CFG must contain at least Entry and Exit"
-    );
-    Ok(CfgIrBundle {
-        cfg,
-        pc_to_block,
-        clean_report: report,
-        sections: sections.to_vec(),
-        selector_mapping: None, // Initially empty, set by transforms
-        original_bytecode: original_bytecode.to_vec(),
-    })
+    pub runtime_bounds: Option<(usize, usize)>,
 }
 
 impl CfgIrBundle {
-    /// Replaces the body of the CFG with new instructions, rebuilding the CFG and PC mapping.
+    /// Returns cached runtime bounds (start inclusive, end exclusive) if the bytecode contains a
+    /// runtime section.
+    pub fn runtime_bounds(&self) -> Option<(usize, usize)> {
+        self.runtime_bounds
+    }
+
+    /// Returns true when the block referenced by `node` sits inside the runtime section.
+    fn block_runtime_status(&self, node: NodeIndex) -> bool {
+        self.runtime_bounds
+            .and_then(|(start, end)| {
+                self.cfg.node_weight(node).map(|block| match block {
+                    Block::Body(body) => body.start_pc >= start && body.start_pc < end,
+                    _ => false,
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    /// Returns a copy of the block control descriptor, if the node is a body block.
+    pub fn block_control(&self, node: NodeIndex) -> Option<BlockControl> {
+        self.cfg.node_weight(node).and_then(|block| match block {
+            Block::Body(body) => Some(body.control.clone()),
+            _ => None,
+        })
+    }
+
+    /// Replace the body of a block while keeping its connectivity metadata intact.
+    pub fn overwrite_block(
+        &mut self,
+        node: NodeIndex,
+        mut new_body: BlockBody,
+    ) -> Result<(), Error> {
+        let runtime_bounds = self.runtime_bounds;
+        if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
+            new_body.start_pc = body.start_pc;
+            body.instructions = new_body.instructions.clone();
+            body.max_stack = new_body.max_stack;
+            body.control = new_body.control.clone();
+        } else {
+            return Err(Error::InvalidBlockStructure(format!(
+                "attempted to overwrite non-body or removed block {}",
+                node.index()
+            )));
+        }
+
+        self.rebuild_edges_for_block(node)?;
+        self.assign_block_control(node, runtime_bounds);
+        Ok(())
+    }
+
+    /// Create or update an unconditional jump that ends the given block.
+    pub fn set_unconditional_jump(
+        &mut self,
+        source: NodeIndex,
+        target: NodeIndex,
+    ) -> Result<(), Error> {
+        self.ensure_block(&source)?;
+        self.ensure_block(&target)?;
+
+        let encoding = self.default_encoding_for(source);
+        if let Some(Block::Body(body)) = self.cfg.node_weight_mut(source) {
+            ensure_jump_pattern(body, Opcode::JUMP)?;
+            body.control = BlockControl::Jump {
+                target: JumpTarget::Block {
+                    node: target,
+                    encoding,
+                },
+            };
+        } else {
+            unreachable!();
+        }
+
+        self.rebuild_edges_for_block(source)?;
+        self.write_symbolic_immediates_for_block(source)?;
+        Ok(())
+    }
+
+    /// Configure a conditional jump (JUMPI) for the given block.
+    pub fn set_conditional_jump(
+        &mut self,
+        source: NodeIndex,
+        true_target: NodeIndex,
+        false_target: Option<NodeIndex>,
+    ) -> Result<(), Error> {
+        self.ensure_block(&source)?;
+        self.ensure_block(&true_target)?;
+        if let Some(false_node) = false_target {
+            self.ensure_block(&false_node)?;
+        }
+
+        let encoding = self.default_encoding_for(source);
+        if let Some(Block::Body(body)) = self.cfg.node_weight_mut(source) {
+            ensure_jump_pattern(body, Opcode::JUMPI)?;
+            let fallthrough = false_target
+                .map(|node| JumpTarget::Block { node, encoding })
+                .unwrap_or_else(|| JumpTarget::Raw { value: 0, encoding });
+            body.control = BlockControl::Branch {
+                true_target: JumpTarget::Block {
+                    node: true_target,
+                    encoding,
+                },
+                false_target: fallthrough,
+            };
+        } else {
+            unreachable!();
+        }
+
+        self.rebuild_edges_for_block(source)?;
+        self.write_symbolic_immediates_for_block(source)?;
+        Ok(())
+    }
+
+    /// Legacy fallback that rebuilds the CFG from a flat instruction stream.
     ///
-    /// # Arguments
-    /// * `instructions` - The new instructions to process.
-    /// * `sections` - Detected sections for the new bytecode.
-    ///
-    /// # Returns
-    /// A `Result` indicating success or a `Error` if rebuilding fails.
+    /// Prefer using block-level editing helpers (`overwrite_block`, `set_unconditional_jump`,
+    /// etc.) whenever possible. This method exists so transforms that still operate on byte slices
+    /// can continue to function while they are being ported.
     pub fn replace_body(
         &mut self,
         instructions: Vec<Instruction>,
         sections: &[Section],
     ) -> Result<(), Error> {
+        let selector_mapping = self.selector_mapping.clone();
         let clean_report = self.clean_report.clone();
-        let selector_mapping = self.selector_mapping.clone(); // Preserve mapping
-        let new_bundle = build_cfg_ir(
-            &instructions,
-            sections,
-            clean_report,
-            &self.original_bytecode,
-        )?;
+        let original_bytecode = self.original_bytecode.clone();
 
-        self.cfg = new_bundle.cfg;
-        self.pc_to_block = new_bundle.pc_to_block;
-        self.clean_report = new_bundle.clean_report;
-        self.sections = new_bundle.sections;
-        self.selector_mapping = selector_mapping; // Restore mapping
+        let mut rebuilt = build_cfg_ir(&instructions, sections, clean_report, &original_bytecode)?;
+        rebuilt.selector_mapping = selector_mapping;
+        rebuilt.original_bytecode = original_bytecode;
+
+        *self = rebuilt;
+        Ok(())
+    }
+
+    /// Validates that the referenced node is a body block.
+    fn ensure_block(&self, node: &NodeIndex) -> Result<(), Error> {
+        if let Some(Block::Body(_)) = self.cfg.node_weight(*node) {
+            Ok(())
+        } else {
+            Err(Error::InvalidBlockStructure(format!(
+                "node {} is not a body block",
+                node.index()
+            )))
+        }
+    }
+
+    /// Picks the appropriate jump encoding for a block based on whether it lives in runtime.
+    fn default_encoding_for(&self, source: NodeIndex) -> JumpEncoding {
+        if self.block_runtime_status(source) {
+            JumpEncoding::RuntimeRelative
+        } else {
+            JumpEncoding::Absolute
+        }
+    }
+
+    /// Re-evaluates the block’s control descriptor and updates the cached metadata in-place.
+    fn assign_block_control(&mut self, node: NodeIndex, runtime_bounds: Option<(usize, usize)>) {
+        let next = self.find_next_body(node);
+        if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
+            if let Some(control) =
+                analyse_block_control(body, next, runtime_bounds, &self.pc_to_block)
+            {
+                body.control = control;
+            }
+        }
+    }
+
+    /// Finds the next block in program counter order, if any.
+    fn find_next_body(&self, node: NodeIndex) -> Option<NodeIndex> {
+        let mut nodes: Vec<_> = self
+            .cfg
+            .node_references()
+            .filter_map(|(idx, block)| match block {
+                Block::Body(body) => Some((idx, body.start_pc)),
+                _ => None,
+            })
+            .collect();
+        nodes.sort_by_key(|(_, pc)| *pc);
+        for (i, (idx, _)) in nodes.iter().enumerate() {
+            if *idx == node {
+                return nodes.get(i + 1).map(|(next_idx, _)| *next_idx);
+            }
+        }
+        None
+    }
+
+    /// Reindexes PCs and refreshes the start_pc mapping. Unlike the legacy implementation this also
+    /// writes symbolic jump immediates so a subsequent `patch_jump_immediates` call becomes a no-op
+    /// for blocks using the new API.
+    /// Renumbers program counters and returns a mapping from old PCs to their new positions.
+    pub fn reindex_pcs(&mut self) -> Result<HashMap<usize, usize>, Error> {
+        let mut mapping = HashMap::new();
+        let mut blocks: Vec<_> = self
+            .cfg
+            .node_indices()
+            .filter_map(|idx| {
+                self.cfg.node_weight(idx).and_then(|block| match block {
+                    Block::Body(body) => Some((idx, body.start_pc)),
+                    _ => None,
+                })
+            })
+            .collect();
+        blocks.sort_by_key(|(_, start_pc)| *start_pc);
+
+        let mut next_pc = 0usize;
+        let mut new_pc_to_block = HashMap::new();
+
+        for (idx, _) in blocks {
+            if let Some(Block::Body(body)) = self.cfg.node_weight_mut(idx) {
+                let old_block_pc = body.start_pc;
+                body.start_pc = next_pc;
+                new_pc_to_block.insert(body.start_pc, idx);
+
+                for instr in &mut body.instructions {
+                    mapping.insert(instr.pc, next_pc);
+                    // Preserve INVALID opcode bytes before we erase the original PC.
+                    if matches!(instr.op, Opcode::INVALID)
+                        && instr.imm.is_none()
+                        && instr.pc < self.original_bytecode.len()
+                    {
+                        instr.imm = Some(format!("{:02x}", self.original_bytecode[instr.pc]));
+                    }
+                    instr.pc = next_pc;
+                    next_pc += instr.byte_size();
+                }
+
+                tracing::debug!(
+                    "Reindexed block {}: old start_pc=0x{:x} -> new start_pc=0x{:x}",
+                    idx.index(),
+                    old_block_pc,
+                    body.start_pc
+                );
+            }
+        }
+
+        self.pc_to_block = new_pc_to_block;
+        self.write_symbolic_immediates()?;
+
+        Ok(mapping)
+    }
+
+    /// Rewrite jump immediates using the supplied PC mapping. This keeps the method signature used
+    /// by older transforms, but the heavy lifting now happens during `reindex_pcs`. We only patch
+    /// legacy blocks that still rely on raw immediates.
+    pub fn patch_jump_immediates(
+        &mut self,
+        pc_mapping: &HashMap<usize, usize>,
+    ) -> Result<(), Error> {
+        let runtime_bounds = self.runtime_bounds;
+        let nodes: Vec<_> = self.cfg.node_indices().collect();
+        for node in nodes {
+            if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
+                patch_legacy_immediates(body, runtime_bounds, pc_mapping)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drops and regenerates the outgoing edges for a particular block, keeping graph metadata in
+    /// sync after instruction edits.
+    pub fn rebuild_edges_for_block(&mut self, node_idx: NodeIndex) -> Result<(), Error> {
+        let runtime_bounds = self.runtime_bounds;
+        // remove existing outgoing edges
+        let outgoing: Vec<_> = self
+            .cfg
+            .edges_directed(node_idx, petgraph::Outgoing)
+            .map(|edge| edge.id())
+            .collect();
+        for edge in outgoing {
+            self.cfg.remove_edge(edge);
+        }
+
+        let next = self.find_next_body(node_idx);
+        let control = if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node_idx) {
+            let control = analyse_block_control(body, next, runtime_bounds, &self.pc_to_block)
+                .unwrap_or_else(|| BlockControl::Unknown);
+            body.control = control.clone();
+            control
+        } else {
+            BlockControl::Unknown
+        };
+
+        self.emit_edges(node_idx, &control)?;
 
         Ok(())
     }
+
+    /// Adds edges that reflect the supplied control descriptor.
+    fn emit_edges(&mut self, node: NodeIndex, control: &BlockControl) -> Result<(), Error> {
+        let exit = self.find_exit_node();
+        match control {
+            BlockControl::Unknown => Ok(()),
+            BlockControl::Terminal => {
+                self.cfg.add_edge(node, exit, EdgeType::Fallthrough);
+                Ok(())
+            }
+            BlockControl::Fallthrough => {
+                if let Some(next) = self.find_next_body(node) {
+                    self.cfg.add_edge(node, next, EdgeType::Fallthrough);
+                } else {
+                    self.cfg.add_edge(node, exit, EdgeType::Fallthrough);
+                }
+                Ok(())
+            }
+            BlockControl::Jump { target } => {
+                if let Some(target_node) = target.as_block() {
+                    self.cfg.add_edge(node, target_node, EdgeType::Jump);
+                }
+                Ok(())
+            }
+            BlockControl::Branch {
+                true_target,
+                false_target,
+            } => {
+                if let Some(target_node) = true_target.as_block() {
+                    self.cfg.add_edge(node, target_node, EdgeType::BranchTrue);
+                }
+
+                match false_target.as_block() {
+                    Some(node_idx) => {
+                        self.cfg.add_edge(node, node_idx, EdgeType::BranchFalse);
+                    }
+                    None => {
+                        if let Some(next) = self.find_next_body(node) {
+                            self.cfg.add_edge(node, next, EdgeType::BranchFalse);
+                        } else {
+                            self.cfg.add_edge(node, exit, EdgeType::BranchFalse);
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Iterates over all blocks writing PUSH immediates that correspond to symbolic jump targets.
+    fn write_symbolic_immediates(&mut self) -> Result<(), Error> {
+        let nodes: Vec<_> = self.cfg.node_indices().collect();
+        for node in nodes {
+            self.write_symbolic_immediates_for_block(node)?;
+        }
+        Ok(())
+    }
+
+    /// Writes the PUSH immediate for a single block if the target resolves to a concrete value.
+    fn write_symbolic_immediates_for_block(&mut self, node: NodeIndex) -> Result<(), Error> {
+        let target = match self.block_control(node) {
+            Some(BlockControl::Jump { target }) => Some(target),
+            Some(BlockControl::Branch { true_target, .. }) => Some(true_target),
+            _ => None,
+        };
+
+        let Some(target) = target else {
+            return Ok(());
+        };
+
+        let Some(value) = self.resolve_target_value(&target) else {
+            return Ok(());
+        };
+
+        if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
+            if let Some(JumpPattern::Direct { push_idx }) = detect_jump_pattern(&body.instructions)
+            {
+                apply_immediate(&mut body.instructions[push_idx], value)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Resolves a `JumpTarget` into the immediate value expected by the underlying PUSH opcode.
+    fn resolve_target_value(&self, target: &JumpTarget) -> Option<usize> {
+        match target {
+            JumpTarget::Block { node, encoding } => {
+                let target_pc = match self.cfg.node_weight(*node)? {
+                    Block::Body(body) => body.start_pc,
+                    _ => return None,
+                };
+                match encoding {
+                    JumpEncoding::RuntimeRelative => self
+                        .runtime_bounds
+                        .map(|(start, _)| target_pc.saturating_sub(start)),
+                    JumpEncoding::Absolute => Some(target_pc),
+                    JumpEncoding::PcRelative => None,
+                }
+            }
+            JumpTarget::Raw { value, encoding } => match encoding {
+                JumpEncoding::PcRelative => None,
+                _ => Some(*value),
+            },
+        }
+    }
+
+    /// Returns the Exit node, creating it lazily if the graph lacks one.
+    fn find_exit_node(&mut self) -> NodeIndex {
+        self.cfg
+            .node_indices()
+            .find(|idx| {
+                self.cfg
+                    .node_weight(*idx)
+                    .map_or(false, |block| matches!(block, Block::Exit))
+            })
+            .unwrap_or_else(|| self.cfg.add_node(Block::Exit))
+    }
 }
 
+impl JumpTarget {
+    /// Returns the node index when the jump target references a CFG block.
+    fn as_block(&self) -> Option<NodeIndex> {
+        match self {
+            JumpTarget::Block { node, .. } => Some(*node),
+            _ => None,
+        }
+    }
+}
+
+/// Builds a CFG bundle from decoded instructions and section metadata.
+pub fn build_cfg_ir(
+    instructions: &[Instruction],
+    sections: &[Section],
+    clean_report: CleanReport,
+    original_bytecode: &[u8],
+) -> Result<CfgIrBundle, Error> {
+    tracing::debug!(
+        "Building CFG from {} instructions across {} sections",
+        instructions.len(),
+        sections.len()
+    );
+
+    let runtime_bounds = runtime_bounds(sections);
+    let blocks = split_blocks(instructions)?;
+
+    let mut cfg = StableDiGraph::new();
+    let entry = cfg.add_node(Block::Entry);
+    let exit = cfg.add_node(Block::Exit);
+
+    let mut node_by_pc = HashMap::new();
+    let mut ordered_nodes = Vec::new();
+
+    for block in blocks {
+        if let Block::Body(body) = block.clone() {
+            let idx = cfg.add_node(block);
+            node_by_pc.insert(body.start_pc, idx);
+            ordered_nodes.push(idx);
+        }
+    }
+
+    if let Some(first) = ordered_nodes.first() {
+        cfg.add_edge(entry, *first, EdgeType::Fallthrough);
+    } else {
+        cfg.add_edge(entry, exit, EdgeType::Fallthrough);
+    }
+
+    analyse_and_connect(&mut cfg, &ordered_nodes, &node_by_pc, runtime_bounds)?;
+    assign_ssa_values(&mut cfg)?;
+
+    let pc_to_block = node_by_pc.clone();
+
+    Ok(CfgIrBundle {
+        cfg,
+        pc_to_block,
+        clean_report,
+        sections: sections.to_vec(),
+        selector_mapping: None,
+        original_bytecode: original_bytecode.to_vec(),
+        runtime_bounds,
+    })
+}
+
+/// Extracts runtime section bounds from the detection results.
+fn runtime_bounds(sections: &[Section]) -> Option<(usize, usize)> {
+    sections.iter().find_map(|section| {
+        if section.kind == SectionKind::Runtime {
+            Some((section.offset, section.offset + section.len))
+        } else {
+            None
+        }
+    })
+}
+
+/// Breaks the instruction stream into basic blocks and ensures branch boundaries are respected.
 fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
     let mut blocks = Vec::new();
-    let mut cur_block = Block::Body {
-        start_pc: 0,
-        instructions: Vec::new(),
-        max_stack: 0,
-    };
+    let mut current = BlockBody::new(0);
 
-    // Collect all JUMPDEST locations from bytecode
     let jumpdest_pcs: HashSet<usize> = instructions
         .iter()
-        .filter(|i| matches!(i.op, Opcode::JUMPDEST))
-        .map(|i| i.pc)
+        .filter(|ins| matches!(ins.op, Opcode::JUMPDEST))
+        .map(|ins| ins.pc)
         .collect();
 
-    tracing::debug!(
-        "Starting block splitting with {} instructions, {} JUMPDESTs",
-        instructions.len(),
-        jumpdest_pcs.len()
-    );
-
-    // Log some JUMPDEST PCs for debugging
-    let mut jd_list: Vec<_> = jumpdest_pcs.iter().cloned().collect();
-    jd_list.sort();
-    tracing::debug!(
-        "First 20 JUMPDEST PCs: {:?}",
-        &jd_list[..jd_list.len().min(20)]
-    );
-
-    for instruction in instructions {
-        let opcode = instruction.op;
-
-        // always start new block at JUMPDEST, even if current is empty
-        if matches!(opcode, Opcode::JUMPDEST) {
-            if let Block::Body {
-                instructions,
-                start_pc,
-                ..
-            } = &cur_block
-                && !instructions.is_empty()
-            {
-                tracing::debug!(
-                    "Sealing block before JUMPDEST at pc={:#x} (prev block start={:#x})",
-                    instruction.pc,
-                    start_pc
-                );
-                blocks.push(std::mem::take(&mut cur_block));
+    for ins in instructions {
+        if matches!(ins.op, Opcode::JUMPDEST) {
+            if !current.instructions.is_empty() {
+                blocks.push(Block::Body(current.clone()));
             }
-
-            // Start fresh block AT the JUMPDEST PC
-            cur_block = Block::Body {
-                start_pc: instruction.pc,
-                instructions: vec![instruction.clone()],
+            current = BlockBody {
+                start_pc: ins.pc,
+                instructions: vec![ins.clone()],
                 max_stack: 0,
+                control: BlockControl::Unknown,
             };
-
-            tracing::debug!("Started new block at JUMPDEST pc={:#x}", instruction.pc);
             continue;
         }
 
-        // Add instruction to current block
-        if let Block::Body { instructions, .. } = &mut cur_block {
-            instructions.push(instruction.clone());
+        if current.instructions.is_empty() {
+            current.start_pc = ins.pc;
         }
 
-        // terminate both JUMP and JUMPI end blocks
-        let is_branch = matches!(opcode, Opcode::JUMP | Opcode::JUMPI);
-        let is_terminal = is_terminal_opcode(opcode);
+        current.instructions.push(ins.clone());
 
-        if is_branch || is_terminal {
-            let finished = std::mem::replace(
-                &mut cur_block,
-                Block::Body {
-                    start_pc: instruction.pc + 1,
-                    instructions: Vec::new(),
-                    max_stack: 0,
-                },
-            );
-
-            if let Block::Body { start_pc, .. } = &finished {
-                tracing::debug!(
-                    "Sealed block ending with {} at pc={:#x} (block start={:#x})",
-                    instruction.op,
-                    instruction.pc,
-                    start_pc
-                );
-            }
-            blocks.push(finished);
-            continue;
+        if is_terminal_opcode(ins.op) || matches!(ins.op, Opcode::JUMP | Opcode::JUMPI) {
+            blocks.push(Block::Body(current.clone()));
+            current = BlockBody::new(ins.pc + 1);
         }
     }
 
-    // Push trailing non-empty block
-    if let Block::Body { instructions, .. } = &cur_block
-        && !instructions.is_empty()
-    {
-        tracing::debug!(
-            "Pushing trailing block with {} instructions",
-            instructions.len()
-        );
-        blocks.push(cur_block);
+    if !current.instructions.is_empty() {
+        blocks.push(Block::Body(current));
     }
 
-    // CANONICALIZATION: verify every JUMPDEST is a block start
-    let block_starts: HashSet<usize> = blocks
-        .iter()
-        .filter_map(|b| {
-            if let Block::Body { start_pc, .. } = b {
-                Some(*start_pc)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let orphaned_jumpdests: Vec<_> = jumpdest_pcs
-        .iter()
-        .filter(|pc| !block_starts.contains(pc))
-        .collect();
-
-    if !orphaned_jumpdests.is_empty() {
-        tracing::error!(
-            "Found {} JUMPDESTs not at block starts: {:?}",
-            orphaned_jumpdests.len(),
-            orphaned_jumpdests
-        );
-        return Err(Error::InvalidBlockStructure(format!(
-            "JUMPDESTs not aligned with block starts: {:?}",
-            orphaned_jumpdests
-        )));
-    }
-
-    tracing::debug!(
-        "Block splitting complete: {} blocks, all {} JUMPDESTs are block starts",
-        blocks.len(),
-        jumpdest_pcs.len()
-    );
-
-    if blocks.is_empty() {
-        return Err(Error::NoEntryBlock);
-    }
-
+    validate_jumpdests(&blocks, &jumpdest_pcs)?;
     Ok(blocks)
 }
 
-/// Type alias for the return type of `build_edges`.
-type BuildEdgesResult = Result<
-    (
-        Vec<(NodeIndex, NodeIndex, EdgeType)>,
-        HashMap<usize, NodeIndex>,
-    ),
-    Error,
->;
-
-/// Builds edges between blocks based on control flow.
-///
-/// Constructs edges for the CFG by analyzing instruction sequences and control flow instructions
-/// (e.g., JUMP, JUMPI, STOP). Connects blocks with appropriate edge types (Fallthrough, Jump,
-/// BranchTrue, BranchFalse) and maps program counters to block indices.
-///
-/// # Arguments
-/// * `blocks` - Vector of blocks from `split_blocks`.
-/// * `instructions` - Decoded EVM instructions.
-/// * `cfg` - The CFG graph to populate with nodes and edges.
-/// * `sections` - Detected bytecode sections for coordinate conversion.
-///
-/// # Returns
-/// A `Result` containing a tuple of edge definitions and a PC-to-block mapping, or a `Error`.
-fn build_edges(
-    blocks: &[Block],
-    _instructions: &[Instruction],
-    cfg: &mut DiGraph<Block, EdgeType>,
-    sections: &[Section],
-) -> BuildEdgesResult {
-    let mut edges = Vec::new();
-    let mut pc_to_block = HashMap::new();
-    let mut node_map = HashMap::new();
-
-    // Determine runtime section bounds for coordinate conversion
-    let runtime_section = sections
-        .iter()
-        .find(|s| matches!(s.kind, crate::detection::SectionKind::Runtime));
-
-    let (runtime_start, runtime_end) = if let Some(section) = runtime_section {
-        tracing::debug!(
-            "Runtime section found in build_edges: offset={:#x}, len={}, range=[{:#x}, {:#x})",
-            section.offset,
-            section.len,
-            section.offset,
-            section.offset + section.len
-        );
-        (section.offset, section.offset + section.len)
-    } else {
-        tracing::warn!(
-            "NO runtime section found in build_edges! sections.len()={}",
-            sections.len()
-        );
-        (0, 0)
-    };
-
-    // Add body blocks to graph
+/// Ensures every `JUMPDEST` discovered in the bytecode starts a corresponding block.
+fn validate_jumpdests(blocks: &[Block], jumpdest_pcs: &HashSet<usize>) -> Result<(), Error> {
+    let mut block_starts = HashSet::new();
     for block in blocks {
-        if let Block::Body {
-            start_pc,
-            instructions,
-            max_stack,
-        } = block
-        {
-            let index = cfg.add_node(Block::Body {
-                start_pc: *start_pc,
-                instructions: instructions.clone(),
-                max_stack: *max_stack,
-            });
-            node_map.insert(*start_pc, index);
-            pc_to_block.insert(*start_pc, index);
+        if let Block::Body(body) = block {
+            block_starts.insert(body.start_pc);
         }
     }
 
-    // Edge from Entry to first block
-    if let Some(Block::Body { start_pc, .. }) = blocks.first()
-        && let Some(&target) = node_map.get(start_pc)
-    {
-        edges.push((NodeIndex::new(0), target, EdgeType::Fallthrough));
+    let orphaned: Vec<_> = jumpdest_pcs
+        .iter()
+        .filter(|pc| !block_starts.contains(pc))
+        .cloned()
+        .collect();
+
+    if !orphaned.is_empty() {
+        return Err(Error::InvalidBlockStructure(format!(
+            "JUMPDESTs not aligned with block starts: {:?}",
+            orphaned
+        )));
     }
 
-    // Build edges using proper jump target extraction
-    for (i, block) in blocks.iter().enumerate() {
-        if let Block::Body {
-            start_pc,
-            instructions,
-            ..
-        } = block
-        {
-            let start_idx = node_map[start_pc];
-
-            if instructions.is_empty() {
-                // Empty block (shouldn't happen after our fixes, but handle it)
-                if i + 1 < blocks.len()
-                    && let Block::Body {
-                        start_pc: next_pc, ..
-                    } = &blocks[i + 1]
-                {
-                    let next_idx = node_map[next_pc];
-                    edges.push((start_idx, next_idx, EdgeType::Fallthrough));
-                }
-                continue;
-            }
-
-            let last_instr = &instructions[instructions.len() - 1];
-
-            // Check if this block is in the runtime section
-            let block_in_runtime =
-                runtime_start > 0 && *start_pc >= runtime_start && *start_pc < runtime_end;
-
-            let last_opcode = last_instr.op;
-            match last_opcode {
-                Opcode::JUMP => {
-                    // C) Extract target from [PUSHx imm][JUMP] pattern
-                    if let Some(mut target_pc) = extract_jump_target_from_block(instructions) {
-                        let original_target = target_pc;
-                        // CRITICAL: If this block is in runtime, the target is runtime-relative
-                        // and needs to be converted to absolute for node_map lookup
-                        if block_in_runtime {
-                            target_pc += runtime_start;
-                            tracing::debug!(
-                                "Converting runtime-relative JUMP target: 0x{:x} + 0x{:x} = 0x{:x} (block at 0x{:x})",
-                                original_target,
-                                runtime_start,
-                                target_pc,
-                                start_pc
-                            );
-                        } else {
-                            tracing::debug!(
-                                "Block at 0x{:x} NOT in runtime (start=0x{:x}, end=0x{:x}, block_start=0x{:x})",
-                                start_pc,
-                                runtime_start,
-                                runtime_end,
-                                start_pc
-                            );
-                        }
-
-                        if let Some(&target_idx) = node_map.get(&target_pc) {
-                            edges.push((start_idx, target_idx, EdgeType::Jump));
-                            tracing::debug!(
-                                "JUMP edge: block {} (pc={:#x}) -> block {} (pc={:#x})",
-                                start_idx.index(),
-                                start_pc,
-                                target_idx.index(),
-                                target_pc
-                            );
-                        } else {
-                            // Find nearest JUMPDESTs for debugging
-                            let nearby: Vec<_> = node_map
-                                .keys()
-                                .filter(|&&pc| (target_pc as isize - pc as isize).abs() < 50)
-                                .collect();
-                            tracing::warn!(
-                                "JUMP target {:#x} not found in node_map (from block pc={:#x}). Nearby blocks: {:?}",
-                                target_pc,
-                                start_pc,
-                                nearby
-                            );
-                        }
-                    }
-                    // No fallthrough for unconditional jump
-                    continue;
-                }
-                Opcode::JUMPI => {
-                    // C) Extract target from [PUSHx imm][JUMPI] pattern
-                    if let Some(mut target_pc) = extract_jump_target_from_block(instructions) {
-                        // Convert runtime-relative to absolute if in runtime section
-                        if block_in_runtime {
-                            target_pc += runtime_start;
-                        }
-
-                        if let Some(&target_idx) = node_map.get(&target_pc) {
-                            edges.push((start_idx, target_idx, EdgeType::BranchTrue));
-                            tracing::debug!(
-                                "JUMPI true edge: block {} -> block {} (target={:#x})",
-                                start_idx.index(),
-                                target_idx.index(),
-                                target_pc
-                            );
-                        }
-                    }
-
-                    // False branch: next sequential block
-                    if i + 1 < blocks.len()
-                        && let Block::Body {
-                            start_pc: next_pc, ..
-                        } = &blocks[i + 1]
-                    {
-                        let next_idx = node_map[next_pc];
-                        edges.push((start_idx, next_idx, EdgeType::BranchFalse));
-                        tracing::debug!(
-                            "JUMPI false edge: block {} -> block {}",
-                            start_idx.index(),
-                            next_idx.index()
-                        );
-                    }
-                }
-                _ if is_terminal_opcode(last_opcode) => {
-                    let exit_idx = NodeIndex::new(cfg.node_count() - 1);
-                    edges.push((start_idx, exit_idx, EdgeType::Fallthrough));
-                }
-                _ => {
-                    // Fallthrough to next block
-                    if i + 1 < blocks.len() {
-                        if let Block::Body {
-                            start_pc: next_pc, ..
-                        } = &blocks[i + 1]
-                        {
-                            let next_idx = node_map[next_pc];
-                            edges.push((start_idx, next_idx, EdgeType::Fallthrough));
-                        }
-                    } else {
-                        let exit_idx = NodeIndex::new(cfg.node_count() - 1);
-                        edges.push((start_idx, exit_idx, EdgeType::Fallthrough));
-                    }
-                }
-            }
-        }
-    }
-
-    Ok((edges, pc_to_block))
+    Ok(())
 }
 
-/// Extract jump target from [PUSHx imm][JUMP/JUMPI] pattern at end of block
-fn extract_jump_target_from_block(instructions: &[Instruction]) -> Option<usize> {
-    if instructions.len() < 2 {
-        return None;
-    }
-
-    let last_idx = instructions.len() - 1;
-    let jump_instr = &instructions[last_idx];
-
-    let jump_opcode = jump_instr.op;
-    if !matches!(jump_opcode, Opcode::JUMP | Opcode::JUMPI) {
-        return None;
-    }
-
-    // Look for preceding PUSH
-    let push_instr = &instructions[last_idx - 1];
-    let push_opcode = push_instr.op;
-    if matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0)
-        && let Some(immediate) = &push_instr.imm
-    {
-        return usize::from_str_radix(immediate, 16).ok();
-    }
-
-    None
-}
-
-/// Assigns SSA values and computes stack heights for each block.
-///
-/// Walks through each block's instructions to assign SSA `ValueId`s for stack operations (e.g.,
-/// PUSH) and compute the maximum stack height. Updates the `max_stack` field in `Block::Body`
-/// instances.
-///
-/// # Arguments
-/// * `cfg` - The CFG graph with nodes populated.
-/// * `pc_to_block` - Mapping of program counters to block indices.
-/// * `instructions` - Decoded EVM instructions.
-///
-/// # Returns
-/// A `Result` indicating success or a `Error` if SSA assignment fails.
-fn assign_ssa_values(
-    cfg: &mut DiGraph<Block, EdgeType>,
-    _pc_to_block: &HashMap<usize, NodeIndex>,
-    _instructions: &[Instruction],
+/// Derives control descriptors for each block and wires up the corresponding edges.
+fn analyse_and_connect(
+    cfg: &mut StableDiGraph<Block, EdgeType>,
+    ordered_nodes: &[NodeIndex],
+    node_by_pc: &HashMap<usize, NodeIndex>,
+    runtime_bounds: Option<(usize, usize)>,
 ) -> Result<(), Error> {
-    let mut value_id = 0;
+    for (idx, node) in ordered_nodes.iter().enumerate() {
+        let next = ordered_nodes.get(idx + 1).copied();
+        let control = if let Some(Block::Body(body)) = cfg.node_weight_mut(*node) {
+            let control = analyse_block_control(body, next, runtime_bounds, node_by_pc)
+                .unwrap_or(BlockControl::Unknown);
+            body.control = control.clone();
+            control
+        } else {
+            BlockControl::Unknown
+        };
 
-    for node in cfg.node_indices() {
-        let block = cfg.node_weight(node).unwrap();
-        let mut ssa_map = HashMap::new();
-        let mut stack = Vec::new();
-        let mut cur_depth: usize = 0;
-        let mut max_stack = 0;
+        emit_edges(cfg, *node, &control)?;
+    }
+    Ok(())
+}
 
-        if let Block::Body { instructions, .. } = block {
-            for instruction in instructions {
-                tracing::debug!(
-                    "Processing opcode {} at pc={}",
-                    instruction.op,
-                    instruction.pc
-                );
-                let opcode = instruction.op;
-                if matches!(opcode, Opcode::PUSH(_) | Opcode::PUSH0 | Opcode::DUP(_)) {
-                    cur_depth += 1;
-                } else if matches!(opcode, Opcode::POP) && stack.pop().is_some() {
-                    cur_depth = cur_depth.saturating_sub(1);
-                }
-                if matches!(opcode, Opcode::PUSH(_) | Opcode::PUSH0) {
-                    stack.push(ValueId(value_id));
-                    ssa_map.insert(instruction.pc, ValueId(value_id));
-                    value_id += 1;
-                }
-                max_stack = max_stack.max(cur_depth);
+/// Adds outgoing edges that match the supplied control information.
+fn emit_edges(
+    cfg: &mut StableDiGraph<Block, EdgeType>,
+    source: NodeIndex,
+    control: &BlockControl,
+) -> Result<(), Error> {
+    let exit = cfg
+        .node_indices()
+        .find(|idx| matches!(cfg[*idx], Block::Exit))
+        .unwrap();
+
+    match control {
+        BlockControl::Unknown => {}
+        BlockControl::Terminal => {
+            cfg.add_edge(source, exit, EdgeType::Fallthrough);
+        }
+        BlockControl::Fallthrough => {
+            if let Some(next) = find_next(cfg, source) {
+                cfg.add_edge(source, next, EdgeType::Fallthrough);
+            } else {
+                cfg.add_edge(source, exit, EdgeType::Fallthrough);
             }
-            tracing::debug!(
-                "Block at pc={} has max_stack={}",
-                block.start_pc(),
-                max_stack
-            );
-            let updated_block = Block::Body {
-                start_pc: block.start_pc(),
-                instructions: instructions.clone(),
-                max_stack,
-            };
-            cfg[node] = updated_block;
+        }
+        BlockControl::Jump { target } => {
+            if let Some(target_node) = target.as_block() {
+                cfg.add_edge(source, target_node, EdgeType::Jump);
+            }
+        }
+        BlockControl::Branch {
+            true_target,
+            false_target,
+        } => {
+            if let Some(target_node) = true_target.as_block() {
+                cfg.add_edge(source, target_node, EdgeType::BranchTrue);
+            }
+            if let Some(target_node) = false_target.as_block() {
+                cfg.add_edge(source, target_node, EdgeType::BranchFalse);
+            } else if let Some(next) = find_next(cfg, source) {
+                cfg.add_edge(source, next, EdgeType::BranchFalse);
+            } else {
+                cfg.add_edge(source, exit, EdgeType::BranchFalse);
+            }
         }
     }
 
     Ok(())
 }
 
-/// Returns the starting program counter for a block.
-impl Block {
-    fn start_pc(&self) -> usize {
-        match self {
-            Block::Body { start_pc, .. } => *start_pc,
-            _ => 0,
+/// Finds the block that executes immediately after `node` based on program counter ordering.
+fn find_next(cfg: &StableDiGraph<Block, EdgeType>, node: NodeIndex) -> Option<NodeIndex> {
+    let mut blocks: Vec<_> = cfg
+        .node_references()
+        .filter_map(|(idx, block)| match block {
+            Block::Body(body) => Some((idx, body.start_pc)),
+            _ => None,
+        })
+        .collect();
+    blocks.sort_by_key(|(_, pc)| *pc);
+    for (i, (idx, _)) in blocks.iter().enumerate() {
+        if *idx == node {
+            return blocks.get(i + 1).map(|(next_idx, _)| *next_idx);
+        }
+    }
+    None
+}
+
+/// Infers the `BlockControl` descriptor for a block using its terminator instruction.
+fn analyse_block_control(
+    body: &BlockBody,
+    next: Option<NodeIndex>,
+    runtime_bounds: Option<(usize, usize)>,
+    node_by_pc: &HashMap<usize, NodeIndex>,
+) -> Option<BlockControl> {
+    if body.instructions.is_empty() {
+        return Some(BlockControl::Fallthrough);
+    }
+
+    let last = body.instructions.last().unwrap();
+    match last.op {
+        Opcode::JUMP => build_jump_control(body, runtime_bounds, node_by_pc),
+        Opcode::JUMPI => build_branch_control(body, next, runtime_bounds, node_by_pc),
+        opcode if is_terminal_opcode(opcode) => Some(BlockControl::Terminal),
+        _ => Some(BlockControl::Fallthrough),
+    }
+}
+
+/// Builds the control descriptor for an unconditional jump.
+fn build_jump_control(
+    body: &BlockBody,
+    runtime_bounds: Option<(usize, usize)>,
+    node_by_pc: &HashMap<usize, NodeIndex>,
+) -> Option<BlockControl> {
+    analyse_jump_target(body, runtime_bounds, node_by_pc)
+        .map(|target| BlockControl::Jump { target })
+}
+
+/// Builds the control descriptor for a conditional branch, including the fallthrough target.
+fn build_branch_control(
+    body: &BlockBody,
+    next: Option<NodeIndex>,
+    runtime_bounds: Option<(usize, usize)>,
+    node_by_pc: &HashMap<usize, NodeIndex>,
+) -> Option<BlockControl> {
+    let true_target = analyse_jump_target(body, runtime_bounds, node_by_pc)?;
+    let false_target = next
+        .map(|node| JumpTarget::Block {
+            node,
+            encoding: match runtime_bounds {
+                Some(_) if body.is_runtime(runtime_bounds) => JumpEncoding::RuntimeRelative,
+                _ => JumpEncoding::Absolute,
+            },
+        })
+        .unwrap_or_else(|| JumpTarget::Raw {
+            value: 0,
+            encoding: JumpEncoding::Absolute,
+        });
+
+    Some(BlockControl::Branch {
+        true_target,
+        false_target,
+    })
+}
+
+/// Resolves the block referenced by the jump terminator into a symbolic `JumpTarget`.
+fn analyse_jump_target(
+    body: &BlockBody,
+    runtime_bounds: Option<(usize, usize)>,
+    node_by_pc: &HashMap<usize, NodeIndex>,
+) -> Option<JumpTarget> {
+    let pattern = detect_jump_pattern(&body.instructions)?;
+    match pattern {
+        JumpPattern::Direct { push_idx } => {
+            let push = &body.instructions[push_idx];
+            let immediate = parse_immediate(push)?;
+            let encoding = if body.is_runtime(runtime_bounds) {
+                JumpEncoding::RuntimeRelative
+            } else {
+                JumpEncoding::Absolute
+            };
+            let absolute_pc = match encoding {
+                JumpEncoding::RuntimeRelative => {
+                    runtime_bounds.map(|(start, _)| start + immediate)?
+                }
+                JumpEncoding::Absolute => immediate,
+                JumpEncoding::PcRelative => unreachable!(),
+            };
+            let target_node = node_by_pc.get(&absolute_pc).copied();
+            target_node
+                .map(|node| JumpTarget::Block { node, encoding })
+                .or_else(|| {
+                    Some(JumpTarget::Raw {
+                        value: immediate,
+                        encoding,
+                    })
+                })
+        }
+        JumpPattern::PcRelative { push_idx, pc_idx } => {
+            let delta = parse_immediate(&body.instructions[push_idx])?;
+            let pc_value = body.instructions[pc_idx].pc;
+            let absolute_pc = pc_value + delta;
+            let target_node = node_by_pc.get(&absolute_pc).copied();
+            target_node.map(|node| JumpTarget::Block {
+                node,
+                encoding: JumpEncoding::PcRelative,
+            })
         }
     }
 }
 
-impl CfgIrBundle {
-    /// Reindexes all PC values after bytecode modifications and returns the old→new PC mapping.
-    ///
-    /// This method recalculates program counters for all instructions in all blocks,
-    /// maintaining the correct sequential order and updating the pc_to_block mapping.
-    /// Should be called after any transform that changes instruction sequences.
-    ///
-    /// The returned mapping can be used to patch jump immediates that reference absolute
-    /// PCs to ensure they point to the correct locations after reindexing.
-    ///
-    /// For INVALID opcodes without immediate values, this method preserves their original
-    /// byte values from the original bytecode before reindexing, ensuring they can be
-    /// correctly encoded even after their PC changes.
-    ///
-    /// # Returns
-    /// A `Result` containing a `HashMap` mapping old PC values to new PC values, or an
-    /// `Error` if reindexing fails.
-    pub fn reindex_pcs(&mut self) -> Result<HashMap<usize, usize>, Error> {
-        tracing::debug!(
-            "Starting PC reindexing for {} blocks",
-            self.cfg.node_count()
-        );
+enum JumpPattern {
+    Direct { push_idx: usize },
+    PcRelative { push_idx: usize, pc_idx: usize },
+}
 
-        let mut new_pc_to_block = HashMap::new();
-        let mut pc_map = HashMap::new();
-        let mut current_pc = 0;
+/// Recognises the bytecode pattern that feeds the terminal `JUMP`/`JUMPI` in a block.
+fn detect_jump_pattern(instructions: &[Instruction]) -> Option<JumpPattern> {
+    if instructions.is_empty() {
+        return None;
+    }
 
-        // Get all body blocks sorted by their original start_pc to maintain order
-        let mut blocks_with_indices: Vec<_> = self
+    let last = instructions.len() - 1;
+    match instructions[last].op {
+        Opcode::JUMP | Opcode::JUMPI => {}
+        _ => return None,
+    }
+
+    if last >= 1 && is_push(&instructions[last - 1]) {
+        return Some(JumpPattern::Direct { push_idx: last - 1 });
+    }
+
+    if last >= 3
+        && instructions[last - 1].op == Opcode::ADD
+        && instructions[last - 2].op == Opcode::PC
+        && is_push(&instructions[last - 3])
+    {
+        return Some(JumpPattern::PcRelative {
+            push_idx: last - 3,
+            pc_idx: last - 2,
+        });
+    }
+
+    None
+}
+
+/// Returns true when the instruction is any PUSH variant (including PUSH0).
+fn is_push(ins: &Instruction) -> bool {
+    matches!(ins.op, Opcode::PUSH(_) | Opcode::PUSH0)
+}
+
+/// Parses the immediate operand of a PUSH instruction into a machine integer.
+fn parse_immediate(ins: &Instruction) -> Option<usize> {
+    ins.imm
+        .as_ref()
+        .and_then(|imm| usize::from_str_radix(imm, 16).ok())
+}
+
+/// Verifies that the block ends with a direct jump pattern compatible with symbolic rewrites.
+fn ensure_jump_pattern(body: &BlockBody, opcode: Opcode) -> Result<(), Error> {
+    if body.instructions.is_empty() {
+        return Err(Error::InvalidBlockStructure(
+            "block is empty; cannot assign jump".into(),
+        ));
+    }
+
+    match detect_jump_pattern(&body.instructions) {
+        Some(JumpPattern::Direct { .. }) | Some(JumpPattern::PcRelative { .. }) => Ok(()),
+        None => Err(Error::InvalidBlockStructure(format!(
+            "block ending at pc 0x{:x} does not end with {:?}",
+            body.start_pc, opcode
+        ))),
+    }
+}
+
+/// Rewrites the hexadecimal immediate of a PUSH instruction, preserving its byte width.
+fn apply_immediate(instr: &mut Instruction, value: usize) -> Result<(), Error> {
+    match instr.op {
+        Opcode::PUSH0 => {
+            if value != 0 {
+                return Err(Error::InvalidImmediate(format!(
+                    "value 0x{:x} does not fit PUSH0",
+                    value
+                )));
+            }
+            instr.imm = Some("00".into());
+        }
+        Opcode::PUSH(width) => {
+            let width = width as usize;
+            let max = if width == 32 {
+                usize::MAX
+            } else {
+                (1usize << (width * 8)) - 1
+            };
+            if value > max {
+                return Err(Error::InvalidImmediate(format!(
+                    "value 0x{:x} exceeds PUSH{} capacity",
+                    value, width
+                )));
+            }
+            instr.imm = Some(format!("{:0width$x}", value, width = width * 2));
+        }
+        _ => {
+            return Err(Error::InvalidImmediate(
+                "attempted to write immediate into non-PUSH opcode".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Rewrites PUSH immediates for legacy blocks using the provided old→new PC mapping.
+fn patch_legacy_immediates(
+    body: &mut BlockBody,
+    runtime_bounds: Option<(usize, usize)>,
+    mapping: &HashMap<usize, usize>,
+) -> Result<(), Error> {
+    let in_runtime = body.is_runtime(runtime_bounds);
+    let runtime_start = runtime_bounds.map(|(start, _)| start);
+    let Some(JumpPattern::Direct { push_idx }) = detect_jump_pattern(&body.instructions) else {
+        return Ok(());
+    };
+    let Some(old_value) = parse_immediate(&body.instructions[push_idx]) else {
+        return Ok(());
+    };
+
+    let old_pc = if in_runtime {
+        runtime_start.map(|start| start + old_value)
+    } else {
+        Some(old_value)
+    };
+
+    let Some(old_pc) = old_pc else {
+        return Ok(());
+    };
+    let Some(new_pc) = mapping.get(&old_pc).copied() else {
+        return Ok(());
+    };
+
+    let value_to_store = if in_runtime {
+        runtime_start
+            .map(|start| new_pc.saturating_sub(start))
+            .unwrap_or(new_pc)
+    } else {
+        new_pc
+    };
+
+    let push = &mut body.instructions[push_idx];
+    apply_immediate(push, value_to_store)
+}
+
+/// Computes a conservative stack-height bound for each block to maintain SSA metadata.
+fn assign_ssa_values(cfg: &mut StableDiGraph<Block, EdgeType>) -> Result<(), Error> {
+    let nodes: Vec<_> = cfg.node_indices().collect();
+    for node in nodes {
+        if let Some(Block::Body(body)) = cfg.node_weight_mut(node) {
+            let mut max_stack = 0usize;
+            let mut current_depth = 0isize;
+            for instr in &body.instructions {
+                match instr.op {
+                    Opcode::PUSH(_) | Opcode::PUSH0 | Opcode::DUP(_) => {
+                        current_depth += 1;
+                        max_stack = max_stack.max(current_depth as usize);
+                    }
+                    Opcode::POP => current_depth = (current_depth - 1).max(0),
+                    _ => {}
+                }
+            }
+            body.max_stack = max_stack;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::detection::{Section, SectionKind};
+    use crate::strip::RuntimeSpan;
+
+    fn sample_runtime_section(len: usize) -> Section {
+        Section {
+            kind: SectionKind::Runtime,
+            offset: 0,
+            len,
+        }
+    }
+
+    fn sample_bytecode(len: usize) -> Vec<u8> {
+        vec![0u8; len]
+    }
+
+    fn sample_clean_report(len: usize) -> CleanReport {
+        CleanReport {
+            runtime_layout: vec![RuntimeSpan { offset: 0, len }],
+            removed: Vec::new(),
+            swarm_hash: None,
+            bytes_saved: 0,
+            clean_len: len,
+            clean_keccak: [0u8; 32],
+            program_counter_mapping: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn apply_immediate_respects_width() {
+        let mut instr = Instruction {
+            pc: 0,
+            op: Opcode::PUSH(2),
+            imm: Some("0000".into()),
+        };
+        apply_immediate(&mut instr, 0x12ab).unwrap();
+        assert_eq!(instr.imm.as_deref(), Some("12ab"));
+    }
+
+    #[test]
+    fn build_cfg_ir_creates_basic_blocks() {
+        let instructions = vec![
+            Instruction {
+                pc: 0,
+                op: Opcode::JUMPDEST,
+                imm: None,
+            },
+            Instruction {
+                pc: 1,
+                op: Opcode::PUSH(1),
+                imm: Some("04".into()),
+            },
+            Instruction {
+                pc: 3,
+                op: Opcode::JUMP,
+                imm: None,
+            },
+            Instruction {
+                pc: 4,
+                op: Opcode::JUMPDEST,
+                imm: None,
+            },
+            Instruction {
+                pc: 5,
+                op: Opcode::STOP,
+                imm: None,
+            },
+        ];
+
+        let sections = vec![sample_runtime_section(instructions.len())];
+        let bundle = build_cfg_ir(
+            &instructions,
+            &sections,
+            sample_clean_report(instructions.len()),
+            &sample_bytecode(instructions.len()),
+        )
+        .expect("cfg build succeeds");
+
+        let body_nodes: Vec<_> = bundle
             .cfg
             .node_indices()
-            .filter_map(|index| {
-                if let Block::Body { start_pc, .. } = &self.cfg[index] {
-                    Some((index, *start_pc))
-                } else {
-                    None
-                }
-            })
+            .filter(|&idx| matches!(bundle.cfg[idx], Block::Body(_)))
             .collect();
 
-        blocks_with_indices.sort_by_key(|(_, start_pc)| *start_pc);
+        assert_eq!(body_nodes.len(), 2);
 
-        // Reindex each block's instructions
-        for (node_idx, old_start_pc) in blocks_with_indices {
-            if let Block::Body {
-                instructions,
-                start_pc,
-                ..
-            } = &mut self.cfg[node_idx]
-            {
-                let new_start_pc = current_pc;
-                new_pc_to_block.insert(new_start_pc, node_idx);
-
-                for instruction in instructions.iter_mut() {
-                    // CRITICAL: For INVALID opcodes, preserve the original byte value in imm field
-                    // BEFORE reindexing. After reindexing, the new PC won't correspond to the
-                    // original bytecode position, so the encoder won't be able to look up the byte.
-                    if matches!(instruction.op, Opcode::INVALID)
-                        && instruction.imm.is_none()
-                        && instruction.pc < self.original_bytecode.len()
-                    {
-                        let original_byte = self.original_bytecode[instruction.pc];
-                        instruction.imm = Some(format!("{:02x}", original_byte));
-                        tracing::debug!(
-                            "Preserved INVALID byte 0x{:02x} at old PC 0x{:x} before reindexing to 0x{:x}",
-                            original_byte,
-                            instruction.pc,
-                            current_pc
-                        );
-                    }
-
-                    // Record old→new PC mapping BEFORE we overwrite
-                    pc_map.insert(instruction.pc, current_pc);
-                    instruction.pc = current_pc;
-                    current_pc += instruction.byte_size();
-                }
-
-                // Update block's start_pc
-                *start_pc = new_start_pc;
-                tracing::debug!(
-                    "Reindexed block {}: old start_pc 0x{:x} -> new start_pc 0x{:x}",
-                    node_idx.index(),
-                    old_start_pc,
-                    new_start_pc
-                );
-            }
-        }
-
-        // Update the pc_to_block mapping
-        self.pc_to_block = new_pc_to_block;
-
-        tracing::debug!(
-            "PC reindexing complete. Total bytecode size: {} bytes, {} PC mappings",
-            current_pc,
-            pc_map.len()
-        );
-        Ok(pc_map)
-    }
-
-    /// Rebuilds edges for a specific block after instruction modifications.
-    ///
-    /// Analyzes the block's instructions (especially the last instruction) to determine
-    /// correct outgoing edges and updates the CFG accordingly. Handles JUMP, JUMPI,
-    /// terminal instructions, and fallthrough cases.
-    ///
-    /// # Arguments
-    /// * `node_idx` - The block whose edges need rebuilding
-    ///
-    /// # Returns
-    /// A `Result` indicating success or a `Error` if edge rebuilding fails.
-    pub fn rebuild_edges_for_block(&mut self, node_idx: NodeIndex) -> Result<(), Error> {
-        tracing::debug!("Rebuilding edges for block {}", node_idx.index());
-
-        // Determine runtime section bounds for coordinate conversion
-        let runtime_section = self
-            .sections
-            .iter()
-            .find(|s| matches!(s.kind, crate::detection::SectionKind::Runtime));
-
-        let (runtime_start, runtime_end) = if let Some(section) = runtime_section {
-            (section.offset, section.offset + section.len)
+        if let Block::Body(body) = &bundle.cfg[body_nodes[0]] {
+            assert!(matches!(body.control, BlockControl::Jump { .. }));
         } else {
-            (0, 0)
-        };
-
-        // Remove all outgoing edges from this block
-        let outgoing_edges: Vec<_> = self
-            .cfg
-            .edges_directed(node_idx, petgraph::Outgoing)
-            .map(|e| e.id())
-            .collect();
-
-        for edge_id in outgoing_edges {
-            self.cfg.remove_edge(edge_id);
-        }
-
-        // Analyze the block to determine new edges
-        if let Some(Block::Body {
-            instructions,
-            start_pc,
-            ..
-        }) = self.cfg.node_weight(node_idx)
-        {
-            let block_start_pc = *start_pc;
-            let block_in_runtime = runtime_start > 0
-                && block_start_pc >= runtime_start
-                && block_start_pc < runtime_end;
-
-            let last_instr = instructions.last();
-
-            if let Some(last_instr) = last_instr {
-                let last_opcode = last_instr.op;
-                match last_opcode {
-                    Opcode::JUMP => {
-                        // Unconditional jump - find target and create Jump edge
-                        if let Some(mut target_pc) = self.extract_jump_target(instructions) {
-                            // CRITICAL: If this block is in runtime, the target is runtime-relative
-                            // and needs to be converted to absolute for pc_to_block lookup
-                            if block_in_runtime {
-                                target_pc += runtime_start;
-                            }
-
-                            if let Some(&target_idx) = self.pc_to_block.get(&target_pc) {
-                                self.cfg.add_edge(node_idx, target_idx, EdgeType::Jump);
-                                tracing::debug!(
-                                    "Added JUMP edge: {} -> {} (PC: 0x{:x})",
-                                    node_idx.index(),
-                                    target_idx.index(),
-                                    target_pc
-                                );
-                            } else {
-                                tracing::warn!(
-                                    "JUMP target PC 0x{:x} not found in pc_to_block mapping",
-                                    target_pc
-                                );
-                            }
-                        }
-                    }
-                    Opcode::JUMPI => {
-                        // Conditional jump - create both true and false branches
-                        if let Some(mut target_pc) = self.extract_jump_target(instructions) {
-                            // Convert runtime-relative to absolute if in runtime section
-                            if block_in_runtime {
-                                target_pc += runtime_start;
-                            }
-
-                            if let Some(&target_idx) = self.pc_to_block.get(&target_pc) {
-                                self.cfg
-                                    .add_edge(node_idx, target_idx, EdgeType::BranchTrue);
-                                tracing::debug!(
-                                    "Added JUMPI true edge: {} -> {} (PC: 0x{:x})",
-                                    node_idx.index(),
-                                    target_idx.index(),
-                                    target_pc
-                                );
-                            } else {
-                                tracing::warn!(
-                                    "JUMPI target PC 0x{:x} not found in pc_to_block mapping",
-                                    target_pc
-                                );
-                            }
-                        }
-
-                        // Add false branch to next sequential block (only if it doesn't already exist)
-                        if let Some(next_idx) = self.find_next_sequential_block(node_idx) {
-                            // Check if edge already exists to avoid duplicates
-                            let edge_exists = self
-                                .cfg
-                                .edges_directed(node_idx, petgraph::Outgoing)
-                                .any(|e| {
-                                    e.target() == next_idx && *e.weight() == EdgeType::BranchFalse
-                                });
-
-                            if !edge_exists {
-                                self.cfg.add_edge(node_idx, next_idx, EdgeType::BranchFalse);
-                                tracing::debug!(
-                                    "Added JUMPI false edge: {} -> {}",
-                                    node_idx.index(),
-                                    next_idx.index()
-                                );
-                            }
-                        }
-                    }
-                    // Use centralized helper for terminal opcodes
-                    _ if is_terminal_opcode(last_opcode) => {
-                        // Terminal instructions - connect to Exit node
-                        let exit_idx = self.find_exit_node();
-                        self.cfg.add_edge(node_idx, exit_idx, EdgeType::Fallthrough);
-                        tracing::debug!("Added terminal edge: {} -> Exit", node_idx.index());
-                    }
-                    _ => {
-                        // Non-terminal instruction - fallthrough to next block
-                        if let Some(next_idx) = self.find_next_sequential_block(node_idx) {
-                            self.cfg.add_edge(node_idx, next_idx, EdgeType::Fallthrough);
-                            tracing::debug!(
-                                "Added fallthrough edge: {} -> {}",
-                                node_idx.index(),
-                                next_idx.index()
-                            );
-                        } else {
-                            // No next block - connect to Exit
-                            let exit_idx = self.find_exit_node();
-                            self.cfg.add_edge(node_idx, exit_idx, EdgeType::Fallthrough);
-                        }
-                    }
-                }
-            } else {
-                // Empty block - fallthrough to next block or Exit
-                if let Some(next_idx) = self.find_next_sequential_block(node_idx) {
-                    self.cfg.add_edge(node_idx, next_idx, EdgeType::Fallthrough);
-                } else {
-                    let exit_idx = self.find_exit_node();
-                    self.cfg.add_edge(node_idx, exit_idx, EdgeType::Fallthrough);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Updates jump targets throughout the CFG based on PC changes.
-    ///
-    /// Scans all blocks for PUSH + JUMP/JUMPI patterns and updates the immediate
-    /// values to reflect new PC mappings after bytecode modifications.
-    ///
-    /// # Arguments
-    /// * `pc_offset` - The offset to apply to jump targets (can be negative)
-    /// * `region_start` - PC where changes began (targets before this are unchanged)
-    /// * `pc_mapping` - Optional direct PC mapping for targets within changed regions
-    ///
-    /// # Returns
-    /// A `Result` indicating success or a `Error` if target updates fail.
-    pub fn update_jump_targets(
-        &mut self,
-        pc_offset: isize,
-        region_start: usize,
-        pc_mapping: Option<&HashMap<usize, usize>>,
-    ) -> Result<(), Error> {
-        tracing::debug!(
-            "Updating jump targets: offset={:+}, region_start=0x{:x}",
-            pc_offset,
-            region_start
-        );
-
-        for node_idx in self.cfg.node_indices().collect::<Vec<_>>() {
-            if let Block::Body { instructions, .. } = &mut self.cfg[node_idx] {
-                for i in 0..instructions.len().saturating_sub(1) {
-                    // Look for PUSH followed by JUMP/JUMPI
-                    let push_opcode = instructions[i].op;
-                    let next_opcode = instructions[i + 1].op;
-                    if matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0)
-                        && matches!(next_opcode, Opcode::JUMP | Opcode::JUMPI)
-                        && let Some(immediate) = &instructions[i].imm
-                        && let Ok(old_target) = usize::from_str_radix(immediate, 16)
-                    {
-                        // Calculate new target using local logic to avoid borrowing self
-                        let new_target = if let Some(mapping) = pc_mapping {
-                            if let Some(&mapped_target) = mapping.get(&old_target) {
-                                mapped_target
-                            } else if old_target >= region_start {
-                                if pc_offset >= 0 {
-                                    old_target + (pc_offset as usize)
-                                } else {
-                                    old_target.saturating_sub((-pc_offset) as usize)
-                                }
-                            } else {
-                                old_target
-                            }
-                        } else if old_target >= region_start {
-                            if pc_offset >= 0 {
-                                old_target + (pc_offset as usize)
-                            } else {
-                                old_target.saturating_sub((-pc_offset) as usize)
-                            }
-                        } else {
-                            old_target
-                        };
-
-                        if new_target != old_target {
-                            let original_push_size = if let Opcode::PUSH(n) = push_opcode {
-                                n as usize
-                            } else {
-                                // PUSH0 case - shouldn't be used for jump targets
-                                1
-                            };
-
-                            // Verify the new value fits in the original PUSH size
-                            let bytes_needed = if new_target == 0 {
-                                1
-                            } else {
-                                (64 - (new_target as u64).leading_zeros()).div_ceil(8) as usize
-                            };
-
-                            if bytes_needed > original_push_size {
-                                return Err(Error::InvalidImmediate(format!(
-                                    "Jump target 0x{:x} requires {} bytes but PUSH({}) only has {} bytes",
-                                    new_target,
-                                    bytes_needed,
-                                    original_push_size,
-                                    original_push_size
-                                )));
-                            }
-
-                            // Keep the same PUSH size, just update the immediate value
-                            instructions[i].imm = Some(format!(
-                                "{:0width$x}",
-                                new_target,
-                                width = original_push_size * 2
-                            ));
-
-                            tracing::debug!(
-                                "Updated jump target: 0x{:x} -> 0x{:x} (kept PUSH({}))",
-                                old_target,
-                                new_target,
-                                original_push_size
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Extracts jump target from PUSH + JUMP/JUMPI pattern
-    fn extract_jump_target(&self, instructions: &[Instruction]) -> Option<usize> {
-        if instructions.len() < 2 {
-            return None;
-        }
-
-        let last_idx = instructions.len() - 1;
-        let jump_instr = &instructions[last_idx];
-
-        let jump_opcode = jump_instr.op;
-        if matches!(jump_opcode, Opcode::JUMP | Opcode::JUMPI) {
-            // Look for preceding PUSH instruction
-            if last_idx > 0 {
-                let push_instr = &instructions[last_idx - 1];
-                let push_opcode = push_instr.op;
-                if matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0)
-                    && let Some(immediate) = &push_instr.imm
-                {
-                    return usize::from_str_radix(immediate, 16).ok();
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Finds the next sequential block after the given block
-    fn find_next_sequential_block(&self, current_idx: NodeIndex) -> Option<NodeIndex> {
-        if let Some(Block::Body {
-            start_pc,
-            instructions,
-            ..
-        }) = self.cfg.node_weight(current_idx)
-        {
-            // Calculate the end PC of the current block
-            let end_pc = *start_pc
-                + instructions
-                    .iter()
-                    .map(|instruction| instruction.byte_size())
-                    .sum::<usize>();
-
-            // Find block that starts at end_pc
-            self.pc_to_block.get(&end_pc).copied()
-        } else {
-            None
+            panic!("first node should be a body block");
         }
     }
 
-    /// Finds the Exit node in the CFG
-    fn find_exit_node(&mut self) -> NodeIndex {
-        for index in self.cfg.node_indices() {
-            if matches!(self.cfg.node_weight(index), Some(Block::Exit)) {
-                return index;
-            }
-        }
-        // If no Exit node found, create one (shouldn't happen in well-formed CFG)
-        self.cfg.add_node(Block::Exit)
-    }
+    #[test]
+    fn reindex_pcs_returns_mapping() {
+        let instructions = vec![
+            Instruction {
+                pc: 0,
+                op: Opcode::JUMPDEST,
+                imm: None,
+            },
+            Instruction {
+                pc: 1,
+                op: Opcode::PUSH(1),
+                imm: Some("04".into()),
+            },
+            Instruction {
+                pc: 3,
+                op: Opcode::JUMP,
+                imm: None,
+            },
+            Instruction {
+                pc: 4,
+                op: Opcode::JUMPDEST,
+                imm: None,
+            },
+            Instruction {
+                pc: 5,
+                op: Opcode::STOP,
+                imm: None,
+            },
+        ];
 
-    /// Patches PUSH immediate values that target jump destinations after PC reindexing.
-    ///
-    /// This method should be called after `reindex_pcs()` with the returned PC mapping
-    /// to update all jump targets to their new locations.
-    ///
-    /// # Arguments
-    /// * `pc_mapping` - Map of old PC values to new PC values from reindexing
-    ///
-    /// # Returns
-    /// A `Result` indicating success or an `Error` if patching fails.
-    pub fn patch_jump_immediates(
-        &mut self,
-        pc_mapping: &HashMap<usize, usize>,
-    ) -> Result<(), Error> {
-        tracing::debug!("Patching jump immediates after PC reindexing");
+        let sections = vec![sample_runtime_section(instructions.len())];
+        let mut bundle = build_cfg_ir(
+            &instructions,
+            &sections,
+            sample_clean_report(instructions.len()),
+            &sample_bytecode(instructions.len()),
+        )
+        .expect("cfg build succeeds");
 
-        // Find the runtime section to handle runtime-relative jump targets
-        let runtime_section = self
-            .sections
-            .iter()
-            .find(|s| matches!(s.kind, crate::detection::SectionKind::Runtime));
-
-        let (runtime_start, runtime_end) = if let Some(section) = runtime_section {
-            (section.offset, section.offset + section.len)
-        } else {
-            (0, 0) // No runtime section, treat all as absolute
-        };
-
-        if runtime_start > 0 {
-            tracing::debug!(
-                "Runtime section detected at [0x{:x}, 0x{:x}) - will handle runtime-relative jumps",
-                runtime_start,
-                runtime_end
-            );
-        }
-
-        // Now patch the instructions using the correct old->new PC mapping
-        for node_idx in self.cfg.node_indices().collect::<Vec<_>>() {
-            if let Block::Body {
-                instructions,
-                start_pc,
-                ..
-            } = &mut self.cfg[node_idx]
-            {
-                let block_in_runtime =
-                    runtime_start > 0 && *start_pc >= runtime_start && *start_pc < runtime_end;
-
-                for i in 0..instructions.len().saturating_sub(1) {
-                    let push_opcode = instructions[i].op;
-
-                    // Skip if not a PUSH instruction
-                    if !matches!(push_opcode, Opcode::PUSH(_) | Opcode::PUSH0) {
-                        continue;
-                    }
-
-                    // Check if this is a PC-relative jump pattern: PUSH delta, PC, ADD, ...JUMPI
-                    // PC-relative jumps should NOT be patched
-                    let is_pc_relative = if i + 2 < instructions.len() {
-                        matches!(instructions[i + 1].op, Opcode::PC)
-                            && matches!(instructions[i + 2].op, Opcode::ADD)
-                    } else {
-                        false
-                    };
-
-                    if is_pc_relative {
-                        tracing::debug!(
-                            "Skipping PC-relative jump at index {} (PUSH delta={:?})",
-                            i,
-                            instructions[i].imm
-                        );
-                        continue;
-                    }
-
-                    // Look for absolute PUSH followed by JUMP/JUMPI
-                    let next_opcode = instructions[i + 1].op;
-                    if matches!(next_opcode, Opcode::JUMP | Opcode::JUMPI)
-                        && let Some(immediate) = &instructions[i].imm
-                        && let Ok(old_target_imm) = usize::from_str_radix(immediate, 16)
-                    {
-                        // CRITICAL: If this jump is in the runtime section, the immediate value
-                        // is runtime-relative (starting from 0), not absolute. We need to convert
-                        // it to absolute for the pc_mapping lookup, then convert back.
-                        let old_target_absolute = if block_in_runtime {
-                            // Runtime-relative immediate -> absolute PC
-                            old_target_imm + runtime_start
-                        } else {
-                            // Already absolute
-                            old_target_imm
-                        };
-
-                        // Look up the new absolute PC in the mapping
-                        if let Some(&new_target_absolute) = pc_mapping.get(&old_target_absolute) {
-                            // Convert back to runtime-relative if needed
-                            let new_target_imm = if block_in_runtime {
-                                // Absolute PC -> runtime-relative immediate
-                                new_target_absolute.saturating_sub(runtime_start)
-                            } else {
-                                new_target_absolute
-                            };
-
-                            if new_target_imm != old_target_imm {
-                                // Preserve the original PUSH opcode size
-                                let original_push_size = if let Opcode::PUSH(n) = push_opcode {
-                                    n as usize
-                                } else {
-                                    1
-                                };
-
-                                // Verify the new value fits
-                                let bytes_needed = if new_target_imm == 0 {
-                                    1
-                                } else {
-                                    (64 - (new_target_imm as u64).leading_zeros()).div_ceil(8)
-                                        as usize
-                                };
-
-                                if bytes_needed > original_push_size {
-                                    return Err(Error::InvalidImmediate(format!(
-                                        "Patched target 0x{:x} requires {} bytes but PUSH({}) only has {} bytes",
-                                        new_target_imm,
-                                        bytes_needed,
-                                        original_push_size,
-                                        original_push_size
-                                    )));
-                                }
-
-                                // Keep the same PUSH size, just update the immediate
-                                instructions[i].imm = Some(format!(
-                                    "{:0width$x}",
-                                    new_target_imm,
-                                    width = original_push_size * 2
-                                ));
-
-                                tracing::debug!(
-                                    "Patched jump immediate: 0x{:x} -> 0x{:x} (absolute: 0x{:x} -> 0x{:x}, kept PUSH({}))",
-                                    old_target_imm,
-                                    new_target_imm,
-                                    old_target_absolute,
-                                    new_target_absolute,
-                                    original_push_size
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        let mapping = bundle.reindex_pcs().expect("reindex succeeds");
+        assert!(mapping.contains_key(&3));
+        assert!(mapping.values().any(|&new_pc| new_pc != 3));
     }
 }

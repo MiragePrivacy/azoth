@@ -448,8 +448,8 @@ fn count_instructions_in_cfg(cfg_ir: &cfg_ir::CfgIrBundle) -> usize {
         .cfg
         .node_indices()
         .filter_map(|n| {
-            if let cfg_ir::Block::Body { instructions, .. } = &cfg_ir.cfg[n] {
-                Some(instructions.len())
+            if let cfg_ir::Block::Body(body) = &cfg_ir.cfg[n] {
+                Some(body.instructions.len())
             } else {
                 None
             }
@@ -462,8 +462,8 @@ fn extract_instructions_from_cfg(cfg_ir: &cfg_ir::CfgIrBundle) -> Vec<decoder::I
     let mut all_instructions = Vec::new();
 
     for node_idx in cfg_ir.cfg.node_indices() {
-        if let cfg_ir::Block::Body { instructions, .. } = &cfg_ir.cfg[node_idx] {
-            all_instructions.extend(instructions.clone());
+        if let cfg_ir::Block::Body(body) = &cfg_ir.cfg[node_idx] {
+            all_instructions.extend(body.instructions.clone());
         }
     }
 

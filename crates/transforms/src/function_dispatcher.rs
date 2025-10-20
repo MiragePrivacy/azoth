@@ -444,7 +444,8 @@ impl FunctionDispatcher {
         mapping: &HashMap<u32, Vec<u8>>,
     ) -> Result<()> {
         for node_idx in ir.cfg.node_indices().collect::<Vec<_>>() {
-            if let Block::Body { instructions, .. } = &mut ir.cfg[node_idx] {
+            if let Block::Body(body) = &mut ir.cfg[node_idx] {
+                let instructions = &mut body.instructions;
                 let mut i = 0;
                 while i < instructions.len().saturating_sub(1) {
                     // Look for PUSH4 <selector> followed by CALL variants
@@ -569,14 +570,9 @@ impl Transform for FunctionDispatcher {
             .cfg
             .node_indices()
             .filter_map(|node_idx| {
-                if let Block::Body {
-                    instructions,
-                    start_pc,
-                    ..
-                } = &ir.cfg[node_idx]
-                {
-                    if *start_pc >= runtime_start && *start_pc < runtime_end {
-                        return Some((node_idx, *start_pc, instructions.clone()));
+                if let Block::Body(body) = &ir.cfg[node_idx] {
+                    if body.start_pc >= runtime_start && body.start_pc < runtime_end {
+                        return Some((node_idx, body.start_pc, body.instructions.clone()));
                     }
                 }
                 None
@@ -798,9 +794,8 @@ impl Transform for FunctionDispatcher {
             debug!("Total blocks to check: {}", block_boundaries.len());
 
             for (node_idx, block_start, start_pc) in block_boundaries {
-                let block_instructions = if let Block::Body { instructions, .. } = &ir.cfg[node_idx]
-                {
-                    instructions.len()
+                let block_instructions = if let Block::Body(body) = &ir.cfg[node_idx] {
+                    body.instructions.len()
                 } else {
                     continue;
                 };
@@ -831,7 +826,8 @@ impl Transform for FunctionDispatcher {
             // Calculate original dispatcher size
             let mut total_original_size = 0;
             for (block_idx, block_start, _) in &affected_blocks {
-                if let Block::Body { instructions, .. } = &ir.cfg[*block_idx] {
+                if let Block::Body(body) = &ir.cfg[*block_idx] {
+                    let instructions = &body.instructions;
                     let block_dispatcher_start = if start >= *block_start {
                         start - block_start
                     } else {
@@ -873,12 +869,9 @@ impl Transform for FunctionDispatcher {
             debug!("=== Draining Old Dispatcher ===");
             let mut orig_len_first = 0;
             for (idx, (block_idx, block_start, block_pc)) in affected_blocks.iter().enumerate() {
-                if let Block::Body {
-                    instructions,
-                    max_stack,
-                    ..
-                } = &mut ir.cfg[*block_idx]
-                {
+                if let Block::Body(body) = &mut ir.cfg[*block_idx] {
+                    let instructions = &mut body.instructions;
+                    let max_stack = &mut body.max_stack;
                     let orig_len = instructions.len();
                     if idx == 0 {
                         orig_len_first = orig_len;
@@ -933,8 +926,8 @@ impl Transform for FunctionDispatcher {
                         debug!("    Preserving first affected block {} even if empty (needed for dispatcher insertion)", block_idx.index());
                         return false;
                     }
-                    if let Some(Block::Body { instructions, .. }) = ir.cfg.node_weight(*block_idx) {
-                        instructions.is_empty()
+                    if let Some(Block::Body(body)) = ir.cfg.node_weight(*block_idx) {
+                        body.instructions.is_empty()
                     } else {
                         false
                     }
@@ -965,7 +958,8 @@ impl Transform for FunctionDispatcher {
             // Insert the disguised dispatcher into the first affected block
             debug!("=== Inserting New Dispatcher ===");
             let (first_block_idx, first_block_start, first_block_pc) = affected_blocks[0];
-            if let Block::Body { instructions, .. } = &mut ir.cfg[first_block_idx] {
+            if let Block::Body(body) = &mut ir.cfg[first_block_idx] {
+                let instructions = &mut body.instructions;
                 let insertion_point = start.saturating_sub(first_block_start);
                 debug!(
                     "  Inserting into block {} (PC 0x{:x}, all_instrs offset {})",
@@ -1001,7 +995,8 @@ impl Transform for FunctionDispatcher {
             // Debug: Count PUSH+JUMP/JUMPI pairs in dispatcher
             let mut push_jump_count = 0;
             if let Some((first_block_idx, _, _)) = affected_blocks.first() {
-                if let Block::Body { instructions, .. } = &ir.cfg[*first_block_idx] {
+                if let Block::Body(body) = &ir.cfg[*first_block_idx] {
+                    let instructions = &body.instructions;
                     let start_idx = start.saturating_sub(first_block_start);
                     for i in start_idx..instructions.len().saturating_sub(1) {
                         if matches!(instructions[i].op, Opcode::PUSH(_))
@@ -1030,13 +1025,8 @@ impl Transform for FunctionDispatcher {
                 .cfg
                 .node_indices()
                 .filter_map(|idx| {
-                    if let Block::Body {
-                        start_pc,
-                        instructions,
-                        ..
-                    } = &ir.cfg[idx]
-                    {
-                        Some((idx.index(), *start_pc, instructions.len()))
+                    if let Block::Body(body) = &ir.cfg[idx] {
+                        Some((idx.index(), body.start_pc, body.instructions.len()))
                     } else {
                         None
                     }
@@ -1063,13 +1053,8 @@ impl Transform for FunctionDispatcher {
                 .cfg
                 .node_indices()
                 .filter_map(|idx| {
-                    if let Block::Body {
-                        start_pc,
-                        instructions,
-                        ..
-                    } = &ir.cfg[idx]
-                    {
-                        Some((idx.index(), *start_pc, instructions.len()))
+                    if let Block::Body(body) = &ir.cfg[idx] {
+                        Some((idx.index(), body.start_pc, body.instructions.len()))
                     } else {
                         None
                     }
@@ -1098,7 +1083,8 @@ impl Transform for FunctionDispatcher {
 
             // Debug: Verify PC-relative jumps land on JUMPDEST
             if let Some((first_block_idx, _, _)) = affected_blocks.first() {
-                if let Block::Body { instructions, .. } = &ir.cfg[*first_block_idx] {
+                if let Block::Body(body) = &ir.cfg[*first_block_idx] {
+                    let instructions = &body.instructions;
                     let start_idx = start.saturating_sub(first_block_start);
                     // Find first comparison block and verify PC-relative jump
                     for i in start_idx..instructions.len().saturating_sub(8) {
