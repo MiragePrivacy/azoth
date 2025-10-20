@@ -403,7 +403,7 @@ fn detect_padding(instructions: &[Instruction], aux_offset: usize) -> Option<(us
     let last_terminal = instructions
         .iter()
         .rev()
-        .skip_while(|instruction| instruction.op == Opcode::STOP)
+        .skip_while(|instruction| instruction.op == Opcode::STOP || instruction.pc >= aux_offset)
         .find(|instruction| is_terminal_opcode(instruction.op));
 
     last_terminal.and_then(|instruction| {
