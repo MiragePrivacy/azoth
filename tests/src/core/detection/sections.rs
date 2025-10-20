@@ -3,26 +3,15 @@ use azoth_core::{
     detection::{locate_sections, Section, SectionKind},
 };
 
+const STORAGE_BYTECODE: &str = "6080604052348015600e575f5ffd5b50603e80601a5f395ff3fe60806040525f5ffdfea2646970667358221220e8c66682f723c073c8c5ec2c0de0795c9b8b64e310482b13bc56a554d057842b64736f6c634300081e0033";
+
 #[tokio::test]
 async fn test_full_deploy_payload_properties() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .init();
 
-    let bytecode = concat!(
-        "0x",
-        "600a",             // PUSH1 0x0a (runtime len)
-        "600e",             // PUSH1 0x0e (runtime offset)
-        "6000",             // PUSH1 0x00
-        "39",               // CODECOPY
-        "600a",             // PUSH1 0x0a (runtime len)
-        "f3",               // RETURN
-        "deadbeef",         // ConstructorArgs (4 bytes)
-        "600101",           // Runtime: PUSH1 0x01, STOP
-        "a165627a7a723058"  // Auxdata (simplified CBOR: "bzzr0X")
-    );
-
-    let (instructions, info, _, bytes) = decode_bytecode(bytecode, false).await.unwrap();
+    let (instructions, info, _, bytes) = decode_bytecode(STORAGE_BYTECODE, false).await.unwrap();
 
     tracing::debug!("Full deploy bytecode: {:?}", bytes);
     tracing::debug!("Instructions: {:?}", instructions);
