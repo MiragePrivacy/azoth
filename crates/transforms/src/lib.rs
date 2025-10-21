@@ -8,7 +8,6 @@ pub mod shuffle;
 use azoth_core::cfg_ir::CfgIrBundle;
 use azoth_core::Opcode;
 use rand::rngs::StdRng;
-use serde::{Deserialize, Serialize};
 
 use azoth_analysis::Error as MetricsError;
 use thiserror::Error;
@@ -48,30 +47,6 @@ pub trait Transform: Send + Sync {
     fn name(&self) -> &'static str;
     /// Applies the transform to the CFG IR, returning whether changes were made.
     fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool>;
-}
-
-/// Configuration for transform passes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PassConfig {
-    /// Minimum quality threshold for accepting transforms
-    pub accept_threshold: f64,
-    /// Apply transforms aggressively without quality gates
-    pub aggressive: bool,
-    /// Maximum allowable bytecode size increase (as ratio)
-    pub max_size_delta: f32,
-    /// Maximum ratio of blocks to apply opaque predicates to
-    pub max_opaque_ratio: f32,
-}
-
-impl Default for PassConfig {
-    fn default() -> Self {
-        Self {
-            accept_threshold: 0.0,
-            aggressive: true,
-            max_size_delta: 0.1,   // 10% size increase limit
-            max_opaque_ratio: 0.2, // Apply to 20% of blocks max
-        }
-    }
 }
 
 /// Parses a PUSH opcode string and returns the corresponding Opcode enum and immediate size.

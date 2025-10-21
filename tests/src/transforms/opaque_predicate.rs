@@ -2,7 +2,7 @@ use azoth_analysis::collect_metrics;
 use azoth_core::process_bytecode_to_cfg;
 use azoth_core::seed::Seed;
 use azoth_transform::opaque_predicate::OpaquePredicate;
-use azoth_transform::{PassConfig, Transform};
+use azoth_transform::Transform;
 
 #[tokio::test]
 async fn test_opaque_predicate_adds_blocks() {
@@ -16,11 +16,7 @@ async fn test_opaque_predicate_adds_blocks() {
     let seed = Seed::from_hex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
         .unwrap();
     let mut rng = seed.create_deterministic_rng();
-    let config = PassConfig {
-        max_opaque_ratio: 0.5, // Ensure max_predicates > 0
-        ..Default::default()
-    };
-    let transform = OpaquePredicate::new(config);
+    let transform = OpaquePredicate::new();
     let changed = transform.apply(&mut cfg_ir, &mut rng).unwrap();
     assert!(changed, "OpaquePredicate should insert predicates");
     let after = collect_metrics(&cfg_ir, &cfg_ir.clean_report).unwrap();

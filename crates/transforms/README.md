@@ -206,28 +206,15 @@ pub trait Transform: Send + Sync {
 The pass.rs module provides a simple sequential pass runner:
 
 ```rust
-use azoth_transform::{run, PassConfig};
+use azoth_transform::pass::{DefaultPass, Pass};
 
 let transforms: Vec<Box<dyn Transform>> = vec![
     Box::new(Shuffle),
-    Box::new(OpaquePredicate::new(PassConfig::default())),
-    Box::new(JumpAddressTransformer::new(PassConfig::default())),
+    Box::new(OpaquePredicate::new()),
+    Box::new(JumpAddressTransformer::new()),
 ];
 
-run(&mut cfg_ir, &transforms, &PassConfig::default(), seed).await?;
-```
-
-### Configuration
-
-Basic configuration through PassConfig:
-
-```rust
-pub struct PassConfig {
-    pub accept_threshold: f64,      // Minimum quality threshold
-    pub aggressive: bool,           // Skip quality gates
-    pub max_size_delta: f32,        // Max size increase ratio
-    pub max_opaque_ratio: f32,      // Max blocks to apply opaque predicates
-}
+DefaultPass.run(&mut cfg_ir, &transforms, &seed)?;
 ```
 
 The transforms operate on CfgIrBundle structures and use metrics from azoth-analysis to evaluate effectiveness.

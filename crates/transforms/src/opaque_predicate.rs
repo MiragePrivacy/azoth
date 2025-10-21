@@ -1,5 +1,4 @@
-use crate::{Error, Result};
-use crate::{PassConfig, Transform};
+use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, BlockBody, BlockControl, CfgIrBundle, EdgeType};
 use azoth_core::decoder::Instruction;
 use azoth_core::Opcode;
@@ -11,13 +10,13 @@ use sha3::{Digest, Keccak256};
 use tracing::debug;
 
 /// Injects opaque predicates to increase control flow complexity and potency.
-pub struct OpaquePredicate {
-    config: PassConfig,
-}
+pub struct OpaquePredicate;
 
 impl OpaquePredicate {
-    pub fn new(config: PassConfig) -> Self {
-        Self { config }
+    const MAX_RATIO: f32 = 0.2;
+
+    pub fn new() -> Self {
+        Self
     }
 
     fn generate_constant(&self, seed: u64) -> [u8; 32] {
@@ -40,7 +39,6 @@ impl Transform for OpaquePredicate {
         debug!("=== OpaquePredicate Transform Start ===");
 
         let mut changed = false;
-        let max_opaque = self.config.max_opaque_ratio;
         let mut eligible_blocks: Vec<NodeIndex> = ir
             .cfg
             .node_indices()
@@ -60,7 +58,7 @@ impl Transform for OpaquePredicate {
             eligible_blocks.len()
         );
 
-        let max_predicates = ((eligible_blocks.len() as f32) * max_opaque).ceil() as usize;
+        let max_predicates = ((eligible_blocks.len() as f32) * Self::MAX_RATIO).ceil() as usize;
         if max_predicates == 0 || eligible_blocks.is_empty() {
             debug!("No eligible blocks - skipping");
             return Ok(false);

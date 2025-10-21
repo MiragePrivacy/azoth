@@ -1,7 +1,7 @@
 use azoth_core::process_bytecode_to_cfg;
 use azoth_core::seed::Seed;
 use azoth_transform::jump_address_transformer::JumpAddressTransformer;
-use azoth_transform::{PassConfig, Transform};
+use azoth_transform::Transform;
 
 #[tokio::test]
 async fn test_jump_address_transformer() {
@@ -25,12 +25,7 @@ async fn test_jump_address_transformer() {
         .unwrap();
     let mut rng = seed.create_deterministic_rng();
 
-    // Use a config that allows the transformation
-    let config = PassConfig {
-        max_size_delta: 1.0, // Allow all jumps to be transformed
-        ..Default::default()
-    };
-    let transform = JumpAddressTransformer::new(config);
+    let transform = JumpAddressTransformer::new();
 
     let changed = transform.apply(&mut cfg_ir, &mut rng).unwrap();
     assert!(changed, "JumpAddressTransformer should modify bytecode");
@@ -64,8 +59,7 @@ fn test_split_jump_target() {
     let seed = Seed::from_hex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
         .unwrap();
     let mut rng = seed.create_deterministic_rng();
-    let config = PassConfig::default();
-    let transformer = JumpAddressTransformer::new(config);
+    let transformer = JumpAddressTransformer::new();
 
     let target = 0x100;
     let (part1, part2) = transformer.split_jump_target(target, &mut rng);

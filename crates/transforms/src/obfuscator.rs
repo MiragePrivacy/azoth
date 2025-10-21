@@ -1,5 +1,5 @@
 use crate::function_dispatcher::FunctionDispatcher;
-use crate::{PassConfig, Transform};
+use crate::Transform;
 use azoth_core::seed::Seed;
 use azoth_core::{cfg_ir, decoder, detection, encoder, process_bytecode_to_cfg, validator, Opcode};
 use serde::{Deserialize, Serialize};
@@ -12,8 +12,6 @@ pub struct ObfuscationConfig {
     pub seed: Seed,
     /// List of transforms to apply
     pub transforms: Vec<Box<dyn Transform>>,
-    /// Pass configuration for transform behavior
-    pub pass_config: PassConfig,
     /// Whether to preserve unknown opcodes
     pub preserve_unknown_opcodes: bool,
 }
@@ -24,7 +22,6 @@ impl ObfuscationConfig {
         Self {
             seed,
             transforms: Vec::new(),
-            pass_config: PassConfig::default(),
             preserve_unknown_opcodes: true,
         }
     }
@@ -35,7 +32,6 @@ impl Default for ObfuscationConfig {
         Self {
             seed: Seed::generate(),
             transforms: Vec::new(),
-            pass_config: PassConfig::default(),
             preserve_unknown_opcodes: true,
         }
     }
@@ -48,7 +44,6 @@ impl std::fmt::Debug for ObfuscationConfig {
                 "transforms",
                 &format!("{} transforms", self.transforms.len()),
             )
-            .field("pass_config", &self.pass_config)
             .field("preserve_unknown_opcodes", &self.preserve_unknown_opcodes)
             .finish()
     }
@@ -170,7 +165,6 @@ pub async fn obfuscate_bytecode(
             dispatcher.selectors.len()
         );
         all_transforms.push(Box::new(FunctionDispatcher::with_dispatcher_info(
-            config.pass_config.clone(),
             dispatcher,
         )));
     } else {
@@ -380,13 +374,7 @@ pub async fn obfuscate_bytecode(
         0.0
     };
 
-    let size_limit_exceeded = if config.pass_config.max_size_delta > 0.0 {
-        let max_allowed_size =
-            (original_size as f32 * (1.0 + config.pass_config.max_size_delta)).ceil() as usize;
-        obfuscated_size > max_allowed_size
-    } else {
-        false
-    };
+    let size_limit_exceeded = false;
 
     // Step 11: Build result
     tracing::debug!("=== Building ObfuscationResult ===");
