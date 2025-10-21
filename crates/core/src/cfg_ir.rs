@@ -12,6 +12,10 @@ use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+type PcRemap = HashMap<usize, usize>;
+type RuntimeBounds = Option<(usize, usize)>;
+type ReindexOutcome = (PcRemap, RuntimeBounds);
+
 /// Operations recorded in the CFG trace.
 #[derive(Debug, Clone)]
 pub enum OperationKind {
@@ -391,14 +395,13 @@ impl CfgIrBundle {
     }
 
     /// Re-evaluates the block’s control descriptor and updates the cached metadata in-place.
-    fn assign_block_control(&mut self, node: NodeIndex, runtime_bounds: Option<(usize, usize)>) {
+    fn assign_block_control(&mut self, node: NodeIndex, runtime_bounds: RuntimeBounds) {
         let next = self.find_next_body(node);
-        if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
-            if let Some(control) =
+        if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node)
+            && let Some(control) =
                 analyse_block_control(body, next, runtime_bounds, &self.pc_to_block)
-            {
-                body.control = control;
-            }
+        {
+            body.control = control;
         }
     }
 
@@ -425,9 +428,7 @@ impl CfgIrBundle {
     /// writes symbolic jump immediates so a subsequent `patch_jump_immediates` call becomes a no-op
     /// for blocks using the new API.
     /// Renumbers program counters and returns a mapping from old PCs to their new positions.
-    pub fn reindex_pcs(
-        &mut self,
-    ) -> Result<(HashMap<usize, usize>, Option<(usize, usize)>), Error> {
+    pub fn reindex_pcs(&mut self) -> Result<ReindexOutcome, Error> {
         let mut mapping = HashMap::new();
         let old_runtime_bounds = self.runtime_bounds;
         let mut blocks: Vec<_> = self
@@ -596,16 +597,16 @@ impl CfgIrBundle {
         );
 
         for pattern in patterns {
-            if skip_symbolic_terminal {
-                if let Some(ref terminal) = terminal_pattern {
-                    if jump_patterns_match(&pattern, terminal) {
-                        tracing::debug!(
-                            start_pc = format_args!("0x{:x}", body.start_pc),
-                            "patch_legacy_immediates: skipping terminal symbolic pattern",
-                        );
-                        continue;
-                    }
-                }
+            if skip_symbolic_terminal
+                && terminal_pattern
+                    .as_ref()
+                    .is_some_and(|terminal| jump_patterns_match(&pattern, terminal))
+            {
+                tracing::debug!(
+                    start_pc = format_args!("0x{:x}", body.start_pc),
+                    "patch_legacy_immediates: skipping terminal symbolic pattern",
+                );
+                continue;
             }
 
             let Some(old_value) = pattern_immediate(&body.instructions, &pattern) else {
@@ -630,16 +631,16 @@ impl CfgIrBundle {
             );
 
             let mut new_pc_abs = mapping.get(&old_pc).copied();
-            if new_pc_abs.is_none() {
-                if let Some(val) = mapping.get(&old_value).copied() {
-                    tracing::debug!(
-                        start_pc = format_args!("0x{:x}", body.start_pc),
-                        pattern_old_pc = format_args!("0x{:x}", old_pc),
-                        pattern_old_value = format_args!("0x{:x}", old_value),
-                        "patch_legacy_immediates: mapped using raw value",
-                    );
-                    new_pc_abs = Some(val);
-                }
+            if new_pc_abs.is_none()
+                && let Some(val) = mapping.get(&old_value).copied()
+            {
+                tracing::debug!(
+                    start_pc = format_args!("0x{:x}", body.start_pc),
+                    pattern_old_pc = format_args!("0x{:x}", old_pc),
+                    pattern_old_value = format_args!("0x{:x}", old_value),
+                    "patch_legacy_immediates: mapped using raw value",
+                );
+                new_pc_abs = Some(val);
             }
 
             if let Some(mapped_pc) = new_pc_abs {
@@ -655,22 +656,22 @@ impl CfgIrBundle {
                 }
             }
 
-            if new_pc_abs.is_none() {
-                if let Some(fallback) = fallback_immediate {
-                    let absolute = if in_runtime {
-                        new_runtime_start.unwrap_or(0).saturating_add(fallback)
-                    } else {
-                        fallback
-                    };
-                    tracing::debug!(
-                        start_pc = format_args!("0x{:x}", body.start_pc),
-                        pattern_old_pc = format_args!("0x{:x}", old_pc),
-                        fallback_value = format_args!("0x{:x}", fallback),
-                        absolute = format_args!("0x{:x}", absolute),
-                        "patch_legacy_immediates: using control fallback",
-                    );
-                    new_pc_abs = Some(absolute);
-                }
+            if new_pc_abs.is_none()
+                && let Some(fallback) = fallback_immediate
+            {
+                let absolute = if in_runtime {
+                    new_runtime_start.unwrap_or(0).saturating_add(fallback)
+                } else {
+                    fallback
+                };
+                tracing::debug!(
+                    start_pc = format_args!("0x{:x}", body.start_pc),
+                    pattern_old_pc = format_args!("0x{:x}", old_pc),
+                    fallback_value = format_args!("0x{:x}", fallback),
+                    absolute = format_args!("0x{:x}", absolute),
+                    "patch_legacy_immediates: using control fallback",
+                );
+                new_pc_abs = Some(absolute);
             }
 
             let Some(new_pc_abs) = new_pc_abs else {
@@ -737,7 +738,7 @@ impl CfgIrBundle {
         let next = self.find_next_body(node_idx);
         let control = if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node_idx) {
             let control = analyse_block_control(body, next, runtime_bounds, &self.pc_to_block)
-                .unwrap_or_else(|| BlockControl::Unknown);
+                .unwrap_or(BlockControl::Unknown);
             body.control = control.clone();
             control
         } else {
@@ -828,25 +829,25 @@ impl CfgIrBundle {
             return Ok(());
         };
 
-        if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
-            if let Some(pattern) = detect_jump_pattern(&body.instructions) {
-                match pattern {
-                    JumpPattern::Direct { push_idx } => {
-                        apply_immediate(&mut body.instructions[push_idx], value)?;
-                    }
-                    JumpPattern::SplitAdd {
+        if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node)
+            && let Some(pattern) = detect_jump_pattern(&body.instructions)
+        {
+            match pattern {
+                JumpPattern::Direct { push_idx } => {
+                    apply_immediate(&mut body.instructions[push_idx], value)?;
+                }
+                JumpPattern::SplitAdd {
+                    push_a_idx,
+                    push_b_idx,
+                } => {
+                    apply_split_add_immediate(
+                        &mut body.instructions,
                         push_a_idx,
                         push_b_idx,
-                    } => {
-                        apply_split_add_immediate(
-                            &mut body.instructions,
-                            push_a_idx,
-                            push_b_idx,
-                            value,
-                        )?;
-                    }
-                    JumpPattern::PcRelative { .. } => {}
+                        value,
+                    )?;
                 }
+                JumpPattern::PcRelative { .. } => {}
             }
         }
 
@@ -887,7 +888,7 @@ impl CfgIrBundle {
             .find(|idx| {
                 self.cfg
                     .node_weight(*idx)
-                    .map_or(false, |block| matches!(block, Block::Exit))
+                    .is_some_and(|block| matches!(block, Block::Exit))
             })
             .unwrap_or_else(|| self.cfg.add_node(Block::Exit))
     }
@@ -1253,7 +1254,7 @@ fn absolute_target_from_value(
     let target_node = node_by_pc.get(&absolute_pc).copied();
     target_node
         .map(|node| JumpTarget::Block { node, encoding })
-        .or_else(|| {
+        .or({
             Some(JumpTarget::Raw {
                 value: immediate,
                 encoding,

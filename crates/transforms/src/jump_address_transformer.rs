@@ -13,6 +13,7 @@ use tracing::debug;
 /// Instead of: PUSH1 0x42 JUMPI
 /// Produces:   PUSH1 0x20 PUSH1 0x22 ADD JUMPI
 /// Where 0x20 + 0x22 = 0x42
+#[derive(Default)]
 pub struct JumpAddressTransformer;
 
 impl JumpAddressTransformer {

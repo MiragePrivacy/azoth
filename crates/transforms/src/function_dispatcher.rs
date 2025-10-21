@@ -18,6 +18,7 @@ use tracing::debug;
 /// layout is preserved – we only patch the immediate values – which keeps the
 /// original control-flow graph intact and avoids introducing brittle jump
 /// rewriting.
+#[derive(Default)]
 pub struct FunctionDispatcher {
     cached_dispatcher: Option<DispatcherInfo>,
 }
@@ -115,7 +116,7 @@ impl FunctionDispatcher {
         for counter in 0..MAX_ATTEMPTS {
             let mut hasher = Keccak256::new();
             hasher.update(secret);
-            hasher.update(&selector_bytes);
+            hasher.update(selector_bytes);
             hasher.update(counter.to_be_bytes());
             let hash = hasher.finalize();
 

@@ -10,6 +10,7 @@ use sha3::{Digest, Keccak256};
 use tracing::debug;
 
 /// Injects opaque predicates to increase control flow complexity and potency.
+#[derive(Default)]
 pub struct OpaquePredicate;
 
 impl OpaquePredicate {
