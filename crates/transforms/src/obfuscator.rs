@@ -267,13 +267,13 @@ pub async fn obfuscate_bytecode(
         tracing::debug!("  {}", log_entry);
     }
 
-    // Step 5: Reindex PCs to start from 0 (needed when CFG was built from runtime-only instructions)
+    // Step 5: Reindex PCs
     tracing::debug!("  Reindexing PCs to normalize to 0-based addressing");
-    let pc_mapping = cfg_ir.reindex_pcs()?;
+    let (pc_mapping, old_runtime_bounds) = cfg_ir.reindex_pcs()?;
     tracing::debug!("  PC reindexing complete: {} mappings", pc_mapping.len());
 
     // Patch jump immediates using the PC mapping
-    cfg_ir.patch_jump_immediates(&pc_mapping)?;
+    cfg_ir.patch_jump_immediates(&pc_mapping, old_runtime_bounds)?;
     tracing::debug!("  Patched jump immediates after PC reindexing");
 
     // Step 6: Extract and encode instructions
