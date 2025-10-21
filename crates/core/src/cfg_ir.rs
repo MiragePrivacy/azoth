@@ -1,17 +1,4 @@
-//! Control Flow Graph (CFG) construction and mutation utilities for Azoth.
-//!
-//! The original implementation blended low-level bytecode editing with graph updates, forcing
-//! transforms to juggle program counters manually. This rewrite keeps the CFG as the source of
-//! truth: blocks know how they connect, jump edges carry their coordinate system, and dedicated
-//! helpers turn symbolic targets back into concrete immediates when bytecode gets re-emitted.
-//!
-//! The guiding principles are:
-//! - **Block-first view.** Transforms describe control flow in terms of blocks. The module is
-//!   responsible for turning those relationships into PUSH/JUMP sequences.
-//! - **Single source of PC truth.** Reindexing, jump patching, and edge rebuilding all flow through
-//!   a single set of utilities, removing duplicated offset math.
-//! - **Graceful fallback.** When legacy patterns that we cannot symbolically track appear, we retain
-//!   their raw immediates so existing transforms and analyses continue to work.
+//! Control Flow Graph (CFG) construction and mutation
 
 use crate::Opcode;
 use crate::decoder::Instruction;
@@ -438,8 +425,11 @@ impl CfgIrBundle {
     /// writes symbolic jump immediates so a subsequent `patch_jump_immediates` call becomes a no-op
     /// for blocks using the new API.
     /// Renumbers program counters and returns a mapping from old PCs to their new positions.
-    pub fn reindex_pcs(&mut self) -> Result<HashMap<usize, usize>, Error> {
+    pub fn reindex_pcs(
+        &mut self,
+    ) -> Result<(HashMap<usize, usize>, Option<(usize, usize)>), Error> {
         let mut mapping = HashMap::new();
+        let old_runtime_bounds = self.runtime_bounds;
         let mut blocks: Vec<_> = self
             .cfg
             .node_indices()
@@ -454,10 +444,14 @@ impl CfgIrBundle {
 
         let mut next_pc = 0usize;
         let mut new_pc_to_block = HashMap::new();
+        let runtime_bounds = self.runtime_bounds;
+        let mut runtime_first_new_pc: Option<usize> = None;
+        let mut runtime_last_new_pc: Option<usize> = None;
 
         for (idx, _) in blocks {
             if let Some(Block::Body(body)) = self.cfg.node_weight_mut(idx) {
                 let old_block_pc = body.start_pc;
+                let in_runtime = body.is_runtime(runtime_bounds);
                 body.start_pc = next_pc;
                 new_pc_to_block.insert(body.start_pc, idx);
 
@@ -474,6 +468,11 @@ impl CfgIrBundle {
                     next_pc += instr.byte_size();
                 }
 
+                if in_runtime {
+                    runtime_first_new_pc.get_or_insert(body.start_pc);
+                    runtime_last_new_pc = Some(next_pc);
+                }
+
                 tracing::debug!(
                     "Reindexed block {}: old start_pc=0x{:x} -> new start_pc=0x{:x}",
                     idx.index(),
@@ -484,10 +483,35 @@ impl CfgIrBundle {
         }
 
         self.pc_to_block = new_pc_to_block;
+
+        if let Some((old_start, old_end)) = runtime_bounds {
+            match (runtime_first_new_pc, runtime_last_new_pc) {
+                (Some(start), Some(end)) => {
+                    debug_assert!(end >= start);
+                    if old_start != start || old_end != end {
+                        tracing::debug!(
+                            "Remapped runtime bounds: 0x{:x}-0x{:x} -> 0x{:x}-0x{:x}",
+                            old_start,
+                            old_end,
+                            start,
+                            end
+                        );
+                    }
+                    self.runtime_bounds = Some((start, end));
+                }
+                _ => {
+                    tracing::warn!(
+                        "runtime bounds unavailable after reindex; falling back to absolute encoding"
+                    );
+                    self.runtime_bounds = None;
+                }
+            }
+        }
+
         self.write_symbolic_immediates()?;
         self.record_operation(OperationKind::ReindexPcs, Some(mapping.clone()));
 
-        Ok(mapping)
+        Ok((mapping, old_runtime_bounds))
     }
 
     /// Rewrite jump immediates using the supplied PC mapping. This keeps the method signature used
@@ -496,15 +520,203 @@ impl CfgIrBundle {
     pub fn patch_jump_immediates(
         &mut self,
         pc_mapping: &HashMap<usize, usize>,
+        old_runtime_bounds: Option<(usize, usize)>,
     ) -> Result<(), Error> {
         let runtime_bounds = self.runtime_bounds;
+        let old_runtime_start = old_runtime_bounds.map(|(start, _)| start);
         let nodes: Vec<_> = self.cfg.node_indices().collect();
         for node in nodes {
-            if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
-                patch_legacy_immediates(body, runtime_bounds, pc_mapping)?;
-            }
+            let has_symbolic_target = matches!(
+                self.block_control(node),
+                Some(BlockControl::Jump {
+                    target: JumpTarget::Block { .. },
+                }) | Some(BlockControl::Branch {
+                    true_target: JumpTarget::Block { .. },
+                    ..
+                })
+            );
+
+            tracing::debug!(
+                node = node.index(),
+                has_symbolic_target,
+                "patch_jump_immediates: evaluating block",
+            );
+
+            self.patch_legacy_immediates_for_block(
+                node,
+                runtime_bounds,
+                old_runtime_start,
+                pc_mapping,
+                has_symbolic_target,
+            )?;
         }
         self.record_operation(OperationKind::PatchJumpImmediates, Some(pc_mapping.clone()));
+        Ok(())
+    }
+
+    fn patch_legacy_immediates_for_block(
+        &mut self,
+        node: NodeIndex,
+        runtime_bounds: Option<(usize, usize)>,
+        old_runtime_start: Option<usize>,
+        mapping: &HashMap<usize, usize>,
+        skip_symbolic_terminal: bool,
+    ) -> Result<(), Error> {
+        let control = self.block_control(node);
+        let fallback_immediate = control.as_ref().and_then(|ctrl| match ctrl {
+            BlockControl::Jump { target } => self.resolve_target_value(target),
+            BlockControl::Branch { true_target, .. } => self.resolve_target_value(true_target),
+            _ => None,
+        });
+
+        let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) else {
+            return Ok(());
+        };
+
+        let in_runtime = body.is_runtime(runtime_bounds);
+        let new_runtime_start = runtime_bounds.map(|(start, _)| start);
+        let patterns = find_jump_patterns(&body.instructions);
+        if patterns.is_empty() {
+            return Ok(());
+        }
+
+        let terminal_pattern = if skip_symbolic_terminal {
+            detect_jump_pattern(&body.instructions)
+        } else {
+            None
+        };
+
+        tracing::debug!(
+            node = node.index(),
+            start_pc = format_args!("0x{:x}", body.start_pc),
+            in_runtime,
+            pattern_count = patterns.len(),
+            skip_symbolic_terminal,
+            "patch_legacy_immediates: visiting block",
+        );
+
+        for pattern in patterns {
+            if skip_symbolic_terminal {
+                if let Some(ref terminal) = terminal_pattern {
+                    if jump_patterns_match(&pattern, terminal) {
+                        tracing::debug!(
+                            start_pc = format_args!("0x{:x}", body.start_pc),
+                            "patch_legacy_immediates: skipping terminal symbolic pattern",
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            let Some(old_value) = pattern_immediate(&body.instructions, &pattern) else {
+                tracing::debug!(
+                    start_pc = format_args!("0x{:x}", body.start_pc),
+                    "patch_legacy_immediates: unable to parse immediate, skipping pattern",
+                );
+                continue;
+            };
+
+            let old_pc = if in_runtime {
+                old_runtime_start.unwrap_or(0).saturating_add(old_value)
+            } else {
+                old_value
+            };
+
+            tracing::debug!(
+                start_pc = format_args!("0x{:x}", body.start_pc),
+                pattern_old_value = format_args!("0x{:x}", old_value),
+                pattern_old_pc = format_args!("0x{:x}", old_pc),
+                "patch_legacy_immediates: resolved old PC",
+            );
+
+            let mut new_pc_abs = mapping.get(&old_pc).copied();
+            if new_pc_abs.is_none() {
+                if let Some(val) = mapping.get(&old_value).copied() {
+                    tracing::debug!(
+                        start_pc = format_args!("0x{:x}", body.start_pc),
+                        pattern_old_pc = format_args!("0x{:x}", old_pc),
+                        pattern_old_value = format_args!("0x{:x}", old_value),
+                        "patch_legacy_immediates: mapped using raw value",
+                    );
+                    new_pc_abs = Some(val);
+                }
+            }
+
+            if let Some(mapped_pc) = new_pc_abs {
+                let has_block = self.pc_to_block.contains_key(&mapped_pc);
+                if !has_block {
+                    tracing::debug!(
+                        start_pc = format_args!("0x{:x}", body.start_pc),
+                        pattern_old_pc = format_args!("0x{:x}", old_pc),
+                        mapped_pc = format_args!("0x{:x}", mapped_pc),
+                        "patch_legacy_immediates: mapped PC has no block; falling back",
+                    );
+                    new_pc_abs = None;
+                }
+            }
+
+            if new_pc_abs.is_none() {
+                if let Some(fallback) = fallback_immediate {
+                    let absolute = if in_runtime {
+                        new_runtime_start.unwrap_or(0).saturating_add(fallback)
+                    } else {
+                        fallback
+                    };
+                    tracing::debug!(
+                        start_pc = format_args!("0x{:x}", body.start_pc),
+                        pattern_old_pc = format_args!("0x{:x}", old_pc),
+                        fallback_value = format_args!("0x{:x}", fallback),
+                        absolute = format_args!("0x{:x}", absolute),
+                        "patch_legacy_immediates: using control fallback",
+                    );
+                    new_pc_abs = Some(absolute);
+                }
+            }
+
+            let Some(new_pc_abs) = new_pc_abs else {
+                tracing::debug!(
+                    start_pc = format_args!("0x{:x}", body.start_pc),
+                    pattern_old_pc = format_args!("0x{:x}", old_pc),
+                    "patch_legacy_immediates: no mapping or fallback; skipping",
+                );
+                continue;
+            };
+
+            let value_to_store = if in_runtime {
+                new_runtime_start
+                    .map(|start| new_pc_abs.saturating_sub(start))
+                    .unwrap_or(new_pc_abs)
+            } else {
+                new_pc_abs
+            };
+
+            tracing::debug!(
+                start_pc = format_args!("0x{:x}", body.start_pc),
+                pattern_old_pc = format_args!("0x{:x}", old_pc),
+                new_pc = format_args!("0x{:x}", new_pc_abs),
+                value_to_store = format_args!("0x{:x}", value_to_store),
+                "patch_legacy_immediates: rewriting pattern",
+            );
+
+            match pattern {
+                JumpPattern::Direct { push_idx } => {
+                    apply_immediate(&mut body.instructions[push_idx], value_to_store)?;
+                }
+                JumpPattern::SplitAdd {
+                    push_a_idx,
+                    push_b_idx,
+                } => {
+                    apply_split_add_immediate(
+                        &mut body.instructions,
+                        push_a_idx,
+                        push_b_idx,
+                        value_to_store,
+                    )?;
+                }
+                JumpPattern::PcRelative { .. } => {}
+            }
+        }
+
         Ok(())
     }
 
@@ -617,9 +829,24 @@ impl CfgIrBundle {
         };
 
         if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
-            if let Some(JumpPattern::Direct { push_idx }) = detect_jump_pattern(&body.instructions)
-            {
-                apply_immediate(&mut body.instructions[push_idx], value)?;
+            if let Some(pattern) = detect_jump_pattern(&body.instructions) {
+                match pattern {
+                    JumpPattern::Direct { push_idx } => {
+                        apply_immediate(&mut body.instructions[push_idx], value)?;
+                    }
+                    JumpPattern::SplitAdd {
+                        push_a_idx,
+                        push_b_idx,
+                    } => {
+                        apply_split_add_immediate(
+                            &mut body.instructions,
+                            push_a_idx,
+                            push_b_idx,
+                            value,
+                        )?;
+                    }
+                    JumpPattern::PcRelative { .. } => {}
+                }
             }
         }
 
@@ -981,27 +1208,16 @@ fn analyse_jump_target(
         JumpPattern::Direct { push_idx } => {
             let push = &body.instructions[push_idx];
             let immediate = parse_immediate(push)?;
-            let encoding = if body.is_runtime(runtime_bounds) {
-                JumpEncoding::RuntimeRelative
-            } else {
-                JumpEncoding::Absolute
-            };
-            let absolute_pc = match encoding {
-                JumpEncoding::RuntimeRelative => {
-                    runtime_bounds.map(|(start, _)| start + immediate)?
-                }
-                JumpEncoding::Absolute => immediate,
-                JumpEncoding::PcRelative => unreachable!(),
-            };
-            let target_node = node_by_pc.get(&absolute_pc).copied();
-            target_node
-                .map(|node| JumpTarget::Block { node, encoding })
-                .or_else(|| {
-                    Some(JumpTarget::Raw {
-                        value: immediate,
-                        encoding,
-                    })
-                })
+            absolute_target_from_value(body, runtime_bounds, node_by_pc, immediate)
+        }
+        JumpPattern::SplitAdd {
+            push_a_idx,
+            push_b_idx,
+        } => {
+            let first = parse_immediate(&body.instructions[push_a_idx])?;
+            let second = parse_immediate(&body.instructions[push_b_idx])?;
+            let immediate = first.checked_add(second)?;
+            absolute_target_from_value(body, runtime_bounds, node_by_pc, immediate)
         }
         JumpPattern::PcRelative { push_idx, pc_idx } => {
             let delta = parse_immediate(&body.instructions[push_idx])?;
@@ -1016,39 +1232,125 @@ fn analyse_jump_target(
     }
 }
 
+fn absolute_target_from_value(
+    body: &BlockBody,
+    runtime_bounds: Option<(usize, usize)>,
+    node_by_pc: &HashMap<usize, NodeIndex>,
+    immediate: usize,
+) -> Option<JumpTarget> {
+    let encoding = if body.is_runtime(runtime_bounds) {
+        JumpEncoding::RuntimeRelative
+    } else {
+        JumpEncoding::Absolute
+    };
+
+    let absolute_pc = match encoding {
+        JumpEncoding::RuntimeRelative => runtime_bounds.map(|(start, _)| start + immediate)?,
+        JumpEncoding::Absolute => immediate,
+        JumpEncoding::PcRelative => unreachable!(),
+    };
+
+    let target_node = node_by_pc.get(&absolute_pc).copied();
+    target_node
+        .map(|node| JumpTarget::Block { node, encoding })
+        .or_else(|| {
+            Some(JumpTarget::Raw {
+                value: immediate,
+                encoding,
+            })
+        })
+}
+
+// Jump pattern detection is used in two phases:
+// 1. analyse_jump_target() classifies the terminator so we can store a symbolic
+//    `JumpTarget` (block + encoding) during CFG construction.
+// 2. patch_legacy_immediates() scans all instructions in a block to rewrite
+//    their immediates using the old→new PC map. `find_jump_patterns` is the bulk
+//    scanner for phase 2, while `detect_jump_pattern`/
+//    `detect_jump_pattern_at` do the single-pattern lookup for phase 1 and for
+//    the terminal check in `ensure_jump_pattern`.
+// Keeping them together looks slightly repetitive, but they feed different workflows
+
 enum JumpPattern {
+    /// `PUSH <target>; JUMP/JUMPI`
     Direct { push_idx: usize },
+    /// `PUSH <lhs>; PUSH <rhs>; ADD; JUMP/JUMPI`
+    SplitAdd {
+        push_a_idx: usize,
+        push_b_idx: usize,
+    },
+    /// `PUSH <delta>; PC; ADD; JUMPI`
     PcRelative { push_idx: usize, pc_idx: usize },
 }
 
 /// Recognises the bytecode pattern that feeds the terminal `JUMP`/`JUMPI` in a block.
 fn detect_jump_pattern(instructions: &[Instruction]) -> Option<JumpPattern> {
-    if instructions.is_empty() {
-        return None;
-    }
+    instructions
+        .len()
+        .checked_sub(1)
+        .and_then(|last| detect_jump_pattern_at(instructions, last))
+}
 
-    let last = instructions.len() - 1;
-    match instructions[last].op {
+fn detect_jump_pattern_at(instructions: &[Instruction], jump_idx: usize) -> Option<JumpPattern> {
+    match instructions.get(jump_idx)?.op {
         Opcode::JUMP | Opcode::JUMPI => {}
         _ => return None,
     }
 
-    if last >= 1 && is_push(&instructions[last - 1]) {
-        return Some(JumpPattern::Direct { push_idx: last - 1 });
+    if jump_idx >= 1 && is_push(&instructions[jump_idx - 1]) {
+        return Some(JumpPattern::Direct {
+            push_idx: jump_idx - 1,
+        });
     }
 
-    if last >= 3
-        && instructions[last - 1].op == Opcode::ADD
-        && instructions[last - 2].op == Opcode::PC
-        && is_push(&instructions[last - 3])
+    if jump_idx >= 3
+        && instructions[jump_idx - 1].op == Opcode::ADD
+        && is_push(&instructions[jump_idx - 2])
+        && is_push(&instructions[jump_idx - 3])
+    {
+        return Some(JumpPattern::SplitAdd {
+            push_a_idx: jump_idx - 3,
+            push_b_idx: jump_idx - 2,
+        });
+    }
+
+    if jump_idx >= 3
+        && instructions[jump_idx - 1].op == Opcode::ADD
+        && instructions[jump_idx - 2].op == Opcode::PC
+        && is_push(&instructions[jump_idx - 3])
     {
         return Some(JumpPattern::PcRelative {
-            push_idx: last - 3,
-            pc_idx: last - 2,
+            push_idx: jump_idx - 3,
+            pc_idx: jump_idx - 2,
         });
     }
 
     None
+}
+
+fn find_jump_patterns(instructions: &[Instruction]) -> Vec<JumpPattern> {
+    let mut patterns = Vec::new();
+    for idx in 0..instructions.len() {
+        if let Some(pattern) = detect_jump_pattern_at(instructions, idx) {
+            patterns.push(pattern);
+        }
+    }
+    patterns
+}
+
+fn pattern_immediate(instructions: &[Instruction], pattern: &JumpPattern) -> Option<usize> {
+    match pattern {
+        JumpPattern::Direct { push_idx } => parse_immediate(&instructions[*push_idx]),
+        JumpPattern::SplitAdd {
+            push_a_idx,
+            push_b_idx,
+        } => {
+            let first = parse_immediate(&instructions[*push_a_idx])?;
+            let second = parse_immediate(&instructions[*push_b_idx])?;
+            first.checked_add(second)
+        }
+        JumpPattern::PcRelative { .. } => None,
+    }
 }
 
 /// Returns true when the instruction is any PUSH variant (including PUSH0).
@@ -1072,7 +1374,9 @@ fn ensure_jump_pattern(body: &BlockBody, opcode: Opcode) -> Result<(), Error> {
     }
 
     match detect_jump_pattern(&body.instructions) {
-        Some(JumpPattern::Direct { .. }) | Some(JumpPattern::PcRelative { .. }) => Ok(()),
+        Some(JumpPattern::Direct { .. })
+        | Some(JumpPattern::SplitAdd { .. })
+        | Some(JumpPattern::PcRelative { .. }) => Ok(()),
         None => Err(Error::InvalidBlockStructure(format!(
             "block ending at pc 0x{:x} does not end with {:?}",
             body.start_pc, opcode
@@ -1117,44 +1421,82 @@ fn apply_immediate(instr: &mut Instruction, value: usize) -> Result<(), Error> {
     Ok(())
 }
 
-/// Rewrites PUSH immediates for legacy blocks using the provided old→new PC mapping.
-fn patch_legacy_immediates(
-    body: &mut BlockBody,
-    runtime_bounds: Option<(usize, usize)>,
-    mapping: &HashMap<usize, usize>,
+fn apply_split_add_immediate(
+    instructions: &mut [Instruction],
+    push_a_idx: usize,
+    push_b_idx: usize,
+    total: usize,
 ) -> Result<(), Error> {
-    let in_runtime = body.is_runtime(runtime_bounds);
-    let runtime_start = runtime_bounds.map(|(start, _)| start);
-    let Some(JumpPattern::Direct { push_idx }) = detect_jump_pattern(&body.instructions) else {
-        return Ok(());
-    };
-    let Some(old_value) = parse_immediate(&body.instructions[push_idx]) else {
-        return Ok(());
-    };
+    let max_a = push_capacity(&instructions[push_a_idx].op)
+        .ok_or_else(|| Error::InvalidImmediate("expected PUSH opcode before ADD".into()))?;
+    let max_b = push_capacity(&instructions[push_b_idx].op)
+        .ok_or_else(|| Error::InvalidImmediate("expected PUSH opcode before ADD".into()))?;
 
-    let old_pc = if in_runtime {
-        runtime_start.map(|start| start + old_value)
+    let combined_capacity = if max_a == usize::MAX || max_b == usize::MAX {
+        usize::MAX
     } else {
-        Some(old_value)
+        max_a
+            .checked_add(max_b)
+            .ok_or_else(|| Error::InvalidImmediate("combined PUSH capacity overflowed".into()))?
     };
 
-    let Some(old_pc) = old_pc else {
-        return Ok(());
-    };
-    let Some(new_pc) = mapping.get(&old_pc).copied() else {
-        return Ok(());
-    };
+    if total > combined_capacity {
+        return Err(Error::InvalidImmediate(format!(
+            "value 0x{:x} exceeds combined PUSH capacity",
+            total
+        )));
+    }
 
-    let value_to_store = if in_runtime {
-        runtime_start
-            .map(|start| new_pc.saturating_sub(start))
-            .unwrap_or(new_pc)
-    } else {
-        new_pc
-    };
+    let part_a = total.min(max_a);
+    let part_b = total.saturating_sub(part_a);
 
-    let push = &mut body.instructions[push_idx];
-    apply_immediate(push, value_to_store)
+    apply_immediate(&mut instructions[push_a_idx], part_a)?;
+    apply_immediate(&mut instructions[push_b_idx], part_b)?;
+    Ok(())
+}
+
+fn push_capacity(op: &Opcode) -> Option<usize> {
+    match op {
+        Opcode::PUSH0 => Some(0),
+        Opcode::PUSH(width) => {
+            let width = *width as usize;
+            if width == 32 {
+                Some(usize::MAX)
+            } else {
+                Some((1usize << (width * 8)) - 1)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn jump_patterns_match(a: &JumpPattern, b: &JumpPattern) -> bool {
+    match (a, b) {
+        (JumpPattern::Direct { push_idx: a_idx }, JumpPattern::Direct { push_idx: b_idx }) => {
+            a_idx == b_idx
+        }
+        (
+            JumpPattern::SplitAdd {
+                push_a_idx: a_a,
+                push_b_idx: a_b,
+            },
+            JumpPattern::SplitAdd {
+                push_a_idx: b_a,
+                push_b_idx: b_b,
+            },
+        ) => a_a == b_a && a_b == b_b,
+        (
+            JumpPattern::PcRelative {
+                push_idx: a_push,
+                pc_idx: a_pc,
+            },
+            JumpPattern::PcRelative {
+                push_idx: b_push,
+                pc_idx: b_pc,
+            },
+        ) => a_push == b_push && a_pc == b_pc,
+        _ => false,
+    }
 }
 
 /// Computes a conservative stack-height bound for each block to maintain SSA metadata.
@@ -1314,8 +1656,85 @@ mod tests {
         )
         .expect("cfg build succeeds");
 
-        let mapping = bundle.reindex_pcs().expect("reindex succeeds");
+        let (mapping, _) = bundle.reindex_pcs().expect("reindex succeeds");
         assert!(mapping.contains_key(&3));
         assert!(mapping.values().any(|&new_pc| new_pc != 3));
+    }
+
+    #[test]
+    fn reindex_pcs_updates_runtime_relative_jumps() {
+        let instructions = vec![
+            // Runtime block starting at 0x20 with a jump that targets the second block via
+            // runtime-relative encoding (offset 0x0005 -> absolute 0x25).
+            Instruction {
+                pc: 0x20,
+                op: Opcode::JUMPDEST,
+                imm: None,
+            },
+            Instruction {
+                pc: 0x21,
+                op: Opcode::PUSH(2),
+                imm: Some("0005".into()),
+            },
+            Instruction {
+                pc: 0x24,
+                op: Opcode::JUMP,
+                imm: None,
+            },
+            // Target block at 0x25.
+            Instruction {
+                pc: 0x25,
+                op: Opcode::JUMPDEST,
+                imm: None,
+            },
+            Instruction {
+                pc: 0x26,
+                op: Opcode::STOP,
+                imm: None,
+            },
+        ];
+
+        let sections = vec![Section {
+            kind: SectionKind::Runtime,
+            offset: 0x20,
+            len: instructions.len(),
+        }];
+
+        let mut bundle = build_cfg_ir(
+            &instructions,
+            &sections,
+            sample_clean_report(instructions.len()),
+            &sample_bytecode(instructions.len() + 0x20),
+        )
+        .expect("cfg build succeeds");
+
+        assert_eq!(
+            bundle.runtime_bounds,
+            Some((0x20, 0x20 + instructions.len()))
+        );
+
+        let _ = bundle.reindex_pcs().expect("reindex succeeds");
+
+        // Runtime start should be remapped to zero after reindexing.
+        let (start, _) = bundle.runtime_bounds.expect("runtime bounds present");
+        assert_eq!(start, 0);
+
+        // Collect the PUSH immediate after reindexing; it should encode the offset to the target
+        // block relative to the new runtime start.
+        let mut push_imm = None;
+        let mut max_block_start = 0usize;
+        for idx in bundle.cfg.node_indices() {
+            if let Block::Body(body) = &bundle.cfg[idx] {
+                max_block_start = max_block_start.max(body.start_pc);
+                for instr in &body.instructions {
+                    if instr.op == Opcode::PUSH(2) {
+                        push_imm = instr.imm.clone();
+                    }
+                }
+            }
+        }
+
+        let expected = format!("{:04x}", max_block_start.saturating_sub(start));
+        assert_eq!(push_imm.as_deref(), Some(expected.as_str()));
     }
 }
