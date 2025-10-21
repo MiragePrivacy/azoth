@@ -236,6 +236,10 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     println!("Call result: {:?}", call_result);
     let call_result = call_result.map_err(|e| eyre!("Call transaction failed: {:?}", e))?;
 
+    // Persist nonce/state changes produced by the view call so the next
+    // transaction sees the incremented account nonce.
+    evm.db_mut().commit(call_result.state.clone());
+
     // Increment nonce after successful transaction
     deployer_nonce += 1;
 
@@ -321,6 +325,8 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         .transact(funded_tx)
         .map_err(|e| eyre!("Funded check failed: {:?}", e))?;
 
+    evm.db_mut().commit(funded_result.state.clone());
+
     // Increment nonce after successful transaction
     deployer_nonce += 1;
 
@@ -331,7 +337,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         }
     }
 
-    let bond_amount = U256::from(1000);
+    let bond_amount = U256::from(2500);
     let bond_calldata = caller.bond_call_data(bond_amount);
     println!("  Calldata (obfuscated): 0x{}", hex::encode(&bond_calldata));
 
@@ -396,6 +402,8 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     let verify_result = evm
         .transact(verify_tx)
         .map_err(|e| eyre!("Verification transaction failed: {:?}", e))?;
+
+    evm.db_mut().commit(verify_result.state.clone());
 
     let is_bonded_result = match verify_result.result {
         ExecutionResult::Success { output, .. } => match output {
