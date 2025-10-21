@@ -7,6 +7,8 @@ use azoth_transform::Transform;
 async fn test_jump_address_transformer() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
 
     // Simple bytecode with a conditional jump

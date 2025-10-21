@@ -17,6 +17,8 @@ const COUNTER_BYTECODE: &str =
 async fn test_dispatcher_transformation_and_determinism() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .try_init();
 
     println!("Input bytecode: {}", SIMPLE_BYTECODE);
@@ -158,6 +160,8 @@ async fn test_dispatcher_transformation_and_determinism() {
 async fn test_counter_dispatcher_detection() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .try_init();
 
     let (_, instructions, sections, _) = process_bytecode_to_cfg(COUNTER_BYTECODE, false)

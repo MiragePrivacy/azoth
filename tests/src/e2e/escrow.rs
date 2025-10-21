@@ -24,6 +24,8 @@ use revm::{Context, DatabaseCommit, ExecuteEvm, MainBuilder, MainContext};
 async fn test_obfuscated_function_calls() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .try_init();
 
     // obfuscate contract

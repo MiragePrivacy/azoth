@@ -160,6 +160,8 @@ async fn test_shuffle_transform() -> Result<()> {
 async fn test_jump_address_transform() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .try_init();
 
     let seed = Seed::generate();
@@ -187,6 +189,8 @@ async fn test_jump_address_transform() -> Result<()> {
 async fn test_opaque_predicate_transform() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .try_init();
 
     let seed = Seed::generate();

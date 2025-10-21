@@ -131,7 +131,7 @@ async fn test_storage_cfg_trace_progression() {
         pcs
     };
 
-    let mapping = cfg_ir
+    let (mapping, old_runtime_bounds) = cfg_ir
         .reindex_pcs()
         .expect("reindexing PCs for storage bytecode should succeed");
     assert_eq!(
@@ -155,7 +155,7 @@ async fn test_storage_cfg_trace_progression() {
     assert_eq!(reindex_event.remapped_pcs.as_ref(), Some(&mapping));
 
     cfg_ir
-        .patch_jump_immediates(&mapping)
+        .patch_jump_immediates(&mapping, old_runtime_bounds)
         .expect("patching jump immediates should succeed");
 
     assert!(cfg_ir.trace.len() > initial_len);

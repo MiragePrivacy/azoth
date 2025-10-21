@@ -11,6 +11,8 @@ const COUNTER_RUNTIME_BYTECODE: &str = include_str!("../../bytecode/counter/coun
 async fn test_round_trip() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
 
     let (instructions, _, _, bytecode) = decode_bytecode(COUNTER_DEPLOYMENT_BYTECODE, false)
@@ -33,6 +35,8 @@ async fn test_round_trip() {
 async fn test_runtime_only() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
 
     let (instructions, _, _, bytecode) = decode_bytecode(COUNTER_RUNTIME_BYTECODE, false)

@@ -54,6 +54,8 @@ fn parse_u256(data: &[u8]) -> U256 {
 async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .try_init();
 
     let obfuscation_result =

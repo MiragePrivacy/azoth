@@ -9,6 +9,8 @@ const STORAGE_BYTECODE: &str = include_str!("../../../bytecode/storage.hex");
 async fn test_full_deploy_payload_properties() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
 
     let (instructions, info, _, bytes) = decode_bytecode(STORAGE_BYTECODE, false).await.unwrap();
