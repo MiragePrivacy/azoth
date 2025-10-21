@@ -256,32 +256,93 @@ pub fn extract_runtime_instructions(
     Some(instructions)
 }
 
+/// Checks if there's a Solidity free memory pointer prologue before the given instruction.
+///
+/// Solidity contracts typically start runtime code with:
+/// PUSH1 0x80, PUSH1 0x40, MSTORE, PUSH1 0x04
+///
+/// This prologue initializes the free memory pointer at 0x40 to 0x80.
+/// Returns the PC of the prologue start if found, None otherwise.
+fn check_solidity_prologue(instructions: &[Instruction], calldatasize_idx: usize) -> Option<usize> {
+    // Need at least 4 instructions before CALLDATASIZE
+    if calldatasize_idx < 4 {
+        return None;
+    }
+
+    // Check the 4 instructions immediately before CALLDATASIZE
+    let idx = calldatasize_idx;
+
+    // TODO: Support additional prologue layouts (e.g., non-Solidity compilers or
+    // variants that use different PUSH widths) if we encounter runtimes
+    // that initialise memory differently.
+
+    // Expected pattern (working backwards from CALLDATASIZE):
+    // idx-4: PUSH1 0x80
+    // idx-3: PUSH1 0x40
+    // idx-2: MSTORE
+    // idx-1: PUSH1 0x04
+    // idx:   CALLDATASIZE
+
+    let i1 = &instructions[idx - 4];
+    let i2 = &instructions[idx - 3];
+    let i3 = &instructions[idx - 2];
+    let i4 = &instructions[idx - 1];
+
+    let is_prologue = matches!(i1.op, Opcode::PUSH(1))
+        && i1.imm.as_deref() == Some("80")
+        && matches!(i2.op, Opcode::PUSH(1))
+        && i2.imm.as_deref() == Some("40")
+        && i3.op == Opcode::MSTORE
+        && matches!(i4.op, Opcode::PUSH(1))
+        && i4.imm.as_deref() == Some("04");
+
+    if is_prologue {
+        tracing::debug!(
+            "Found Solidity prologue at PC {} (before CALLDATASIZE at PC {})",
+            i1.pc,
+            instructions[idx].pc
+        );
+        Some(i1.pc)
+    } else {
+        None
+    }
+}
+
 /// Fallback deployment detection for when the strict pattern fails
 fn detect_deployment_fallback(
     instructions: &[Instruction],
     aux_offset: usize,
 ) -> Option<(usize, usize)> {
-    // Method 1: Look for CODECOPY + RETURN pattern
+    // Search for CODECOPY + RETURN pattern
     if let Some((init_end, runtime_start)) = detect_codecopy_return_simple(instructions)
         && runtime_start < aux_offset
     {
         return Some((init_end, runtime_start));
     }
 
-    // Method 2: Heuristic detection based on common runtime start patterns
-    // Look for CALLDATASIZE or specific PUSH patterns that indicate runtime code
-    for instruction in instructions.iter() {
-        if matches!(instruction.op, Opcode::CALLDATASIZE)
-            || (matches!(instruction.op, Opcode::PUSH(1))
-                && instruction.imm.as_deref() == Some("00"))
-        {
-            let potential_runtime_start = instruction.pc;
-            if potential_runtime_start > 100 && potential_runtime_start < aux_offset {
+    // Heuristic detection based on common runtime start patterns
+    // Look for CALLDATASIZE as a runtime code marker
+    for (idx, instruction) in instructions.iter().enumerate() {
+        if matches!(instruction.op, Opcode::CALLDATASIZE) {
+            let calldatasize_pc = instruction.pc;
+
+            // Check if there's a Solidity free memory pointer prologue before CALLDATASIZE
+            // pattern: PUSH1 0x80, PUSH1 0x40, MSTORE, PUSH1 0x04, CALLDATASIZE
+            let prologue_start = check_solidity_prologue(instructions, idx);
+
+            let runtime_start = prologue_start.unwrap_or(calldatasize_pc);
+
+            if runtime_start > 100 && runtime_start < aux_offset {
                 tracing::debug!(
-                    "Heuristic runtime start detected at PC {}",
-                    potential_runtime_start
+                    "Heuristic runtime start detected at PC {} {}",
+                    runtime_start,
+                    if prologue_start.is_some() {
+                        "(including Solidity prologue)"
+                    } else {
+                        "(at CALLDATASIZE)"
+                    }
                 );
-                return Some((potential_runtime_start, potential_runtime_start));
+                return Some((runtime_start, runtime_start));
             }
         }
     }
