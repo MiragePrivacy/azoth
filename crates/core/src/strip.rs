@@ -436,3 +436,148 @@ impl CleanReport {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::strip_bytecode;
+    use crate::detection::{Section, SectionKind};
+    use crate::result::Error;
+    use sha3::{Digest, Keccak256};
+
+    fn section(kind: SectionKind, offset: usize, len: usize) -> Section {
+        Section { kind, offset, len }
+    }
+
+    //   0x00..0x1a : init (constructor)
+    //   0x1a..0x23 : runtime
+    //   0x23..end  : auxdata (Solidity CBOR metadata)
+    const STORAGE_HEX: &str = include_str!("../../../tests/bytecode/storage.hex");
+
+    #[test]
+    fn returns_error_when_runtime_missing() {
+        let bytes = hex::decode(STORAGE_HEX.trim()).unwrap();
+        let sections = vec![
+            section(SectionKind::Init, 0, 0x1a),
+            section(SectionKind::Auxdata, 0x23, bytes.len() - 0x23),
+        ];
+
+        let err = strip_bytecode(&bytes, &sections).unwrap_err();
+        assert!(matches!(err, Error::NoRuntimeFound));
+    }
+
+    #[test]
+    fn strips_non_runtime_sections_and_preserves_metadata() {
+        let bytes = hex::decode(STORAGE_HEX.trim()).unwrap();
+        let sections = vec![
+            section(SectionKind::Init, 0, 0x1a),
+            section(SectionKind::Runtime, 0x1a, 0x9),
+            section(SectionKind::Auxdata, 0x23, bytes.len() - 0x23),
+        ];
+
+        let (clean, report) = strip_bytecode(&bytes, &sections).unwrap();
+
+        assert_eq!(clean, bytes[0x1a..0x23].to_vec());
+        assert_eq!(report.runtime_layout.len(), 1);
+        assert_eq!(report.runtime_layout[0].offset, 0x1a);
+        assert_eq!(report.runtime_layout[0].len, 0x9);
+        assert_eq!(report.removed.len(), 2);
+        assert_eq!(report.removed[0].kind, SectionKind::Init);
+        assert_eq!(report.removed[0].offset, 0);
+        assert_eq!(report.removed[0].data, bytes[0..0x1a].to_vec());
+        assert_eq!(report.removed[1].kind, SectionKind::Auxdata);
+        assert_eq!(report.removed[1].offset, 0x23);
+        assert_eq!(report.removed[1].data, bytes[0x23..].to_vec());
+        assert_eq!(report.bytes_saved, bytes.len() - clean.len());
+        assert_eq!(report.clean_len, clean.len());
+        let expected_hash: [u8; 32] = Keccak256::digest(&clean).into();
+        assert_eq!(report.clean_keccak, expected_hash);
+        assert!(report.program_counter_mapping.is_empty());
+    }
+
+    #[test]
+    fn concatenates_multiple_runtime_spans_in_offset_order() {
+        let bytes = hex::decode(STORAGE_HEX.trim()).unwrap();
+        let sections = vec![
+            section(SectionKind::Runtime, 0x1a, 0x4),
+            section(SectionKind::Init, 0, 0x1a),
+            section(SectionKind::Runtime, 0x1e, 0x5),
+            section(SectionKind::Auxdata, 0x23, bytes.len() - 0x23),
+        ];
+
+        let (clean, report) = strip_bytecode(&bytes, &sections).unwrap();
+
+        let mut expected = bytes[0x1a..0x1e].to_vec();
+        expected.extend_from_slice(&bytes[0x1e..0x23]);
+        assert_eq!(clean, expected);
+        assert_eq!(report.runtime_layout.len(), 2);
+        assert_eq!(report.runtime_layout[0].offset, 0x1a);
+        assert_eq!(report.runtime_layout[0].len, 0x4);
+        assert_eq!(report.runtime_layout[1].offset, 0x1e);
+        assert_eq!(report.runtime_layout[1].len, 0x5);
+    }
+
+    #[test]
+    fn reassembles_original_layout_when_runtime_unchanged() {
+        let bytes = hex::decode(STORAGE_HEX.trim()).unwrap();
+        let sections = vec![
+            section(SectionKind::Init, 0, 0x1a),
+            section(SectionKind::Runtime, 0x1a, 0x9),
+            section(SectionKind::Auxdata, 0x23, bytes.len() - 0x23),
+        ];
+
+        let (clean, mut report) = strip_bytecode(&bytes, &sections).unwrap();
+        let rebuilt = report.reassemble(&clean);
+
+        assert_eq!(rebuilt, bytes);
+    }
+
+    #[test]
+    fn reassembles_with_changed_runtime_length_sequentially() {
+        let bytes = hex::decode(STORAGE_HEX.trim()).unwrap();
+        let sections = vec![
+            section(SectionKind::Init, 0, 0x1a),
+            section(SectionKind::Runtime, 0x1a, 0x9),
+            section(SectionKind::Auxdata, 0x23, bytes.len() - 0x23),
+        ];
+
+        let (_, mut report) = strip_bytecode(&bytes, &sections).unwrap();
+        let mut new_runtime = bytes[0x1a..0x23].to_vec();
+        // appending two extra bytes
+        new_runtime.extend_from_slice(&[0xde, 0xad]);
+        let rebuilt = report.reassemble(&new_runtime);
+
+        let runtime_start = 0x1a;
+        let mut expected_prefix = Vec::new();
+        let mut expected_suffix = Vec::new();
+
+        for removed in &report.removed {
+            if removed.offset < runtime_start {
+                expected_prefix.extend_from_slice(&removed.data);
+            } else {
+                expected_suffix.extend_from_slice(&removed.data);
+            }
+        }
+
+        assert_eq!(
+            &rebuilt[..expected_prefix.len()],
+            expected_prefix.as_slice()
+        );
+        assert_eq!(
+            &rebuilt[expected_prefix.len()..expected_prefix.len() + new_runtime.len()],
+            new_runtime.as_slice()
+        );
+        assert_eq!(
+            &rebuilt[expected_prefix.len() + new_runtime.len()..],
+            expected_suffix.as_slice()
+        );
+        assert!(
+            report
+                .removed
+                .iter()
+                .find(|r| r.offset == 0)
+                .and_then(|r| r.data.windows(2).find(|w| w == &[0x60, 0x0b]))
+                .is_some(),
+            "init code should be updated to push new runtime length"
+        );
+    }
+}
