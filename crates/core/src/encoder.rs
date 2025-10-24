@@ -164,9 +164,9 @@ pub fn rebuild(runtime: &[u8], report: &mut CleanReport) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::encode;
+    use crate::Opcode;
     use crate::decoder::Instruction;
     use crate::result::Error;
-    use crate::Opcode;
 
     #[test]
     fn encodes_push_and_standard_opcodes() {
@@ -226,7 +226,10 @@ mod tests {
         }];
 
         let err = encode(&instructions, &[]).unwrap_err();
-        assert!(matches!(err, Error::InvalidImmediate(_)), "unexpected error: {err:?}");
+        assert!(
+            matches!(err, Error::InvalidImmediate(_)),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
@@ -238,6 +241,9 @@ mod tests {
         }];
 
         let err = encode(&instructions, &[]).unwrap_err();
-        assert!(matches!(err, Error::InvalidImmediate(_)), "unexpected error: {err:?}");
+        assert!(
+            matches!(err, Error::InvalidImmediate(_)),
+            "unexpected error: {err:?}"
+        );
     }
 }
