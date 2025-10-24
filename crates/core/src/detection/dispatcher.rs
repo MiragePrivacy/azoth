@@ -345,9 +345,9 @@ fn find_dispatcher_preamble(instructions: &[Instruction], extraction_start: usiz
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_function_dispatcher, ExtractionPattern};
-    use crate::decoder::Instruction;
+    use super::{ExtractionPattern, detect_function_dispatcher};
     use crate::Opcode;
+    use crate::decoder::Instruction;
 
     fn build(seq: &[(usize, Opcode, Option<&'static str>)]) -> Vec<Instruction> {
         seq.iter()
