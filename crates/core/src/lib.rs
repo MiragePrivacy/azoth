@@ -172,8 +172,9 @@ mod tests {
     async fn process_bytecode_builds_runtime_cfg() {
         let bytecode = include_str!("../../../tests/bytecode/storage.hex");
 
-        let (bundle, instructions, sections, bytes) =
-            process_bytecode_to_cfg(bytecode, false).await.expect("cfg build");
+        let (bundle, instructions, sections, bytes) = process_bytecode_to_cfg(bytecode, false)
+            .await
+            .expect("cfg build");
         assert!(!instructions.is_empty());
 
         let runtime_section = sections
