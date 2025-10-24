@@ -203,18 +203,16 @@ pub trait Transform: Send + Sync {
 
 ### Pass Execution
 
-The pass.rs module provides a simple sequential pass runner:
+Consumers typically orchestrate transforms themselves. A minimal driver looks like:
 
 ```rust
-use azoth_transform::pass::{DefaultPass, Pass};
-
-let transforms: Vec<Box<dyn Transform>> = vec![
-    Box::new(Shuffle),
-    Box::new(OpaquePredicate::new()),
-    Box::new(JumpAddressTransformer::new()),
-];
-
-DefaultPass.run(&mut cfg_ir, &transforms, &seed)?;
+let mut rng = seed.create_deterministic_rng();
+for transform in transforms {
+    if transform.apply(&mut cfg_ir, &mut rng)? {
+        // optionally recompute metrics, log deltas, etc.
+    }
+}
 ```
 
-The transforms operate on CfgIrBundle structures and use metrics from azoth-analysis to evaluate effectiveness.
+The transforms operate on `CfgIrBundle` structures and can be combined with
+metrics from `azoth-analysis` to evaluate effectiveness.
