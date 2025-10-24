@@ -108,7 +108,7 @@ pub async fn process_bytecode_to_cfg(
     let sections = detection::locate_sections(&bytes, &instructions)?;
     let (_, report) = strip::strip_bytecode(&bytes, &sections)?;
 
-    // CRITICAL FIX: Filter instructions to only runtime section before building CFG
+    // Filter instructions to only runtime section before building CFG
     // The CFG should only contain runtime code, not init code or metadata
     let runtime_section = sections
         .iter()
@@ -136,8 +136,60 @@ pub async fn process_bytecode_to_cfg(
         runtime_instructions.len()
     );
 
-    // Build CFG from ONLY runtime instructions
+    // Build CFG from only runtime instructions
     let cfg_bundle = cfg_ir::build_cfg_ir(&runtime_instructions, &sections, report, &bytes)?;
 
     Ok((cfg_bundle, instructions, sections, bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::detection::SectionKind;
+    use std::fs;
+
+    #[test]
+    fn normalize_hex_handles_whitespace_and_padding() {
+        let raw = "  0xabc\n";
+        let normalized = normalize_hex_string(raw).expect("normalized");
+        assert_eq!(normalized, "0abc"); // padding guarantees even length
+    }
+
+    #[test]
+    fn input_to_bytes_parses_literal_and_file() {
+        let literal = "\n 60 01 00";
+        let literal_bytes = input_to_bytes(literal, false).expect("literal bytes");
+        assert_eq!(literal_bytes, vec![0x60, 0x01, 0x00]);
+
+        let temp_path = std::env::temp_dir().join("azoth_core_input_to_bytes_test.hex");
+        fs::write(&temp_path, "0x600200").expect("write temp file");
+        let file_bytes = input_to_bytes(temp_path.to_str().unwrap(), true).expect("file bytes");
+        assert_eq!(file_bytes, vec![0x60, 0x02, 0x00]);
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    #[tokio::test]
+    async fn process_bytecode_builds_runtime_cfg() {
+        let bytecode = include_str!("../../../tests/bytecode/storage.hex");
+
+        let (bundle, instructions, sections, bytes) =
+            process_bytecode_to_cfg(bytecode, false).await.expect("cfg build");
+        assert!(!instructions.is_empty());
+
+        let runtime_section = sections
+            .iter()
+            .find(|s| s.kind == SectionKind::Runtime)
+            .expect("runtime section present");
+        assert_eq!(runtime_section.offset, 0x1a);
+        assert_eq!(runtime_section.len, 0x9);
+
+        assert_eq!(bundle.runtime_bounds(), Some((0x1a, 0x23)));
+        assert_eq!(bundle.clean_report.clean_len, 0x9);
+        assert_eq!(bundle.clean_report.runtime_layout.len(), 1);
+        assert_eq!(bundle.clean_report.runtime_layout[0].offset, 0x1a);
+        assert_eq!(bundle.clean_report.runtime_layout[0].len, 0x9);
+        assert_eq!(bundle.original_bytecode, bytes);
+
+        assert!(bundle.cfg.node_count() > 0, "cfg contains blocks");
+    }
 }
