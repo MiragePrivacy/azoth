@@ -31,20 +31,31 @@ pub struct ObfuscateArgs {
     /// Path to emit gas/size report as JSON (optional).
     #[arg(long)]
     emit: Option<String>,
+    /// Path to emit a detailed CFG trace debug report as JSON.
+    #[arg(long, value_name = "PATH")]
+    emit_debug: Option<String>,
 }
 
 /// Executes the `obfuscate` subcommand using the unified obfuscation pipeline.
 #[async_trait]
 impl super::Command for ObfuscateArgs {
     async fn execute(self) -> Result<(), Box<dyn Error>> {
+        let ObfuscateArgs {
+            input,
+            seed,
+            passes,
+            emit,
+            emit_debug,
+        } = self;
+
         // Step 1: Read and normalize input
-        let input_bytecode = read_input(&self.input)?;
+        let input_bytecode = read_input(&input)?;
 
         // Step 2: Build transforms from CLI args
-        let transforms = build_passes(&self.passes)?;
+        let transforms = build_passes(&passes)?;
 
         // Step 3: Configure obfuscation
-        let mut config = if let Some(seed_hex) = self.seed {
+        let mut config = if let Some(seed_hex) = seed {
             // Use provided seed
             let seed = Seed::from_hex(&seed_hex).map_err(|e| format!("Invalid seed hex: {e}"))?;
             ObfuscationConfig::with_seed(seed)
@@ -67,10 +78,19 @@ impl super::Command for ObfuscateArgs {
 
         // Step 6: Check size limits
         // Step 7: Write report if requested
-        if let Some(path) = self.emit {
+        if let Some(path) = emit.as_ref() {
             let report = create_gas_report(&result);
-            fs::write(&path, serde_json::to_string_pretty(&report)?)?;
-            println!("📊 Wrote gas/size report to {}", &path);
+            fs::write(path, serde_json::to_string_pretty(&report)?)?;
+            println!("📊 Wrote gas/size report to {}", path);
+        }
+
+        if let Some(path) = emit_debug.as_ref() {
+            let debug_payload = serde_json::to_string_pretty(&serde_json::json!({
+                "metadata": &result.metadata,
+                "trace": &result.trace,
+            }))?;
+            fs::write(path, debug_payload)?;
+            println!("Wrote CFG trace debug report to {}", path);
         }
 
         // Step 8: Output final bytecode
