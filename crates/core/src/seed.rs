@@ -68,3 +68,52 @@ impl Seed {
         format!("0x{}", hex::encode(self.hash()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Seed;
+    use crate::result::Error;
+    use rand::{RngCore, SeedableRng, rngs::StdRng};
+    use sha3::{Digest, Sha3_256};
+
+    const SAMPLE_HEX: &str = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+
+    #[test]
+    fn from_hex_accepts_prefixed_and_unprefixed() {
+        let prefixed = Seed::from_hex(SAMPLE_HEX).unwrap();
+        let unprefixed =
+            Seed::from_hex(&SAMPLE_HEX.trim_start_matches("0x")).expect("unprefixed seed");
+
+        assert_eq!(prefixed.inner, unprefixed.inner);
+        assert_eq!(prefixed.to_hex(), SAMPLE_HEX);
+    }
+
+    #[test]
+    fn from_hex_rejects_invalid_hex() {
+        let invalid_hex = format!("0x{}g{}", "1".repeat(31), "1".repeat(32));
+        let err = match Seed::from_hex(&invalid_hex) {
+            Ok(_) => panic!("expected InvalidSeedHex error"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, Error::InvalidSeedHex));
+    }
+
+    #[test]
+    fn deterministic_rng_matches_domain_separated_hash() {
+        let seed = Seed::from_hex(SAMPLE_HEX).expect("valid sample seed");
+        let mut rng = seed.create_deterministic_rng();
+
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"AZOTH_BYTECODE_OBFUSCATION");
+        hasher.update(seed.inner);
+        let hash = hasher.finalize();
+        let mut seed_bytes = [0u8; 8];
+        seed_bytes.copy_from_slice(&hash[..8]);
+        let derived = u64::from_le_bytes(seed_bytes);
+        let mut manual_rng = StdRng::seed_from_u64(derived);
+
+        for _ in 0..4 {
+            assert_eq!(rng.next_u64(), manual_rng.next_u64());
+        }
+    }
+}
