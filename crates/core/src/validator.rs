@@ -1,4 +1,8 @@
 //! Validate that all statically resolvable JUMP/JUMPI instructions target valid JUMPDESTs.
+//!
+//! `validate_jump_targets` is deliberately designed to work as it does right now i.e it only understands patterns
+//! where a destination can be decoded from immediates (PUSHn right before the jump, or the PC-relative dispatcher).
+//! Any other shape would require symbolic execution or full interpretation, which is out of scope for this helper.
 
 use std::collections::HashSet;
 
@@ -65,10 +69,7 @@ pub async fn validate_jump_targets(bytecode: &[u8]) -> Result<()> {
         }
         eprintln!();
 
-        return Err(Error::InvalidJumpTarget {
-            pc: invalid_jumps[0].0,
-            target: invalid_jumps[0].1,
-        });
+        return Err(Error::InvalidJumpTarget(invalid_jumps.len()));
     }
 
     Ok(())
@@ -122,17 +123,18 @@ fn resolve_jump_target(instructions: &[decoder::Instruction], idx: usize) -> Opt
 #[cfg(test)]
 mod tests {
     use super::validate_jump_targets;
+    use crate::result::Error;
 
     #[tokio::test]
     async fn detects_valid_direct_jump() {
-        // push 0x03; jump; jumpdest; stop
+        // push1 0x03; jump; jumpdest; stop
         let bytecode = [0x60, 0x03, 0x56, 0x5b, 0x00];
         assert!(validate_jump_targets(&bytecode).await.is_ok());
     }
 
     #[tokio::test]
     async fn detects_invalid_direct_jump() {
-        // push 0x10; jump (no jumpdest at 0x10)
+        // push1 0x10; jump (no jumpdest at 0x10)
         let bytecode = [0x60, 0x10, 0x56, 0x5b, 0x00];
         let err = validate_jump_targets(&bytecode).await.unwrap_err();
         let msg = format!("{}", err);
@@ -141,17 +143,38 @@ mod tests {
 
     #[tokio::test]
     async fn validates_pc_relative_pattern() {
-        // push 0x03; pc; add; jumpi; jumpdest; stop
+        // push1 0x03; pc; add; jumpi; jumpdest; stop
         let bytecode = [0x60, 0x03, 0x58, 0x01, 0x57, 0x5b, 0x00];
         assert!(validate_jump_targets(&bytecode).await.is_ok());
     }
 
     #[tokio::test]
     async fn detects_invalid_pc_relative_pattern() {
-        // push 0x04; pc; add; jumpi; jumpdest (at 0x05, delta targets 0x06)
+        // push1 0x04; pc; add; jumpi; jumpdest (at 0x05, delta targets 0x06)
         let bytecode = [0x60, 0x04, 0x58, 0x01, 0x57, 0x5b, 0x00];
         let err = validate_jump_targets(&bytecode).await.unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("invalid jump target"));
+    }
+
+    #[tokio::test]
+    async fn ignores_dynamic_jump_pattern() {
+        // treating dynamic jumps as errors would produce false positives for
+        // perfectly valid runtime behavior
+        // push1 0x00; dup1; jump; stop
+        let bytecode = [0x60, 0x00, 0x80, 0x56, 0x00];
+        assert!(validate_jump_targets(&bytecode).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reports_count_of_invalid_jumps() {
+        // two invalid jumps:
+        //   - jump to stop (no jumpdest)
+        //   - jump past end of bytecode
+        let bytecode = [0x60, 0x07, 0x56, 0x60, 0x09, 0x56, 0x5b, 0x00];
+        match validate_jump_targets(&bytecode).await.unwrap_err() {
+            Error::InvalidJumpTarget(count) => assert_eq!(count, 2),
+            other => panic!("unexpected error: {other}"),
+        }
     }
 }
