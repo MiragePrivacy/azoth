@@ -1,5 +1,4 @@
-//! Module for encoding EVM instructions into bytecode and reassembling bytecode with
-//! non-runtime sections.
+//! Encode EVM instructions into bytecode
 
 use crate::Opcode;
 use crate::decoder::Instruction;
@@ -135,7 +134,7 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
             unknown_count
         );
         tracing::warn!(
-            "If the original contract works, the obfuscated version should too. If not, the input bytecode may be corrupted."
+            "If the original contract works, the obfuscated version should too. If not, the obfuscated bytecode may be corrupted."
         );
     }
 
@@ -160,4 +159,85 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
 /// The reassembled bytecode as a `Vec<u8>`.
 pub fn rebuild(runtime: &[u8], report: &mut CleanReport) -> Vec<u8> {
     report.reassemble(runtime)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode;
+    use crate::decoder::Instruction;
+    use crate::result::Error;
+    use crate::Opcode;
+
+    #[test]
+    fn encodes_push_and_standard_opcodes() {
+        let instructions = vec![
+            Instruction {
+                pc: 0,
+                op: Opcode::PUSH(1),
+                imm: Some("aa".into()),
+            },
+            Instruction {
+                pc: 2,
+                op: Opcode::ADD,
+                imm: None,
+            },
+            Instruction {
+                pc: 3,
+                op: Opcode::STOP,
+                imm: None,
+            },
+        ];
+
+        let bytes = encode(&instructions, &[]).expect("encodes push/add/stop");
+        assert_eq!(bytes, vec![0x60, 0xaa, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn preserves_invalid_from_immediate() {
+        let instructions = vec![Instruction {
+            pc: 5,
+            op: Opcode::INVALID,
+            imm: Some("fe".into()),
+        }];
+
+        let bytes = encode(&instructions, &[]).expect("encodes invalid from imm");
+        assert_eq!(bytes, vec![0xfe]);
+    }
+
+    #[test]
+    fn preserves_invalid_from_bytecode_fallback() {
+        let instructions = vec![Instruction {
+            pc: 2,
+            op: Opcode::INVALID,
+            imm: None,
+        }];
+        let reference = [0xaa, 0xbb, 0xcc, 0xdd];
+
+        let bytes = encode(&instructions, &reference).expect("encodes invalid from bytecode");
+        assert_eq!(bytes, vec![reference[2]]);
+    }
+
+    #[test]
+    fn errors_on_missing_push_immediate() {
+        let instructions = vec![Instruction {
+            pc: 0,
+            op: Opcode::PUSH(2),
+            imm: None,
+        }];
+
+        let err = encode(&instructions, &[]).unwrap_err();
+        assert!(matches!(err, Error::InvalidImmediate(_)), "unexpected error: {err:?}");
+    }
+
+    #[test]
+    fn errors_on_wrong_immediate_length() {
+        let instructions = vec![Instruction {
+            pc: 0,
+            op: Opcode::PUSH(2),
+            imm: Some("aa".into()),
+        }];
+
+        let err = encode(&instructions, &[]).unwrap_err();
+        assert!(matches!(err, Error::InvalidImmediate(_)), "unexpected error: {err:?}");
+    }
 }
