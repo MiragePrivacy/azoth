@@ -571,7 +571,8 @@ mod tests {
             expected_suffix.as_slice()
         );
         assert!(
-            report.removed
+            report
+                .removed
                 .iter()
                 .find(|r| r.offset == 0)
                 .and_then(|r| r.data.windows(2).find(|w| w == &[0x60, 0x0b]))
