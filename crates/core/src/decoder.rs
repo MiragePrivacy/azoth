@@ -192,3 +192,89 @@ impl Instruction {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_bytecode, parse_assembly, SourceType};
+    use crate::encoder;
+    use crate::result::Error;
+    use crate::Opcode;
+
+    const SAMPLE_ASM: &str = "
+000000 PUSH1 0x01
+000002 PUSH1 0xff
+000004 ADD
+000005 STOP
+";
+
+    #[test]
+    fn parse_basic_assembly_stream() {
+        let instructions = parse_assembly(SAMPLE_ASM).expect("parse sample asm");
+        assert_eq!(instructions.len(), 4);
+
+        assert_eq!(instructions[0].pc, 0);
+        assert!(matches!(instructions[0].op, Opcode::PUSH(1)));
+        assert_eq!(instructions[0].imm.as_deref(), Some("01"));
+
+        assert_eq!(instructions[2].pc, 4);
+        assert_eq!(instructions[2].op, Opcode::ADD);
+        assert!(instructions[2].imm.is_none());
+    }
+
+    #[test]
+    fn parse_unknown_opcode_with_hex_suffix() {
+        let asm = "\
+000000 UNKNOWN_0xaa\n";
+        let instructions = parse_assembly(asm).expect("parse unknown hex");
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(instructions[0].pc, 0);
+        assert_eq!(instructions[0].op, Opcode::UNKNOWN(0xaa));
+        assert!(instructions[0].imm.is_none());
+    }
+
+    #[test]
+    fn unknown_opcode_without_hex_becomes_invalid() {
+        let asm = "\
+000000 unknown\n";
+        let instructions = parse_assembly(asm).expect("parse generic unknown");
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(instructions[0].op, Opcode::INVALID);
+    }
+
+    #[test]
+    fn parse_assembly_rejects_empty_input() {
+        let err = parse_assembly("").unwrap_err();
+        assert!(matches!(err, Error::ParseError { .. }));
+    }
+
+    #[test]
+    fn parse_assembly_errors_on_malformed_line() {
+        // Missing opcode after PC
+        let err = parse_assembly("000000").unwrap_err();
+        assert!(matches!(err, Error::ParseError { .. }));
+    }
+
+    #[tokio::test]
+    async fn decode_bytecode_produces_instructions_and_metadata() {
+        let bytecode = include_str!("../../../tests/bytecode/storage.hex");
+        let (instructions, info, asm, bytes) =
+            decode_bytecode(bytecode, false).await.expect("decode bytecode");
+
+        assert!(!instructions.is_empty());
+        assert!(!asm.is_empty());
+        assert_eq!(info.byte_length, bytes.len());
+        assert_eq!(info.source, SourceType::HexString);
+
+        let reparsed = parse_assembly(&asm).expect("parse decoded assembly");
+        assert_eq!(reparsed, instructions);
+
+        let reencoded = encoder::encode(&instructions, &bytes).expect("encode decoded instructions");
+        assert_eq!(reencoded, bytes);
+
+        // storage hex starts with PUSH1 0x80 at pc=0
+        let first = &instructions[0];
+        assert_eq!(first.pc, 0);
+        assert!(matches!(first.op, Opcode::PUSH(1)));
+        assert_eq!(first.imm.as_deref(), Some("80"));
+    }
+}
