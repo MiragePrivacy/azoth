@@ -32,13 +32,8 @@ pub enum Error {
     InvalidBlockStructure(String),
 
     /// A JUMP/JUMPI instruction targets an invalid destination.
-    #[error("invalid jump target: pc 0x{pc:x} -> 0x{target:x}")]
-    InvalidJumpTarget {
-        /// Program counter of the jump instruction.
-        pc: usize,
-        /// Calculated destination that failed validation.
-        target: usize,
-    },
+    #[error("bytecode validation failed: {0} invalid jump target(s) found")]
+    InvalidJumpTarget(usize),
 
     /// The immediate data for a PUSH opcode is invalid.
     #[error("invalid immediate: {0}")]
