@@ -1,7 +1,10 @@
 use crate::function_dispatcher::FunctionDispatcher;
 use crate::Transform;
 use azoth_core::seed::Seed;
-use azoth_core::{cfg_ir, decoder, detection, encoder, process_bytecode_to_cfg, validator, Opcode};
+use azoth_core::{
+    cfg_ir::{self, snapshot_bundle, CfgIrDiff, OperationKind, TraceEvent},
+    decoder, detection, encoder, process_bytecode_to_cfg, validator, Opcode,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -74,6 +77,9 @@ pub struct ObfuscationResult {
     pub metadata: ObfuscationMetadata,
     /// Mapping from original selectors to tokens (if token dispatcher was applied)
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
+    /// Trace of CFG operations captured during obfuscation
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace: Vec<TraceEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -391,6 +397,14 @@ pub async fn obfuscate_bytecode(
         tracing::debug!("No selector mapping in result");
     }
 
+    let final_snapshot = snapshot_bundle(&cfg_ir);
+    cfg_ir.record_operation(
+        OperationKind::Finalize,
+        CfgIrDiff::FullSnapshot(final_snapshot),
+        None,
+    );
+    let trace = cfg_ir.trace.clone();
+
     Ok(ObfuscationResult {
         obfuscated_bytecode: format!("0x{}", hex::encode(&final_bytecode)),
         original_size,
@@ -407,6 +421,7 @@ pub async fn obfuscate_bytecode(
             unknown_opcodes_preserved: config.preserve_unknown_opcodes,
         },
         selector_mapping: cfg_ir.selector_mapping, // Extract from CFG bundle
+        trace,
     })
 }
 
