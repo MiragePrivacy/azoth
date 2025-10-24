@@ -57,7 +57,8 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
     if instructions.is_empty() {
         return None;
     }
-    let (extraction_start, extraction_len) = find_extraction_pattern(instructions)?;
+    let (extraction_start, extraction_len, extraction_pattern) =
+        find_extraction_pattern(instructions)?;
 
     let mut selectors = Vec::new();
     let mut stack: Vec<StackValue> = Vec::with_capacity(32); // EVM stack max depth
@@ -227,13 +228,15 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
                 .map(|s| s.instruction_index + 10)
                 .unwrap_or(extraction_start + 100),
             selectors,
-            extraction_pattern: ExtractionPattern::Standard,
+            extraction_pattern,
         })
     }
 }
 
 /// Locates the calldata extraction pattern in the first 200 instructions and returns its index and length.
-fn find_extraction_pattern(instructions: &[Instruction]) -> Option<(usize, usize)> {
+fn find_extraction_pattern(
+    instructions: &[Instruction],
+) -> Option<(usize, usize, ExtractionPattern)> {
     for i in 0..instructions.len().saturating_sub(3).min(200) {
         let instrs = &instructions[i..];
 
@@ -248,7 +251,7 @@ fn find_extraction_pattern(instructions: &[Instruction]) -> Option<(usize, usize
             && instrs[2].op == Opcode::SHR
         {
             tracing::debug!("Found newer extraction pattern at instruction {}", i);
-            return Some((i, 3));
+            return Some((i, 3, ExtractionPattern::Newer));
         }
 
         // Standard pattern: [PUSH1 0x00 | PUSH0] CALLDATALOAD PUSH1 0xE0 SHR (4 instructions)
@@ -264,7 +267,7 @@ fn find_extraction_pattern(instructions: &[Instruction]) -> Option<(usize, usize
                 && instrs[3].op == Opcode::SHR
             {
                 tracing::debug!("Found standard extraction pattern at instruction {}", i);
-                return Some((i, 4));
+                return Some((i, 4, ExtractionPattern::Standard));
             }
         }
     }
@@ -340,7 +343,90 @@ fn find_dispatcher_preamble(instructions: &[Instruction], extraction_start: usiz
     fallback_start
 }
 
-/// Quick check for dispatcher presence without extracting selector details.
-pub fn has_dispatcher(instructions: &[Instruction]) -> bool {
-    detect_function_dispatcher(instructions).is_some()
+#[cfg(test)]
+mod tests {
+    use super::{ExtractionPattern, detect_function_dispatcher};
+    use crate::Opcode;
+    use crate::decoder::Instruction;
+
+    fn build(seq: &[(usize, Opcode, Option<&'static str>)]) -> Vec<Instruction> {
+        seq.iter()
+            .map(|(pc, op, imm)| Instruction {
+                pc: *pc,
+                op: op.clone(),
+                imm: imm.map(|s| s.into()),
+            })
+            .collect()
+    }
+
+    fn sample_dispatcher_instructions(newer_pattern: bool) -> Vec<Instruction> {
+        let mut seq = Vec::new();
+        seq.extend_from_slice(&[
+            (0x00, Opcode::PUSH(1), Some("80")),
+            (0x02, Opcode::PUSH(1), Some("40")),
+            (0x04, Opcode::MSTORE, None),
+            (0x05, Opcode::CALLVALUE, None),
+            (0x06, Opcode::DUP(1), None),
+            (0x07, Opcode::ISZERO, None),
+            (0x08, Opcode::PUSH(2), Some("0012")),
+            (0x0b, Opcode::JUMPI, None),
+        ]);
+
+        seq.extend_from_slice(if newer_pattern {
+            &[
+                (0x0c, Opcode::CALLDATALOAD, None),
+                (0x0d, Opcode::PUSH(1), Some("e0")),
+                (0x0f, Opcode::SHR, None),
+            ][..]
+        } else {
+            &[
+                (0x0c, Opcode::PUSH(1), Some("00")),
+                (0x0e, Opcode::CALLDATALOAD, None),
+                (0x0f, Opcode::PUSH(1), Some("e0")),
+                (0x11, Opcode::SHR, None),
+            ][..]
+        });
+
+        seq.extend_from_slice(&[
+            (0x12, Opcode::DUP(1), None),
+            (0x13, Opcode::PUSH(4), Some("12345678")),
+            (0x18, Opcode::EQ, None),
+            (0x19, Opcode::PUSH(2), Some("0020")),
+            (0x1c, Opcode::JUMPI, None),
+            (0x1d, Opcode::PUSH(1), Some("00")),
+            (0x1f, Opcode::POP, None),
+            (0x20, Opcode::JUMPDEST, None),
+            (0x21, Opcode::STOP, None),
+            (0x22, Opcode::JUMPDEST, None),
+            (0x23, Opcode::STOP, None),
+        ]);
+
+        build(&seq)
+    }
+
+    #[test]
+    fn detects_dispatcher_and_extracts_selectors() {
+        let instructions = sample_dispatcher_instructions(false);
+        let dispatcher = detect_function_dispatcher(&instructions).expect("dispatcher present");
+
+        assert_eq!(dispatcher.extraction_pattern, ExtractionPattern::Standard);
+        assert_eq!(dispatcher.start_offset, 0);
+        assert_eq!(dispatcher.selectors.len(), 1);
+
+        let selector = &dispatcher.selectors[0];
+        assert_eq!(selector.selector, 0x12345678);
+        assert_eq!(selector.target_address, 0x20);
+    }
+
+    #[test]
+    fn detects_newer_extraction_pattern() {
+        let instructions = sample_dispatcher_instructions(true);
+        let dispatcher = detect_function_dispatcher(&instructions).expect("dispatcher present");
+
+        assert_eq!(dispatcher.extraction_pattern, ExtractionPattern::Newer);
+        assert_eq!(dispatcher.selectors.len(), 1);
+        let selector = &dispatcher.selectors[0];
+        assert_eq!(selector.selector, 0x12345678);
+        assert_eq!(selector.target_address, 0x20);
+    }
 }
