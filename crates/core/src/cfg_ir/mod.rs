@@ -1,4 +1,6 @@
-//! Control Flow Graph (CFG) construction and mutation
+//! Control Flow Graph Intermediate Representation
+//!
+//! This module provides a structured graph representation of EVM bytecode
 
 use crate::Opcode;
 use crate::decoder::Instruction;
@@ -12,75 +14,20 @@ use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+mod trace;
+
+pub use trace::{
+    BlockBodySnapshot, BlockChangeSet, BlockModification, BlockPcDiff, BlockSnapshot,
+    BlockSnapshotKind, CfgIrDiff, CfgIrSnapshot, EdgeChangeSet, EdgeSnapshot, InstructionPcDiff,
+    JumpTargetKind as TraceJumpTargetKind, JumpTargetSnapshot, OperationKind, SectionSnapshot,
+    TraceEvent, block_modification, block_start_pcs, diff_from_block_changes,
+    diff_from_edge_changes, diff_from_pc_remap, snapshot_block_body, snapshot_bundle,
+    snapshot_edges,
+};
+
 type PcRemap = HashMap<usize, usize>;
 type RuntimeBounds = Option<(usize, usize)>;
 type ReindexOutcome = (PcRemap, RuntimeBounds);
-
-/// Operations recorded in the CFG trace.
-#[derive(Debug, Clone)]
-pub enum OperationKind {
-    Build {
-        body_blocks: usize,
-        sections: usize,
-    },
-    OverwriteBlock {
-        node: usize,
-    },
-    SetUnconditionalJump {
-        source: usize,
-        target: usize,
-    },
-    SetConditionalJump {
-        source: usize,
-        true_target: usize,
-        false_target: Option<usize>,
-    },
-    RebuildEdges {
-        node: usize,
-    },
-    WriteSymbolicImmediates {
-        node: usize,
-    },
-    ReindexPcs,
-    PatchJumpImmediates,
-    ReplaceBody {
-        instruction_count: usize,
-    },
-}
-
-/// Snapshot of the IR bundle captured after each operation.
-#[derive(Debug, Clone)]
-pub struct CfgIrSnapshot {
-    pub cfg: StableDiGraph<Block, EdgeType>,
-    pub pc_to_block: HashMap<usize, NodeIndex>,
-    pub clean_report: CleanReport,
-    pub sections: Vec<Section>,
-    pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
-    pub original_bytecode: Vec<u8>,
-    pub runtime_bounds: Option<(usize, usize)>,
-}
-
-impl From<&CfgIrBundle> for CfgIrSnapshot {
-    fn from(bundle: &CfgIrBundle) -> Self {
-        Self {
-            cfg: bundle.cfg.clone(),
-            pc_to_block: bundle.pc_to_block.clone(),
-            clean_report: bundle.clean_report.clone(),
-            sections: bundle.sections.clone(),
-            selector_mapping: bundle.selector_mapping.clone(),
-            original_bytecode: bundle.original_bytecode.clone(),
-            runtime_bounds: bundle.runtime_bounds,
-        }
-    }
-}
-
-/// Trace entry describing an applied CFG operation.
-#[derive(Debug, Clone)]
-pub struct TraceEvent {
-    pub kind: OperationKind,
-    pub snapshot: CfgIrSnapshot,
-    pub remapped_pcs: Option<HashMap<usize, usize>>,
-}
 
 /// CFG node representation.
 #[derive(Debug, Clone)]
@@ -164,7 +111,7 @@ pub enum JumpTarget {
 }
 
 /// Describes how to interpret the immediate used by a jump.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JumpEncoding {
     /// Immediate stores an absolute PC.
     Absolute,
@@ -228,16 +175,16 @@ impl CfgIrBundle {
         })
     }
 
-    /// Records a trace event capturing the current state of the bundle.
+    /// Records a trace event capturing how the bundle changed.
     pub fn record_operation(
         &mut self,
         kind: OperationKind,
+        diff: CfgIrDiff,
         remapped_pcs: Option<HashMap<usize, usize>>,
     ) {
-        let snapshot = CfgIrSnapshot::from(&*self);
         self.trace.push(TraceEvent {
             kind,
-            snapshot,
+            diff,
             remapped_pcs,
         });
     }
@@ -248,6 +195,7 @@ impl CfgIrBundle {
         node: NodeIndex,
         mut new_body: BlockBody,
     ) -> Result<(), Error> {
+        let before = snapshot_block_body(self, node);
         let runtime_bounds = self.runtime_bounds;
         if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
             new_body.start_pc = body.start_pc;
@@ -263,7 +211,17 @@ impl CfgIrBundle {
 
         self.rebuild_edges_for_block(node)?;
         self.assign_block_control(node, runtime_bounds);
-        self.record_operation(OperationKind::OverwriteBlock { node: node.index() }, None);
+        let after = snapshot_block_body(self, node);
+        let mut changes = Vec::new();
+        if let Some(change) = block_modification(node, before, after) {
+            changes.push(change);
+        }
+        let diff = diff_from_block_changes(changes);
+        self.record_operation(
+            OperationKind::OverwriteBlock { node: node.index() },
+            diff,
+            None,
+        );
         Ok(())
     }
 
@@ -276,6 +234,7 @@ impl CfgIrBundle {
         self.ensure_block(&source)?;
         self.ensure_block(&target)?;
 
+        let before = snapshot_block_body(self, source);
         let encoding = self.default_encoding_for(source);
         if let Some(Block::Body(body)) = self.cfg.node_weight_mut(source) {
             ensure_jump_pattern(body, Opcode::JUMP)?;
@@ -291,11 +250,18 @@ impl CfgIrBundle {
 
         self.rebuild_edges_for_block(source)?;
         self.write_symbolic_immediates_for_block(source)?;
+        let after = snapshot_block_body(self, source);
+        let mut changes = Vec::new();
+        if let Some(change) = block_modification(source, before, after) {
+            changes.push(change);
+        }
+        let diff = diff_from_block_changes(changes);
         self.record_operation(
             OperationKind::SetUnconditionalJump {
                 source: source.index(),
                 target: target.index(),
             },
+            diff,
             None,
         );
         Ok(())
@@ -314,6 +280,7 @@ impl CfgIrBundle {
             self.ensure_block(&false_node)?;
         }
 
+        let before = snapshot_block_body(self, source);
         let encoding = self.default_encoding_for(source);
         if let Some(Block::Body(body)) = self.cfg.node_weight_mut(source) {
             ensure_jump_pattern(body, Opcode::JUMPI)?;
@@ -333,12 +300,19 @@ impl CfgIrBundle {
 
         self.rebuild_edges_for_block(source)?;
         self.write_symbolic_immediates_for_block(source)?;
+        let after = snapshot_block_body(self, source);
+        let mut changes = Vec::new();
+        if let Some(change) = block_modification(source, before, after) {
+            changes.push(change);
+        }
+        let diff = diff_from_block_changes(changes);
         self.record_operation(
             OperationKind::SetConditionalJump {
                 source: source.index(),
                 true_target: true_target.index(),
                 false_target: false_target.map(|idx| idx.index()),
             },
+            diff,
             None,
         );
         Ok(())
@@ -364,10 +338,12 @@ impl CfgIrBundle {
         rebuilt.trace = self.trace.clone();
 
         *self = rebuilt;
+        let snapshot = snapshot_bundle(self);
         self.record_operation(
             OperationKind::ReplaceBody {
                 instruction_count: instructions.len(),
             },
+            CfgIrDiff::FullSnapshot(snapshot),
             None,
         );
         Ok(())
@@ -429,6 +405,7 @@ impl CfgIrBundle {
     /// for blocks using the new API.
     /// Renumbers program counters and returns a mapping from old PCs to their new positions.
     pub fn reindex_pcs(&mut self) -> Result<ReindexOutcome, Error> {
+        let before_blocks = block_start_pcs(self);
         let mut mapping = HashMap::new();
         let old_runtime_bounds = self.runtime_bounds;
         let mut blocks: Vec<_> = self
@@ -509,8 +486,39 @@ impl CfgIrBundle {
             }
         }
 
+        let after_blocks = block_start_pcs(self);
+        let after_lookup: HashMap<_, _> = after_blocks.iter().cloned().collect();
+        let mut block_diffs = Vec::new();
+        for (node, old_pc) in before_blocks {
+            if let Some(new_pc) = after_lookup.get(&node) {
+                if old_pc != *new_pc {
+                    block_diffs.push(BlockPcDiff {
+                        node: node.index(),
+                        old_start_pc: old_pc,
+                        new_start_pc: *new_pc,
+                    });
+                }
+            }
+        }
+
+        let instruction_diffs: Vec<InstructionPcDiff> = mapping
+            .iter()
+            .filter_map(|(old_pc, new_pc)| {
+                if old_pc != new_pc {
+                    Some(InstructionPcDiff {
+                        old_pc: *old_pc,
+                        new_pc: *new_pc,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let diff = diff_from_pc_remap(block_diffs, instruction_diffs);
+
         self.write_symbolic_immediates()?;
-        self.record_operation(OperationKind::ReindexPcs, Some(mapping.clone()));
+        self.record_operation(OperationKind::ReindexPcs, diff, Some(mapping.clone()));
 
         Ok((mapping, old_runtime_bounds))
     }
@@ -526,6 +534,7 @@ impl CfgIrBundle {
         let runtime_bounds = self.runtime_bounds;
         let old_runtime_start = old_runtime_bounds.map(|(start, _)| start);
         let nodes: Vec<_> = self.cfg.node_indices().collect();
+        let mut block_changes = Vec::new();
         for node in nodes {
             let has_symbolic_target = matches!(
                 self.block_control(node),
@@ -543,15 +552,22 @@ impl CfgIrBundle {
                 "patch_jump_immediates: evaluating block",
             );
 
-            self.patch_legacy_immediates_for_block(
+            if let Some(change) = self.patch_legacy_immediates_for_block(
                 node,
                 runtime_bounds,
                 old_runtime_start,
                 pc_mapping,
                 has_symbolic_target,
-            )?;
+            )? {
+                block_changes.push(change);
+            }
         }
-        self.record_operation(OperationKind::PatchJumpImmediates, Some(pc_mapping.clone()));
+        let diff = diff_from_block_changes(block_changes);
+        self.record_operation(
+            OperationKind::PatchJumpImmediates,
+            diff,
+            Some(pc_mapping.clone()),
+        );
         Ok(())
     }
 
@@ -562,7 +578,7 @@ impl CfgIrBundle {
         old_runtime_start: Option<usize>,
         mapping: &HashMap<usize, usize>,
         skip_symbolic_terminal: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<BlockModification>, Error> {
         let control = self.block_control(node);
         let fallback_immediate = control.as_ref().and_then(|ctrl| match ctrl {
             BlockControl::Jump { target } => self.resolve_target_value(target),
@@ -570,15 +586,17 @@ impl CfgIrBundle {
             _ => None,
         });
 
+        let before = snapshot_block_body(self, node);
+
         let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) else {
-            return Ok(());
+            return Ok(None);
         };
 
         let in_runtime = body.is_runtime(runtime_bounds);
         let new_runtime_start = runtime_bounds.map(|(start, _)| start);
         let patterns = find_jump_patterns(&body.instructions);
         if patterns.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
         let terminal_pattern = if skip_symbolic_terminal {
@@ -718,13 +736,15 @@ impl CfgIrBundle {
             }
         }
 
-        Ok(())
+        let after = snapshot_block_body(self, node);
+        Ok(block_modification(node, before, after))
     }
 
     /// Drops and regenerates the outgoing edges for a particular block, keeping graph metadata in
     /// sync after instruction edits.
     pub fn rebuild_edges_for_block(&mut self, node_idx: NodeIndex) -> Result<(), Error> {
         let runtime_bounds = self.runtime_bounds;
+        let removed_edges = snapshot_edges(self, node_idx);
         // remove existing outgoing edges
         let outgoing: Vec<_> = self
             .cfg
@@ -745,61 +765,116 @@ impl CfgIrBundle {
             BlockControl::Unknown
         };
 
-        self.emit_edges(node_idx, &control)?;
+        let added_edges = self.emit_edges(node_idx, &control)?;
+        let diff = diff_from_edge_changes(node_idx, removed_edges, added_edges);
 
         self.record_operation(
             OperationKind::RebuildEdges {
                 node: node_idx.index(),
             },
+            diff,
             None,
         );
         Ok(())
     }
 
     /// Adds edges that reflect the supplied control descriptor.
-    fn emit_edges(&mut self, node: NodeIndex, control: &BlockControl) -> Result<(), Error> {
+    fn emit_edges(
+        &mut self,
+        node: NodeIndex,
+        control: &BlockControl,
+    ) -> Result<Vec<EdgeSnapshot>, Error> {
         let exit = self.find_exit_node();
+        let mut added = Vec::new();
         match control {
-            BlockControl::Unknown => Ok(()),
+            BlockControl::Unknown => Ok(added),
             BlockControl::Terminal => {
-                self.cfg.add_edge(node, exit, EdgeType::Fallthrough);
-                Ok(())
+                let edge = self.cfg.add_edge(node, exit, EdgeType::Fallthrough);
+                added.push(EdgeSnapshot {
+                    id: edge.index(),
+                    source: node.index(),
+                    target: exit.index(),
+                    kind: EdgeType::Fallthrough,
+                });
+                Ok(added)
             }
             BlockControl::Fallthrough => {
                 if let Some(next) = self.find_next_body(node) {
-                    self.cfg.add_edge(node, next, EdgeType::Fallthrough);
+                    let edge = self.cfg.add_edge(node, next, EdgeType::Fallthrough);
+                    added.push(EdgeSnapshot {
+                        id: edge.index(),
+                        source: node.index(),
+                        target: next.index(),
+                        kind: EdgeType::Fallthrough,
+                    });
                 } else {
-                    self.cfg.add_edge(node, exit, EdgeType::Fallthrough);
+                    let edge = self.cfg.add_edge(node, exit, EdgeType::Fallthrough);
+                    added.push(EdgeSnapshot {
+                        id: edge.index(),
+                        source: node.index(),
+                        target: exit.index(),
+                        kind: EdgeType::Fallthrough,
+                    });
                 }
-                Ok(())
+                Ok(added)
             }
             BlockControl::Jump { target } => {
                 if let Some(target_node) = target.as_block() {
-                    self.cfg.add_edge(node, target_node, EdgeType::Jump);
+                    let edge = self.cfg.add_edge(node, target_node, EdgeType::Jump);
+                    added.push(EdgeSnapshot {
+                        id: edge.index(),
+                        source: node.index(),
+                        target: target_node.index(),
+                        kind: EdgeType::Jump,
+                    });
                 }
-                Ok(())
+                Ok(added)
             }
             BlockControl::Branch {
                 true_target,
                 false_target,
             } => {
                 if let Some(target_node) = true_target.as_block() {
-                    self.cfg.add_edge(node, target_node, EdgeType::BranchTrue);
+                    let edge = self.cfg.add_edge(node, target_node, EdgeType::BranchTrue);
+                    added.push(EdgeSnapshot {
+                        id: edge.index(),
+                        source: node.index(),
+                        target: target_node.index(),
+                        kind: EdgeType::BranchTrue,
+                    });
                 }
 
                 match false_target.as_block() {
                     Some(node_idx) => {
-                        self.cfg.add_edge(node, node_idx, EdgeType::BranchFalse);
+                        let edge = self.cfg.add_edge(node, node_idx, EdgeType::BranchFalse);
+                        added.push(EdgeSnapshot {
+                            id: edge.index(),
+                            source: node.index(),
+                            target: node_idx.index(),
+                            kind: EdgeType::BranchFalse,
+                        });
                     }
                     None => {
                         if let Some(next) = self.find_next_body(node) {
-                            self.cfg.add_edge(node, next, EdgeType::BranchFalse);
+                            let edge = self.cfg.add_edge(node, next, EdgeType::BranchFalse);
+                            added.push(EdgeSnapshot {
+                                id: edge.index(),
+                                source: node.index(),
+                                target: next.index(),
+                                kind: EdgeType::BranchFalse,
+                            });
                         } else {
-                            self.cfg.add_edge(node, exit, EdgeType::BranchFalse);
+                            let edge = self.cfg.add_edge(node, exit, EdgeType::BranchFalse);
+                            added.push(EdgeSnapshot {
+                                id: edge.index(),
+                                source: node.index(),
+                                target: exit.index(),
+                                kind: EdgeType::BranchFalse,
+                            });
                         }
                     }
                 }
-                Ok(())
+                Ok(added)
             }
         }
     }
@@ -829,12 +904,16 @@ impl CfgIrBundle {
             return Ok(());
         };
 
+        let before = snapshot_block_body(self, node);
+        let mut changed = false;
+
         if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node)
             && let Some(pattern) = detect_jump_pattern(&body.instructions)
         {
             match pattern {
                 JumpPattern::Direct { push_idx } => {
                     apply_immediate(&mut body.instructions[push_idx], value)?;
+                    changed = true;
                 }
                 JumpPattern::SplitAdd {
                     push_a_idx,
@@ -846,13 +925,26 @@ impl CfgIrBundle {
                         push_b_idx,
                         value,
                     )?;
+                    changed = true;
                 }
                 JumpPattern::PcRelative { .. } => {}
             }
         }
 
+        if !changed {
+            return Ok(());
+        }
+
+        let after = snapshot_block_body(self, node);
+        let mut changes = Vec::new();
+        if let Some(change) = block_modification(node, before, after) {
+            changes.push(change);
+        }
+        let diff = diff_from_block_changes(changes);
+
         self.record_operation(
             OperationKind::WriteSymbolicImmediates { node: node.index() },
+            diff,
             None,
         );
         Ok(())
@@ -961,11 +1053,13 @@ pub fn build_cfg_ir(
         .node_indices()
         .filter(|idx| matches!(bundle.cfg[*idx], Block::Body(_)))
         .count();
+    let snapshot = snapshot_bundle(&bundle);
     bundle.record_operation(
         OperationKind::Build {
             body_blocks,
             sections: sections.len(),
         },
+        CfgIrDiff::FullSnapshot(snapshot),
         None,
     );
     Ok(bundle)
@@ -1070,7 +1164,7 @@ fn analyse_and_connect(
             BlockControl::Unknown
         };
 
-        emit_edges(cfg, *node, &control)?;
+        let _ = emit_edges(cfg, *node, &control)?;
     }
     Ok(())
 }
@@ -1080,27 +1174,53 @@ fn emit_edges(
     cfg: &mut StableDiGraph<Block, EdgeType>,
     source: NodeIndex,
     control: &BlockControl,
-) -> Result<(), Error> {
+) -> Result<Vec<EdgeSnapshot>, Error> {
     let exit = cfg
         .node_indices()
         .find(|idx| matches!(cfg[*idx], Block::Exit))
         .unwrap();
 
+    let mut added = Vec::new();
+
     match control {
         BlockControl::Unknown => {}
         BlockControl::Terminal => {
-            cfg.add_edge(source, exit, EdgeType::Fallthrough);
+            let edge = cfg.add_edge(source, exit, EdgeType::Fallthrough);
+            added.push(EdgeSnapshot {
+                id: edge.index(),
+                source: source.index(),
+                target: exit.index(),
+                kind: EdgeType::Fallthrough,
+            });
         }
         BlockControl::Fallthrough => {
             if let Some(next) = find_next(cfg, source) {
-                cfg.add_edge(source, next, EdgeType::Fallthrough);
+                let edge = cfg.add_edge(source, next, EdgeType::Fallthrough);
+                added.push(EdgeSnapshot {
+                    id: edge.index(),
+                    source: source.index(),
+                    target: next.index(),
+                    kind: EdgeType::Fallthrough,
+                });
             } else {
-                cfg.add_edge(source, exit, EdgeType::Fallthrough);
+                let edge = cfg.add_edge(source, exit, EdgeType::Fallthrough);
+                added.push(EdgeSnapshot {
+                    id: edge.index(),
+                    source: source.index(),
+                    target: exit.index(),
+                    kind: EdgeType::Fallthrough,
+                });
             }
         }
         BlockControl::Jump { target } => {
             if let Some(target_node) = target.as_block() {
-                cfg.add_edge(source, target_node, EdgeType::Jump);
+                let edge = cfg.add_edge(source, target_node, EdgeType::Jump);
+                added.push(EdgeSnapshot {
+                    id: edge.index(),
+                    source: source.index(),
+                    target: target_node.index(),
+                    kind: EdgeType::Jump,
+                });
             }
         }
         BlockControl::Branch {
@@ -1108,19 +1228,43 @@ fn emit_edges(
             false_target,
         } => {
             if let Some(target_node) = true_target.as_block() {
-                cfg.add_edge(source, target_node, EdgeType::BranchTrue);
+                let edge = cfg.add_edge(source, target_node, EdgeType::BranchTrue);
+                added.push(EdgeSnapshot {
+                    id: edge.index(),
+                    source: source.index(),
+                    target: target_node.index(),
+                    kind: EdgeType::BranchTrue,
+                });
             }
             if let Some(target_node) = false_target.as_block() {
-                cfg.add_edge(source, target_node, EdgeType::BranchFalse);
+                let edge = cfg.add_edge(source, target_node, EdgeType::BranchFalse);
+                added.push(EdgeSnapshot {
+                    id: edge.index(),
+                    source: source.index(),
+                    target: target_node.index(),
+                    kind: EdgeType::BranchFalse,
+                });
             } else if let Some(next) = find_next(cfg, source) {
-                cfg.add_edge(source, next, EdgeType::BranchFalse);
+                let edge = cfg.add_edge(source, next, EdgeType::BranchFalse);
+                added.push(EdgeSnapshot {
+                    id: edge.index(),
+                    source: source.index(),
+                    target: next.index(),
+                    kind: EdgeType::BranchFalse,
+                });
             } else {
-                cfg.add_edge(source, exit, EdgeType::BranchFalse);
+                let edge = cfg.add_edge(source, exit, EdgeType::BranchFalse);
+                added.push(EdgeSnapshot {
+                    id: edge.index(),
+                    source: source.index(),
+                    target: exit.index(),
+                    kind: EdgeType::BranchFalse,
+                });
             }
         }
     }
 
-    Ok(())
+    Ok(added)
 }
 
 /// Finds the block that executes immediately after `node` based on program counter ordering.
