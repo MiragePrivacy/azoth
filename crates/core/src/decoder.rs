@@ -3,12 +3,13 @@
 use crate::Opcode;
 use crate::result::Error;
 use heimdall::{DisassemblerArgsBuilder, disassemble};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 use tiny_keccak::{Hasher, Keccak};
 
 /// Single disassembled EVM instruction with PC, opcode, and optional immediate data.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Instruction {
     /// Program counter (byte offset)
     pub pc: usize,
@@ -195,10 +196,10 @@ impl Instruction {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_bytecode, parse_assembly, SourceType};
+    use super::{SourceType, decode_bytecode, parse_assembly};
+    use crate::Opcode;
     use crate::encoder;
     use crate::result::Error;
-    use crate::Opcode;
 
     const SAMPLE_ASM: &str = "
 000000 PUSH1 0x01
@@ -257,8 +258,9 @@ mod tests {
     #[tokio::test]
     async fn decode_bytecode_produces_instructions_and_metadata() {
         let bytecode = include_str!("../../../tests/bytecode/storage.hex");
-        let (instructions, info, asm, bytes) =
-            decode_bytecode(bytecode, false).await.expect("decode bytecode");
+        let (instructions, info, asm, bytes) = decode_bytecode(bytecode, false)
+            .await
+            .expect("decode bytecode");
 
         assert!(!instructions.is_empty());
         assert!(!asm.is_empty());
@@ -268,7 +270,8 @@ mod tests {
         let reparsed = parse_assembly(&asm).expect("parse decoded assembly");
         assert_eq!(reparsed, instructions);
 
-        let reencoded = encoder::encode(&instructions, &bytes).expect("encode decoded instructions");
+        let reencoded =
+            encoder::encode(&instructions, &bytes).expect("encode decoded instructions");
         assert_eq!(reencoded, bytes);
 
         // storage hex starts with PUSH1 0x80 at pc=0
