@@ -18,3 +18,4 @@ num-bigint.workspace = true
 indexmap.workspace = true
 petgraph.workspace = true
 eot.workspace = true
+revm.workspace = true

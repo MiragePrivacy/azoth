@@ -1,10 +1,10 @@
 use crate::{Error, Result};
-use azoth_core::cfg_ir::{Block, CfgIrBundle, EdgeType};
+use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle, EdgeType};
 use azoth_core::strip::CleanReport;
 use petgraph::{
     algo::dominators::simple_fast,
-    graph::{DiGraph, NodeIndex},
-    stable_graph::IndexType,
+    graph::NodeIndex,
+    stable_graph::{IndexType, StableDiGraph},
     visit::Reversed,
 };
 use serde::{Deserialize, Serialize};
@@ -56,7 +56,7 @@ pub fn collect_metrics(ir: &CfgIrBundle, report: &CleanReport) -> Result<Metrics
     let block_cnt = ir
         .cfg
         .node_indices()
-        .filter(|&n| matches!(ir.cfg[n], Block::Body { .. }))
+        .filter(|&n| matches!(ir.cfg[n], Block::Body(_)))
         .count();
     if block_cnt == 0 {
         return Err(Error::NoBodyBlocks);
@@ -88,11 +88,11 @@ pub fn collect_metrics(ir: &CfgIrBundle, report: &CleanReport) -> Result<Metrics
 pub fn max_stack_per_block(ir: &CfgIrBundle) -> HashMap<usize, usize> {
     let mut map = HashMap::new();
     for node in ir.cfg.node_indices() {
-        if let Some(Block::Body {
+        if let Some(Block::Body(BlockBody {
             start_pc,
             max_stack,
             ..
-        }) = ir.cfg.node_weight(node)
+        })) = ir.cfg.node_weight(node)
         {
             map.insert(*start_pc, *max_stack);
         }
@@ -115,7 +115,9 @@ type DominatorMap<Ix> = HashMap<NodeIndex<Ix>, NodeIndex<Ix>>;
 /// # Returns
 /// A tuple of two hash maps: (dominators, post-dominators), mapping node indices to their immediate
 /// dominator/post-dominator.
-pub fn dominator_pairs<Ix>(g: &DiGraph<Block, EdgeType, Ix>) -> (DominatorMap<Ix>, DominatorMap<Ix>)
+pub fn dominator_pairs<Ix>(
+    g: &StableDiGraph<Block, EdgeType, Ix>,
+) -> (DominatorMap<Ix>, DominatorMap<Ix>)
 where
     Ix: IndexType,
 {

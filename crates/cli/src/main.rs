@@ -19,6 +19,8 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
 
     let cli = Cli::parse();

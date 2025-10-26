@@ -34,8 +34,12 @@ pub fn mock_token_bytecode() -> Bytes {
 }
 
 #[allow(dead_code)]
-pub const ESCROW_CONTRACT_BYTECODE: &str =
-    include_str!("../../../examples/escrow-bytecode/artifacts/bytecode.hex");
+pub const ESCROW_CONTRACT_DEPLOYMENT_BYTECODE: &str =
+    include_str!("../../../examples/escrow-bytecode/artifacts/deployment_bytecode.hex");
+
+#[allow(dead_code)]
+pub const ESCROW_CONTRACT_RUNTIME_BYTECODE: &str =
+    include_str!("../../../examples/escrow-bytecode/artifacts/runtime_bytecode.hex");
 
 /// Prepare escrow contract bytecode with constructor arguments
 #[allow(dead_code)]
@@ -279,3 +283,9 @@ mod deploy;
 
 #[cfg(test)]
 mod escrow;
+
+#[cfg(test)]
+mod test_original;
+
+#[cfg(test)]
+mod test_counter;

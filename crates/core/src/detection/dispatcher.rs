@@ -57,7 +57,8 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
     if instructions.is_empty() {
         return None;
     }
-    let (extraction_start, extraction_len) = find_extraction_pattern(instructions)?;
+    let (extraction_start, extraction_len, extraction_pattern) =
+        find_extraction_pattern(instructions)?;
 
     let mut selectors = Vec::new();
     let mut stack: Vec<StackValue> = Vec::with_capacity(32); // EVM stack max depth
@@ -205,20 +206,37 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
             "Stack tracking found {} selector-target pairs",
             selectors.len()
         );
+
+        // Find the actual start of the dispatcher by looking backwards from extraction_start
+        // for the dispatcher preamble (callvalue check, calldata size check, etc.)
+        let dispatcher_start = find_dispatcher_preamble(instructions, extraction_start);
+
+        tracing::debug!(
+            "Dispatcher range: preamble starts at {}, extraction at {}, selectors end at ~{}",
+            dispatcher_start,
+            extraction_start,
+            selectors
+                .last()
+                .map(|s| s.instruction_index)
+                .unwrap_or(extraction_start)
+        );
+
         Some(DispatcherInfo {
-            start_offset: extraction_start,
+            start_offset: dispatcher_start,
             end_offset: selectors
                 .last()
                 .map(|s| s.instruction_index + 10)
                 .unwrap_or(extraction_start + 100),
             selectors,
-            extraction_pattern: ExtractionPattern::Standard,
+            extraction_pattern,
         })
     }
 }
 
 /// Locates the calldata extraction pattern in the first 200 instructions and returns its index and length.
-fn find_extraction_pattern(instructions: &[Instruction]) -> Option<(usize, usize)> {
+fn find_extraction_pattern(
+    instructions: &[Instruction],
+) -> Option<(usize, usize, ExtractionPattern)> {
     for i in 0..instructions.len().saturating_sub(3).min(200) {
         let instrs = &instructions[i..];
 
@@ -233,7 +251,7 @@ fn find_extraction_pattern(instructions: &[Instruction]) -> Option<(usize, usize
             && instrs[2].op == Opcode::SHR
         {
             tracing::debug!("Found newer extraction pattern at instruction {}", i);
-            return Some((i, 3));
+            return Some((i, 3, ExtractionPattern::Newer));
         }
 
         // Standard pattern: [PUSH1 0x00 | PUSH0] CALLDATALOAD PUSH1 0xE0 SHR (4 instructions)
@@ -249,14 +267,166 @@ fn find_extraction_pattern(instructions: &[Instruction]) -> Option<(usize, usize
                 && instrs[3].op == Opcode::SHR
             {
                 tracing::debug!("Found standard extraction pattern at instruction {}", i);
-                return Some((i, 4));
+                return Some((i, 4, ExtractionPattern::Standard));
             }
         }
     }
     None
 }
 
-/// Quick check for dispatcher presence without extracting selector details.
-pub fn has_dispatcher(instructions: &[Instruction]) -> bool {
-    detect_function_dispatcher(instructions).is_some()
+/// Finds the actual start of the dispatcher by scanning backwards from the extraction pattern
+/// to locate the dispatcher preamble (free memory pointer, callvalue check, etc.).
+fn find_dispatcher_preamble(instructions: &[Instruction], extraction_start: usize) -> usize {
+    // Common preamble patterns in Solidity dispatchers:
+    // 1. Free memory pointer setup: PUSH1 0x80 PUSH1 0x40 MSTORE
+    // 2. Callvalue check: CALLVALUE DUP1 ISZERO PUSH2 ... JUMPI
+    // 3. Calldatasize check: PUSH1 0x04 CALLDATASIZE LT
+
+    // For runtime-only bytecode, the dispatcher typically starts at instruction 0
+    // with the free memory pointer setup
+    if extraction_start >= 3 && instructions.len() >= 3 {
+        // Check for free memory pointer pattern at the very beginning
+        if instructions[0].op == Opcode::PUSH(1)
+            && instructions[0].imm.as_deref() == Some("80")
+            && instructions[1].op == Opcode::PUSH(1)
+            && instructions[1].imm.as_deref() == Some("40")
+            && instructions[2].op == Opcode::MSTORE
+        {
+            tracing::debug!(
+                "Found dispatcher preamble at instruction 0 (free memory pointer setup)"
+            );
+            return 0;
+        }
+    }
+
+    // If no clear preamble pattern found at start, scan backwards from extraction
+    // looking for CALLVALUE check or CALLDATASIZE check
+    let search_start = extraction_start.saturating_sub(20).max(0);
+
+    for i in search_start..extraction_start {
+        if i + 2 < instructions.len() {
+            let instrs = &instructions[i..];
+
+            // Check for: CALLVALUE DUP1 ISZERO
+            if instrs[0].op == Opcode::CALLVALUE
+                && instrs[1].op == Opcode::DUP(1)
+                && instrs[2].op == Opcode::ISZERO
+            {
+                tracing::debug!(
+                    "Found dispatcher preamble at instruction {} (callvalue check)",
+                    i
+                );
+                return i;
+            }
+
+            // Check for: PUSH1 0x04 CALLDATASIZE
+            if instrs[0].op == Opcode::PUSH(1)
+                && instrs[0].imm.as_deref() == Some("04")
+                && instrs[1].op == Opcode::CALLDATASIZE
+            {
+                tracing::debug!(
+                    "Found dispatcher preamble at instruction {} (calldatasize check)",
+                    i
+                );
+                return i;
+            }
+        }
+    }
+
+    // Fallback: if we can't find a clear preamble pattern, start a bit before extraction
+    // This is safer than starting at 0 blindly or at extraction_start
+    let fallback_start = extraction_start.saturating_sub(10);
+    tracing::debug!(
+        "Could not find clear preamble pattern, using fallback start at instruction {}",
+        fallback_start
+    );
+    fallback_start
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExtractionPattern, detect_function_dispatcher};
+    use crate::Opcode;
+    use crate::decoder::Instruction;
+
+    fn build(seq: &[(usize, Opcode, Option<&'static str>)]) -> Vec<Instruction> {
+        seq.iter()
+            .map(|(pc, op, imm)| Instruction {
+                pc: *pc,
+                op: op.clone(),
+                imm: imm.map(|s| s.into()),
+            })
+            .collect()
+    }
+
+    fn sample_dispatcher_instructions(newer_pattern: bool) -> Vec<Instruction> {
+        let mut seq = Vec::new();
+        seq.extend_from_slice(&[
+            (0x00, Opcode::PUSH(1), Some("80")),
+            (0x02, Opcode::PUSH(1), Some("40")),
+            (0x04, Opcode::MSTORE, None),
+            (0x05, Opcode::CALLVALUE, None),
+            (0x06, Opcode::DUP(1), None),
+            (0x07, Opcode::ISZERO, None),
+            (0x08, Opcode::PUSH(2), Some("0012")),
+            (0x0b, Opcode::JUMPI, None),
+        ]);
+
+        seq.extend_from_slice(if newer_pattern {
+            &[
+                (0x0c, Opcode::CALLDATALOAD, None),
+                (0x0d, Opcode::PUSH(1), Some("e0")),
+                (0x0f, Opcode::SHR, None),
+            ][..]
+        } else {
+            &[
+                (0x0c, Opcode::PUSH(1), Some("00")),
+                (0x0e, Opcode::CALLDATALOAD, None),
+                (0x0f, Opcode::PUSH(1), Some("e0")),
+                (0x11, Opcode::SHR, None),
+            ][..]
+        });
+
+        seq.extend_from_slice(&[
+            (0x12, Opcode::DUP(1), None),
+            (0x13, Opcode::PUSH(4), Some("12345678")),
+            (0x18, Opcode::EQ, None),
+            (0x19, Opcode::PUSH(2), Some("0020")),
+            (0x1c, Opcode::JUMPI, None),
+            (0x1d, Opcode::PUSH(1), Some("00")),
+            (0x1f, Opcode::POP, None),
+            (0x20, Opcode::JUMPDEST, None),
+            (0x21, Opcode::STOP, None),
+            (0x22, Opcode::JUMPDEST, None),
+            (0x23, Opcode::STOP, None),
+        ]);
+
+        build(&seq)
+    }
+
+    #[test]
+    fn detects_dispatcher_and_extracts_selectors() {
+        let instructions = sample_dispatcher_instructions(false);
+        let dispatcher = detect_function_dispatcher(&instructions).expect("dispatcher present");
+
+        assert_eq!(dispatcher.extraction_pattern, ExtractionPattern::Standard);
+        assert_eq!(dispatcher.start_offset, 0);
+        assert_eq!(dispatcher.selectors.len(), 1);
+
+        let selector = &dispatcher.selectors[0];
+        assert_eq!(selector.selector, 0x12345678);
+        assert_eq!(selector.target_address, 0x20);
+    }
+
+    #[test]
+    fn detects_newer_extraction_pattern() {
+        let instructions = sample_dispatcher_instructions(true);
+        let dispatcher = detect_function_dispatcher(&instructions).expect("dispatcher present");
+
+        assert_eq!(dispatcher.extraction_pattern, ExtractionPattern::Newer);
+        assert_eq!(dispatcher.selectors.len(), 1);
+        let selector = &dispatcher.selectors[0];
+        assert_eq!(selector.selector, 0x12345678);
+        assert_eq!(selector.target_address, 0x20);
+    }
 }

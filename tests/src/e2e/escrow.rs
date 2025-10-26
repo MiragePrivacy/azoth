@@ -6,11 +6,9 @@
 
 use super::{
     mock_token_bytecode, prepare_bytecode, EscrowMappings, ObfuscatedCaller,
-    ESCROW_CONTRACT_BYTECODE, MOCK_TOKEN_ADDR,
+    ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, MOCK_TOKEN_ADDR,
 };
-use azoth_core::seed::Seed;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
-use azoth_transform::PassConfig;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use revm::bytecode::Bytecode;
@@ -26,18 +24,14 @@ use revm::{Context, DatabaseCommit, ExecuteEvm, MainBuilder, MainContext};
 async fn test_obfuscated_function_calls() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .try_init();
 
     // obfuscate contract
-    let seed = Seed::generate();
-    let config = ObfuscationConfig {
-        seed,
-        transforms: vec![],
-        pass_config: PassConfig::default(),
-        preserve_unknown_opcodes: true,
-    };
+    let config = ObfuscationConfig::default();
 
-    let obfuscation_result = obfuscate_bytecode(ESCROW_CONTRACT_BYTECODE, config)
+    let obfuscation_result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
         .await
         .map_err(|e| eyre!("Failed to obfuscate bytecode: {:?}", e))?;
 
@@ -47,10 +41,6 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         obfuscation_result.obfuscated_size,
         obfuscation_result.size_increase_percentage
     );
-
-    // Debug: Print first 500 bytes of obfuscated bytecode
-    let obf_hex = hex::encode(&obfuscation_result.obfuscated_bytecode);
-    println!("{}", obf_hex);
 
     // extracting selector mappings
     let selector_mapping = obfuscation_result
@@ -135,6 +125,95 @@ async fn test_obfuscated_function_calls() -> Result<()> {
 
     println!("✓ Obfuscated contract deployed at: {}", contract_address);
 
+    // Validate all PUSH+JUMP pairs in deployed bytecode
+    println!("\n=== Validating Deployed Bytecode ===");
+    let deployed_code = evm
+        .db()
+        .cache
+        .accounts
+        .get(&contract_address)
+        .and_then(|acc| acc.info.code.as_ref())
+        .ok_or_else(|| eyre!("Failed to get deployed code"))?;
+
+    let deployed_bytes = match deployed_code {
+        Bytecode::LegacyAnalyzed(analyzed) => analyzed.bytecode(),
+        _ => return Err(eyre!("Unexpected bytecode format")),
+    };
+
+    // Decode and validate
+    let (deployed_instructions, _, _, _) =
+        azoth_core::decoder::decode_bytecode(&hex::encode(deployed_bytes), false)
+            .await
+            .map_err(|e| eyre!("Failed to decode deployed bytecode: {:?}", e))?;
+
+    // Find all JUMPDESTs
+    let jumpdests: std::collections::HashSet<usize> = deployed_instructions
+        .iter()
+        .filter(|i| matches!(i.op, azoth_core::Opcode::JUMPDEST))
+        .map(|i| i.pc)
+        .collect();
+
+    println!(
+        "Obfuscated deployed bytecode has {} JUMPDESTs",
+        jumpdests.len()
+    );
+
+    // Check all PUSH+JUMP/JUMPI pairs
+    let mut valid_jumps = 0;
+    let mut invalid_jumps = Vec::new();
+    for i in 0..deployed_instructions.len().saturating_sub(1) {
+        let curr = &deployed_instructions[i];
+        let next = &deployed_instructions[i + 1];
+
+        if matches!(curr.op, azoth_core::Opcode::PUSH(_))
+            && matches!(
+                next.op,
+                azoth_core::Opcode::JUMP | azoth_core::Opcode::JUMPI
+            )
+        {
+            if let Some(target_hex) = &curr.imm {
+                if let Ok(target) = usize::from_str_radix(target_hex, 16) {
+                    let has_jumpdest = jumpdests.contains(&target);
+                    if has_jumpdest {
+                        valid_jumps += 1;
+                    } else {
+                        invalid_jumps.push((curr.pc, target, next.op));
+                    }
+                }
+            }
+        }
+    }
+
+    println!("Obfuscated deployed bytecode jump statistics:");
+    println!("  Total jumps: {}", valid_jumps + invalid_jumps.len());
+    println!("  Valid jumps: {}", valid_jumps);
+    println!("  Invalid jumps: {}", invalid_jumps.len());
+
+    if !invalid_jumps.is_empty() {
+        println!("\n=== Invalid Jump Details (first 10) ===");
+        for (i, (push_pc, target, jump_type)) in invalid_jumps.iter().take(10).enumerate() {
+            println!(
+                "  [{}] PUSH at PC 0x{:x} -> target 0x{:x} ({:?}) - NO JUMPDEST",
+                i, push_pc, target, jump_type
+            );
+        }
+        println!("\n=== All Available JUMPDESTs (first 20) ===");
+        let mut jd_list: Vec<_> = jumpdests.iter().collect();
+        jd_list.sort();
+        for (i, jd) in jd_list.iter().take(20).enumerate() {
+            println!("  [{}] JUMPDEST at PC 0x{:x}", i, jd);
+        }
+
+        return Err(eyre!(
+            "Found {} invalid jump targets in deployed bytecode! First invalid: PUSH at 0x{:x} -> 0x{:x}",
+            invalid_jumps.len(),
+            invalid_jumps[0].0,
+            invalid_jumps[0].1
+        ));
+    }
+
+    println!("✓ All PUSH+JUMP pairs target valid JUMPDESTs\n");
+
     let caller = ObfuscatedCaller::new(escrow_mappings);
 
     let is_bonded_calldata = caller.is_bonded_call_data();
@@ -156,6 +235,10 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     let call_result = evm.transact(call_tx);
     println!("Call result: {:?}", call_result);
     let call_result = call_result.map_err(|e| eyre!("Call transaction failed: {:?}", e))?;
+
+    // Persist nonce/state changes produced by the view call so the next
+    // transaction sees the incremented account nonce.
+    evm.db_mut().commit(call_result.state.clone());
 
     // Increment nonce after successful transaction
     deployer_nonce += 1;
@@ -242,6 +325,8 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         .transact(funded_tx)
         .map_err(|e| eyre!("Funded check failed: {:?}", e))?;
 
+    evm.db_mut().commit(funded_result.state.clone());
+
     // Increment nonce after successful transaction
     deployer_nonce += 1;
 
@@ -252,7 +337,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         }
     }
 
-    let bond_amount = U256::from(1000);
+    let bond_amount = U256::from(2500);
     let bond_calldata = caller.bond_call_data(bond_amount);
     println!("  Calldata (obfuscated): 0x{}", hex::encode(&bond_calldata));
 
@@ -318,6 +403,8 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         .transact(verify_tx)
         .map_err(|e| eyre!("Verification transaction failed: {:?}", e))?;
 
+    evm.db_mut().commit(verify_result.state.clone());
+
     let is_bonded_result = match verify_result.result {
         ExecutionResult::Success { output, .. } => match output {
             Output::Call(data) => data,
@@ -341,7 +428,6 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     println!("✓ Valid tokens route to correct functions");
     println!("✓ Token extraction works with function arguments (bond with uint256)");
     println!("✓ State changes are preserved through obfuscation");
-    println!("✓ No stack underflows detected");
 
     Ok(())
 }

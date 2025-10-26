@@ -134,6 +134,27 @@ pub fn locate_sections(bytes: &[u8], instructions: &[Instruction]) -> Result<Vec
         });
     }
 
+    // Adjust init_end to include small gaps (padding bytes) if no constructor args detected
+    let adjusted_init_end = if !has_constructor_args
+        && runtime_start > init_end
+        && runtime_start > 0
+    {
+        let gap = runtime_start - init_end;
+        if gap < 4 {
+            tracing::debug!(
+                "Including {} padding byte(s) between init_end ({}) and runtime_start ({}) in init section",
+                gap,
+                init_end,
+                runtime_start
+            );
+            runtime_start
+        } else {
+            init_end
+        }
+    } else {
+        init_end
+    };
+
     // Only push Padding if ConstructorArgs is not present
     if !has_constructor_args && let Some((pad_offset, pad_len)) = padding {
         tracing::debug!("Padding detected: offset={}, len={}", pad_offset, pad_len);
@@ -145,7 +166,7 @@ pub fn locate_sections(bytes: &[u8], instructions: &[Instruction]) -> Result<Vec
     }
 
     // Pass E: Create sections based on detected boundaries
-    if init_end == 0 && runtime_start == 0 {
+    if adjusted_init_end == 0 && runtime_start == 0 {
         // True runtime-only contract
         tracing::debug!("Runtime-only bytecode detected");
         sections.push(Section {
@@ -155,12 +176,12 @@ pub fn locate_sections(bytes: &[u8], instructions: &[Instruction]) -> Result<Vec
         });
     } else {
         // Deployment bytecode (original or obfuscated)
-        if init_end > 0 {
-            tracing::debug!("Creating Init section: offset=0, len={}", init_end);
+        if adjusted_init_end > 0 {
+            tracing::debug!("Creating Init section: offset=0, len={}", adjusted_init_end);
             sections.push(Section {
                 kind: SectionKind::Init,
                 offset: 0,
-                len: init_end,
+                len: adjusted_init_end,
             });
         }
         if runtime_len > 0 && runtime_start < aux_offset {
@@ -235,32 +256,93 @@ pub fn extract_runtime_instructions(
     Some(instructions)
 }
 
+/// Checks if there's a Solidity free memory pointer prologue before the given instruction.
+///
+/// Solidity contracts typically start runtime code with:
+/// PUSH1 0x80, PUSH1 0x40, MSTORE, PUSH1 0x04
+///
+/// This prologue initializes the free memory pointer at 0x40 to 0x80.
+/// Returns the PC of the prologue start if found, None otherwise.
+fn check_solidity_prologue(instructions: &[Instruction], calldatasize_idx: usize) -> Option<usize> {
+    // Need at least 4 instructions before CALLDATASIZE
+    if calldatasize_idx < 4 {
+        return None;
+    }
+
+    // Check the 4 instructions immediately before CALLDATASIZE
+    let idx = calldatasize_idx;
+
+    // TODO: Support additional prologue layouts (e.g., non-Solidity compilers or
+    // variants that use different PUSH widths) if we encounter runtimes
+    // that initialise memory differently.
+
+    // Expected pattern (working backwards from CALLDATASIZE):
+    // idx-4: PUSH1 0x80
+    // idx-3: PUSH1 0x40
+    // idx-2: MSTORE
+    // idx-1: PUSH1 0x04
+    // idx:   CALLDATASIZE
+
+    let i1 = &instructions[idx - 4];
+    let i2 = &instructions[idx - 3];
+    let i3 = &instructions[idx - 2];
+    let i4 = &instructions[idx - 1];
+
+    let is_prologue = matches!(i1.op, Opcode::PUSH(1))
+        && i1.imm.as_deref() == Some("80")
+        && matches!(i2.op, Opcode::PUSH(1))
+        && i2.imm.as_deref() == Some("40")
+        && i3.op == Opcode::MSTORE
+        && matches!(i4.op, Opcode::PUSH(1))
+        && i4.imm.as_deref() == Some("04");
+
+    if is_prologue {
+        tracing::debug!(
+            "Found Solidity prologue at PC {} (before CALLDATASIZE at PC {})",
+            i1.pc,
+            instructions[idx].pc
+        );
+        Some(i1.pc)
+    } else {
+        None
+    }
+}
+
 /// Fallback deployment detection for when the strict pattern fails
 fn detect_deployment_fallback(
     instructions: &[Instruction],
     aux_offset: usize,
 ) -> Option<(usize, usize)> {
-    // Method 1: Look for CODECOPY + RETURN pattern
+    // Search for CODECOPY + RETURN pattern
     if let Some((init_end, runtime_start)) = detect_codecopy_return_simple(instructions)
         && runtime_start < aux_offset
     {
         return Some((init_end, runtime_start));
     }
 
-    // Method 2: Heuristic detection based on common runtime start patterns
-    // Look for CALLDATASIZE or specific PUSH patterns that indicate runtime code
-    for instruction in instructions.iter() {
-        if matches!(instruction.op, Opcode::CALLDATASIZE)
-            || (matches!(instruction.op, Opcode::PUSH(1))
-                && instruction.imm.as_deref() == Some("00"))
-        {
-            let potential_runtime_start = instruction.pc;
-            if potential_runtime_start > 100 && potential_runtime_start < aux_offset {
+    // Heuristic detection based on common runtime start patterns
+    // Look for CALLDATASIZE as a runtime code marker
+    for (idx, instruction) in instructions.iter().enumerate() {
+        if matches!(instruction.op, Opcode::CALLDATASIZE) {
+            let calldatasize_pc = instruction.pc;
+
+            // Check if there's a Solidity free memory pointer prologue before CALLDATASIZE
+            // pattern: PUSH1 0x80, PUSH1 0x40, MSTORE, PUSH1 0x04, CALLDATASIZE
+            let prologue_start = check_solidity_prologue(instructions, idx);
+
+            let runtime_start = prologue_start.unwrap_or(calldatasize_pc);
+
+            if runtime_start > 100 && runtime_start < aux_offset {
                 tracing::debug!(
-                    "Heuristic runtime start detected at PC {}",
-                    potential_runtime_start
+                    "Heuristic runtime start detected at PC {} {}",
+                    runtime_start,
+                    if prologue_start.is_some() {
+                        "(including Solidity prologue)"
+                    } else {
+                        "(at CALLDATASIZE)"
+                    }
                 );
-                return Some((potential_runtime_start, potential_runtime_start));
+                return Some((runtime_start, runtime_start));
             }
         }
     }
@@ -349,41 +431,25 @@ pub fn validate_sections(sections: &[Section], total_len: usize) -> Result<(), E
 /// # Returns
 /// Optional tuple of (offset, length) if Auxdata is found, None otherwise.
 fn detect_auxdata(bytes: &[u8]) -> Option<(usize, usize)> {
-    const MARKER: &[u8] = &[0xa1, 0x65, 0x62, 0x7a, 0x7a, 0x72]; // a165627a7a72
     let len = bytes.len();
-    if len < MARKER.len() + 2 {
+
+    if len < 2 {
         tracing::debug!("Bytecode too short for auxdata: len={}", len);
         return None;
     }
 
-    // Canonical path: trust len_raw when it is plausible
-    let len_raw = u16::from_be_bytes([bytes[len - 2], bytes[len - 1]]) as usize;
-    if len_raw > 0 && len_raw + 2 <= len && bytes[len - len_raw - 2..len - 2].starts_with(MARKER) {
-        let off = len - len_raw - 2;
+    let auxdata_cbor_length = u16::from_be_bytes([bytes[len - 2], bytes[len - 1]]) as usize;
+
+    if len < 2 + auxdata_cbor_length {
         tracing::debug!(
-            "Auxdata detected (canonical): offset={}, len={}",
-            off,
-            len_raw + 2
+            "Malformed bytecode: detected auxdata CBOR length={}, actual bytecode length (excluding length bytes)={}",
+            auxdata_cbor_length,
+            len - 2
         );
-        return Some((off, len_raw + 2));
+        return None;
     }
 
-    // Fallback: scan last ≤64 bytes for the marker
-    let tail_start = len.saturating_sub(64 + MARKER.len());
-    for off in (tail_start..=len - MARKER.len()).rev() {
-        if bytes[off..off + MARKER.len()] == *MARKER {
-            let aux_len = len - off;
-            tracing::debug!(
-                "Auxdata detected (fallback): offset={}, len={}",
-                off,
-                aux_len
-            );
-            return Some((off, aux_len)); // Marker to EOF
-        }
-    }
-
-    tracing::debug!("No auxdata marker found");
-    None
+    Some((len - 2 - auxdata_cbor_length, auxdata_cbor_length + 2))
 }
 
 /// Detects Padding section before Auxdata.
@@ -398,7 +464,7 @@ fn detect_padding(instructions: &[Instruction], aux_offset: usize) -> Option<(us
     let last_terminal = instructions
         .iter()
         .rev()
-        .skip_while(|instruction| instruction.op == Opcode::STOP)
+        .skip_while(|instruction| instruction.op == Opcode::STOP || instruction.pc >= aux_offset)
         .find(|instruction| is_terminal_opcode(instruction.op));
 
     last_terminal.and_then(|instruction| {
@@ -486,6 +552,8 @@ fn detect_codecopy_return_pattern(instructions: &[Instruction]) -> Option<(usize
     let mut runtime_start = None;
 
     // Look backwards from CODECOPY for PUSH instructions
+    // CODECOPY stack layout: [destOffset, offset, size] where offset is where runtime starts,
+    // and size is how many bytes to copy. Scanning backwards, we encounter them in reverse order.
     for instruction in (0..codecopy_idx).rev().take(10) {
         if matches!(
             instructions[instruction].op,
@@ -493,12 +561,12 @@ fn detect_codecopy_return_pattern(instructions: &[Instruction]) -> Option<(usize
         ) && let Some(immediate) = &instructions[instruction].imm
             && let Ok(value) = usize::from_str_radix(immediate, 16)
         {
-            if runtime_len.is_none() && value > 0 && value < 100000 {
-                // First reasonable value could be runtime length
-                runtime_len = Some(value);
-            } else if runtime_start.is_none() && value > 0 && value < 100000 {
-                // Second reasonable value could be runtime start
+            if runtime_start.is_none() && value > 0 && value < 100000 {
+                // First reasonable value (scanning backwards) is the offset where runtime starts
                 runtime_start = Some(value);
+            } else if runtime_len.is_none() && value > 0 && value < 100000 {
+                // Second reasonable value is the size of the runtime code
+                runtime_len = Some(value);
             }
 
             if runtime_len.is_some() && runtime_start.is_some() {
@@ -547,9 +615,49 @@ fn detect_constructor_args(
     runtime_start: usize,
     aux_offset: usize,
 ) -> Option<(usize, usize)> {
+    // Minimum threshold for constructor args (4 bytes minimum)
+    // Constructor arguments are ABI-encoded and typically at least 32 bytes,
+    // but we use a conservative threshold of 4 bytes to avoid treating
+    // single padding bytes (like 0xfe) as constructor arguments
+    const MIN_CONSTRUCTOR_ARGS_SIZE: usize = 4;
+
     if runtime_start > 0 && init_end < runtime_start && runtime_start < aux_offset {
-        Some((init_end, runtime_start - init_end))
+        let gap_size = runtime_start - init_end;
+        if gap_size >= MIN_CONSTRUCTOR_ARGS_SIZE {
+            Some((init_end, gap_size))
+        } else {
+            tracing::debug!(
+                "Gap between init_end ({}) and runtime_start ({}) is only {} bytes, too small for constructor args (min: {}), treating as padding or part of init",
+                init_end,
+                runtime_start,
+                gap_size,
+                MIN_CONSTRUCTOR_ARGS_SIZE
+            );
+            None
+        }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hex::FromHex;
+
+    use super::*;
+
+    const STORAGE_BYTECODE: &str = "6080604052348015600e575f5ffd5b50603e80601a5f395ff3fe60806040525f5ffdfea2646970667358221220e8c66682f723c073c8c5ec2c0de0795c9b8b64e310482b13bc56a554d057842b64736f6c634300081e0033";
+
+    #[test]
+    fn detect_auxdata_works() {
+        let bytecode = Vec::from_hex(STORAGE_BYTECODE).unwrap();
+        let (auxdata_offset, auxdata_length) = detect_auxdata(&bytecode).unwrap();
+
+        // Auxdata section includes:
+        // - CBOR-encoded metadata (51 bytes)
+        // - 2-byte length indicator (last 2 bytes = 0x0033)
+        // Total: 53 bytes (from offset 35 to end at 88)
+        assert_eq!(auxdata_offset, 35);
+        assert_eq!(auxdata_length, 53);
     }
 }
