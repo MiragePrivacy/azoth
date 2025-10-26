@@ -2,14 +2,12 @@ pub mod cfg_ir;
 pub mod decoder;
 pub mod detection;
 pub mod encoder;
-pub mod hex_bytes;
 pub mod result;
 pub mod seed;
 pub mod strip;
 pub mod validator;
 
 use hex::{FromHex, FromHexError};
-pub use hex_bytes::{HexArray, HexBytes};
 pub use result::{Error, Result};
 use std::fs;
 use std::path::Path;

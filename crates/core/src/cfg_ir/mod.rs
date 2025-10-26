@@ -1673,9 +1673,9 @@ fn assign_ssa_values(cfg: &mut StableDiGraph<Block, EdgeType>) -> Result<(), Err
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::HexArray;
     use crate::detection::{Section, SectionKind};
     use crate::strip::RuntimeSpan;
+    use revm::primitives::B256;
 
     fn sample_runtime_section(len: usize) -> Section {
         Section {
@@ -1696,7 +1696,7 @@ mod tests {
             swarm_hash: None,
             bytes_saved: 0,
             clean_len: len,
-            clean_keccak: HexArray::default(),
+            clean_keccak: B256::ZERO,
             program_counter_mapping: Vec::new(),
         }
     }

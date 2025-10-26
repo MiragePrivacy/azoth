@@ -2,10 +2,11 @@
 //! obfuscation.
 
 use crate::{
-    HexArray, HexBytes,
     detection::{Section, SectionKind},
     result::Error,
 };
+use hex::encode;
+use revm::primitives::{B256, Bytes};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 
@@ -21,7 +22,7 @@ pub struct RuntimeSpan {
 pub struct Removed {
     pub offset: usize,
     pub kind: SectionKind,
-    pub data: HexBytes,
+    pub data: Bytes,
 }
 
 /// Report detailing the stripping process and enabling reassembly.
@@ -32,13 +33,13 @@ pub struct CleanReport {
     /// List of removed sections with their original data.
     pub removed: Vec<Removed>,
     /// Optional Keccak-256 hash of the original Swarm data (if Auxdata provides it).
-    pub swarm_hash: Option<HexArray<32>>,
+    pub swarm_hash: Option<B256>,
     /// Number of bytes saved by removing non-runtime sections.
     pub bytes_saved: usize,
     /// Length of the cleaned runtime bytecode.
     pub clean_len: usize,
     /// Keccak-256 hash of the cleaned runtime bytecode.
-    pub clean_keccak: HexArray<32>,
+    pub clean_keccak: B256,
     /// Mapping of old PCs to new PCs after stripping.
     pub program_counter_mapping: Vec<(usize, usize)>,
 }
@@ -62,7 +63,7 @@ pub fn strip_bytecode(bytes: &[u8], sections: &[Section]) -> Result<(Vec<u8>, Cl
         runtime_layout: Vec::new(),
         swarm_hash: None,
         clean_len: 0,
-        clean_keccak: HexArray::default(),
+        clean_keccak: B256::ZERO,
         program_counter_mapping: Vec::new(),
         bytes_saved: 0,
     };
@@ -95,7 +96,7 @@ pub fn strip_bytecode(bytes: &[u8], sections: &[Section]) -> Result<(Vec<u8>, Cl
                 report.removed.push(Removed {
                     kind: s.kind,
                     offset: s.offset,
-                    data: bytes[s.offset..s.end()].to_vec().into(),
+                    data: Bytes::from(bytes[s.offset..s.end()].to_vec()),
                 });
                 // Count ALL non-runtime bytes as "bytes saved"
                 report.bytes_saved += s.len;
@@ -115,7 +116,7 @@ pub fn strip_bytecode(bytes: &[u8], sections: &[Section]) -> Result<(Vec<u8>, Cl
     let mut hasher = Keccak256::new();
     hasher.update(&clean_runtime);
     let hash_result = hasher.finalize();
-    report.clean_keccak.copy_from_slice(&hash_result);
+    report.clean_keccak = B256::from_slice(&hash_result);
 
     tracing::debug!(
         "Stripping complete: {} bytes clean runtime, {} bytes saved",
@@ -150,7 +151,7 @@ impl CleanReport {
             .find(|r| matches!(r.kind, SectionKind::Init))
             .ok_or("No Init section found")?;
 
-        let init_bytes = init_section.data.as_mut();
+        let mut init_bytes = init_section.data.clone().to_vec();
 
         // Get the runtime offset from runtime_layout
         let new_runtime_offset = self
@@ -185,7 +186,7 @@ impl CleanReport {
         );
 
         // Debug: print the init code bytes
-        tracing::debug!("Full init code (hex): {}", hex::encode(&*init_bytes));
+        tracing::debug!("Full init code (hex): {}", encode(&init_bytes));
         if codecopy_pos > 5 {
             tracing::debug!(
                 "Init code structure: offsets 16-24: {:02x?}",
@@ -291,7 +292,9 @@ impl CleanReport {
         );
 
         // Debug: print the UPDATED init code
-        tracing::debug!("Updated init code (hex): {}", hex::encode(&*init_bytes));
+        tracing::debug!("Updated init code (hex): {}", encode(&init_bytes));
+
+        init_section.data = Bytes::from(init_bytes);
 
         Ok(())
     }
@@ -445,8 +448,8 @@ mod tests {
     use super::strip_bytecode;
     use crate::detection::{Section, SectionKind};
     use crate::result::Error;
+    use revm::primitives::B256;
     use sha3::{Digest, Keccak256};
-
     fn section(kind: SectionKind, offset: usize, len: usize) -> Section {
         Section { kind, offset, len }
     }
@@ -486,14 +489,14 @@ mod tests {
         assert_eq!(report.removed.len(), 2);
         assert_eq!(report.removed[0].kind, SectionKind::Init);
         assert_eq!(report.removed[0].offset, 0);
-        assert_eq!(report.removed[0].data, bytes[0..0x1a].to_vec());
+        assert_eq!(report.removed[0].data.as_ref(), &bytes[0..0x1a]);
         assert_eq!(report.removed[1].kind, SectionKind::Auxdata);
         assert_eq!(report.removed[1].offset, 0x23);
-        assert_eq!(report.removed[1].data, bytes[0x23..].to_vec());
+        assert_eq!(report.removed[1].data.as_ref(), &bytes[0x23..]);
         assert_eq!(report.bytes_saved, bytes.len() - clean.len());
         assert_eq!(report.clean_len, clean.len());
         let expected_hash: [u8; 32] = Keccak256::digest(&clean).into();
-        assert_eq!(report.clean_keccak, expected_hash);
+        assert_eq!(report.clean_keccak, B256::from_slice(&expected_hash));
         assert!(report.program_counter_mapping.is_empty());
     }
 
