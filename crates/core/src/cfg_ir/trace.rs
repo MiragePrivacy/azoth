@@ -3,7 +3,7 @@ use crate::cfg_ir::{
 };
 use crate::decoder::Instruction;
 use crate::detection::{Section, SectionKind};
-use crate::strip::CleanReport;
+use crate::{HexBytes, strip::CleanReport};
 use petgraph::Direction;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
@@ -60,7 +60,7 @@ pub struct CfgIrSnapshot {
     pub clean_report: CleanReport,
     pub sections: Vec<SectionSnapshot>,
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
-    pub original_bytecode: Vec<u8>,
+    pub original_bytecode: HexBytes,
     pub runtime_bounds: Option<(usize, usize)>,
 }
 
@@ -211,7 +211,7 @@ pub fn snapshot_bundle(bundle: &CfgIrBundle) -> CfgIrSnapshot {
         clean_report: bundle.clean_report.clone(),
         sections,
         selector_mapping: bundle.selector_mapping.clone(),
-        original_bytecode: bundle.original_bytecode.clone(),
+        original_bytecode: bundle.original_bytecode.clone().into(),
         runtime_bounds: bundle.runtime_bounds,
     }
 }
@@ -356,11 +356,12 @@ fn jump_target_snapshot(target: &JumpTarget) -> JumpTargetSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HexArray;
+    use crate::Opcode;
     use crate::cfg_ir::{BlockControl, JumpEncoding, JumpTarget, build_cfg_ir};
+    use crate::decoder::Instruction;
     use crate::detection::Section;
     use crate::strip::{Removed, RuntimeSpan};
-    use crate::Opcode;
-    use crate::decoder::Instruction;
 
     fn sample_bundle() -> CfgIrBundle {
         let instructions = vec![
@@ -405,12 +406,12 @@ mod tests {
             removed: vec![Removed {
                 offset: 10,
                 kind: SectionKind::Init,
-                data: Vec::new(),
+                data: Vec::new().into(),
             }],
             swarm_hash: None,
             bytes_saved: 0,
             clean_len: instructions.len(),
-            clean_keccak: [0u8; 32],
+            clean_keccak: HexArray::default(),
             program_counter_mapping: Vec::new(),
         };
 

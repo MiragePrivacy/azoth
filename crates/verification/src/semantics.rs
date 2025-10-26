@@ -1179,8 +1179,7 @@ impl SemanticAnalyzer {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use azoth_core::cfg_ir::CfgIrBundle;
-    use azoth_core::strip::CleanReport;
+    use azoth_core::{cfg_ir::CfgIrBundle, strip::CleanReport, HexArray};
 
     // todo(g4titanx): impl. default for cleanreport
     pub fn create_empty_clean_report() -> CleanReport {
@@ -1190,7 +1189,7 @@ pub mod tests {
             swarm_hash: None,
             bytes_saved: 0,
             clean_len: 0,
-            clean_keccak: [0; 32],
+            clean_keccak: HexArray::default(),
             program_counter_mapping: vec![],
         }
     }

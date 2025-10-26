@@ -182,6 +182,9 @@ impl CfgIrBundle {
         diff: CfgIrDiff,
         remapped_pcs: Option<HashMap<usize, usize>>,
     ) {
+        if matches!(diff, CfgIrDiff::None) && remapped_pcs.is_none() {
+            return;
+        }
         self.trace.push(TraceEvent {
             kind,
             diff,
@@ -1670,6 +1673,7 @@ fn assign_ssa_values(cfg: &mut StableDiGraph<Block, EdgeType>) -> Result<(), Err
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HexArray;
     use crate::detection::{Section, SectionKind};
     use crate::strip::RuntimeSpan;
 
@@ -1692,7 +1696,7 @@ mod tests {
             swarm_hash: None,
             bytes_saved: 0,
             clean_len: len,
-            clean_keccak: [0u8; 32],
+            clean_keccak: HexArray::default(),
             program_counter_mapping: Vec::new(),
         }
     }

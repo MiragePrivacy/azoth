@@ -175,11 +175,15 @@ async fn test_storage_cfg_trace_progression() {
         CfgIrDiff::BlockChanges(_) | CfgIrDiff::None
     ));
 
-    assert!(
-        cfg_ir
-            .trace
-            .iter()
-            .any(|event| matches!(event.kind, OperationKind::WriteSymbolicImmediates { .. })),
-        "reindexing should trigger at least one symbolic immediate write for storage bytecode",
-    );
+    let wrote_symbolic = cfg_ir
+        .trace
+        .iter()
+        .any(|event| matches!(event.kind, OperationKind::WriteSymbolicImmediates { .. }));
+    let mapping_changed = mapping.iter().any(|(old_pc, new_pc)| old_pc != new_pc);
+    if mapping_changed {
+        assert!(
+            wrote_symbolic,
+            "non-identity PC remap should trigger symbolic immediate writes"
+        );
+    }
 }
