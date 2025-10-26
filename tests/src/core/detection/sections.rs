@@ -3,12 +3,14 @@ use azoth_core::{
     detection::{locate_sections, Section, SectionKind},
 };
 
-const STORAGE_BYTECODE: &str = "6080604052348015600e575f5ffd5b50603e80601a5f395ff3fe60806040525f5ffdfea2646970667358221220e8c66682f723c073c8c5ec2c0de0795c9b8b64e310482b13bc56a554d057842b64736f6c634300081e0033";
+const STORAGE_BYTECODE: &str = include_str!("../../../bytecode/storage.hex");
 
 #[tokio::test]
 async fn test_full_deploy_payload_properties() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
 
     let (instructions, info, _, bytes) = decode_bytecode(STORAGE_BYTECODE, false).await.unwrap();

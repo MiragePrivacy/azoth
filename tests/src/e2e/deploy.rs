@@ -6,7 +6,7 @@ use azoth_transform::jump_address_transformer::JumpAddressTransformer;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use azoth_transform::opaque_predicate::OpaquePredicate;
 use azoth_transform::shuffle::Shuffle;
-use azoth_transform::{PassConfig, Transform};
+use azoth_transform::Transform;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use revm::bytecode::Bytecode;
@@ -98,7 +98,6 @@ fn create_config_with_transforms(
     ObfuscationConfig {
         seed,
         transforms,
-        pass_config: PassConfig::default(),
         preserve_unknown_opcodes: true,
     }
 }
@@ -161,14 +160,15 @@ async fn test_shuffle_transform() -> Result<()> {
 async fn test_jump_address_transform() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .try_init();
 
     let seed = Seed::generate();
 
     println!("Testing JumpAddressTransformer");
 
-    let transforms: Vec<Box<dyn Transform>> =
-        vec![Box::new(JumpAddressTransformer::new(PassConfig::default()))];
+    let transforms: Vec<Box<dyn Transform>> = vec![Box::new(JumpAddressTransformer::new())];
     let config = create_config_with_transforms(transforms, seed);
     let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
         .await
@@ -189,14 +189,15 @@ async fn test_jump_address_transform() -> Result<()> {
 async fn test_opaque_predicate_transform() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .try_init();
 
     let seed = Seed::generate();
 
     println!("Testing OpaquePredicate");
 
-    let transforms: Vec<Box<dyn Transform>> =
-        vec![Box::new(OpaquePredicate::new(PassConfig::default()))];
+    let transforms: Vec<Box<dyn Transform>> = vec![Box::new(OpaquePredicate::new())];
     let config = create_config_with_transforms(transforms, seed);
     let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
         .await
@@ -220,10 +221,8 @@ async fn test_shuffle_and_jump_address() -> Result<()> {
 
     println!("Testing Shuffle + JumpAddressTransformer combination");
 
-    let transforms: Vec<Box<dyn Transform>> = vec![
-        Box::new(Shuffle),
-        Box::new(JumpAddressTransformer::new(PassConfig::default())),
-    ];
+    let transforms: Vec<Box<dyn Transform>> =
+        vec![Box::new(Shuffle), Box::new(JumpAddressTransformer::new())];
     let config = create_config_with_transforms(transforms, seed);
     let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
         .await
@@ -253,10 +252,8 @@ async fn test_shuffle_and_opaque_predicate() -> Result<()> {
     let seed = Seed::generate();
 
     println!("Testing Shuffle + OpaquePredicate combination");
-    let transforms: Vec<Box<dyn Transform>> = vec![
-        Box::new(Shuffle),
-        Box::new(OpaquePredicate::new(PassConfig::default())),
-    ];
+    let transforms: Vec<Box<dyn Transform>> =
+        vec![Box::new(Shuffle), Box::new(OpaquePredicate::new())];
     let config = create_config_with_transforms(transforms, seed);
     let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
         .await
@@ -288,8 +285,8 @@ async fn test_jump_address_and_opaque_predicate() -> Result<()> {
     println!("Testing JumpAddressTransformer + OpaquePredicate combination");
 
     let transforms: Vec<Box<dyn Transform>> = vec![
-        Box::new(JumpAddressTransformer::new(PassConfig::default())),
-        Box::new(OpaquePredicate::new(PassConfig::default())),
+        Box::new(JumpAddressTransformer::new()),
+        Box::new(OpaquePredicate::new()),
     ];
     let config = create_config_with_transforms(transforms, seed);
     let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
@@ -330,8 +327,8 @@ async fn test_all_transforms_enabled() -> Result<()> {
 
     let transforms: Vec<Box<dyn Transform>> = vec![
         Box::new(Shuffle),
-        Box::new(JumpAddressTransformer::new(PassConfig::default())),
-        Box::new(OpaquePredicate::new(PassConfig::default())),
+        Box::new(JumpAddressTransformer::new()),
+        Box::new(OpaquePredicate::new()),
     ];
     let config = create_config_with_transforms(transforms, seed);
     let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)

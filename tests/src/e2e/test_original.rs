@@ -18,6 +18,8 @@ use revm::{Context, DatabaseCommit, ExecuteEvm, MainBuilder, MainContext};
 async fn test_original_is_bonded() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .try_init();
 
     let original_bytecode_hex =

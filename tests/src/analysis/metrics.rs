@@ -10,6 +10,8 @@ use petgraph::graph::NodeIndex;
 async fn test_collect_metrics_simple() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
 
     let bytecode = "0x600160015601"; // PUSH1 0x01, PUSH1 0x01, ADD
@@ -37,6 +39,8 @@ async fn test_collect_metrics_simple() {
 async fn test_collect_metrics_single_block() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
 
     let bytecode = "0x600050"; // PUSH1 0x00, STOP
@@ -61,6 +65,8 @@ async fn test_collect_metrics_single_block() {
 async fn test_collect_metrics_branching() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
     let bytecode = "0x6000600157600256"; // PUSH1 0x00, JUMPI, JUMPDEST, STOP
     let (instructions, _, _, bytes) = decoder::decode_bytecode(bytecode, false).await.unwrap();
@@ -88,6 +94,8 @@ async fn test_collect_metrics_branching() {
 async fn test_collect_metrics_empty_input() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
     let err = decoder::decode_bytecode("0x", false)
         .await
@@ -100,6 +108,8 @@ async fn test_collect_metrics_empty_input() {
 async fn test_collect_metrics_no_body_blocks() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
 
     let bytecode = "0x00"; // STOP
@@ -118,6 +128,8 @@ async fn test_collect_metrics_no_body_blocks() {
 async fn test_compare_metrics() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
 
     let bytecode_before = "0x600050"; // PUSH1 0x00, STOP
@@ -149,6 +161,8 @@ async fn test_compare_metrics() {
 async fn test_potency_edge_increase() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
     let bytecode_simple = "0x600050"; // PUSH1 0x00, STOP
     let (instructions, _, _, bytes) = decoder::decode_bytecode(bytecode_simple, false)
@@ -179,6 +193,8 @@ async fn test_potency_edge_increase() {
 async fn test_dominator_computation() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
     let bytecode = "0x6000600157600256"; // PUSH1 0x00, PUSH1 0x01, JUMPI, PUSH1 0x02, JUMP
     let (cfg_ir, _, _, _) = azoth_core::process_bytecode_to_cfg(bytecode, false)

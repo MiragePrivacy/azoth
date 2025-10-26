@@ -8,6 +8,8 @@ use azoth_transform::Transform;
 async fn test_shuffle_reorders_blocks() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
     let bytecode = "0x6004565b60016000555b60026000555b6003600055";
     let (mut cfg_ir, _, _, _) = process_bytecode_to_cfg(bytecode, false).await.unwrap();

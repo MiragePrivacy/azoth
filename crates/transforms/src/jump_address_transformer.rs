@@ -1,5 +1,4 @@
-use crate::{Error, Result};
-use crate::{PassConfig, Transform};
+use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, CfgIrBundle};
 use azoth_core::decoder::Instruction;
 use azoth_core::Opcode;
@@ -14,13 +13,12 @@ use tracing::debug;
 /// Instead of: PUSH1 0x42 JUMPI
 /// Produces:   PUSH1 0x20 PUSH1 0x22 ADD JUMPI
 /// Where 0x20 + 0x22 = 0x42
-pub struct JumpAddressTransformer {
-    config: PassConfig,
-}
+#[derive(Default)]
+pub struct JumpAddressTransformer;
 
 impl JumpAddressTransformer {
-    pub fn new(config: PassConfig) -> Self {
-        Self { config }
+    pub fn new() -> Self {
+        Self
     }
 
     /// Finds PUSH + JUMP/JUMPI patterns and transforms them
@@ -77,8 +75,8 @@ impl Transform for JumpAddressTransformer {
 
         // Process each block to find and transform jump patterns
         for node_idx in ir.cfg.node_indices().collect::<Vec<_>>() {
-            if let Block::Body { instructions, .. } = &ir.cfg[node_idx] {
-                let patterns = self.find_jump_patterns(instructions);
+            if let Block::Body(body) = &ir.cfg[node_idx] {
+                let patterns = self.find_jump_patterns(&body.instructions);
 
                 if !patterns.is_empty() {
                     debug!(
@@ -95,27 +93,6 @@ impl Transform for JumpAddressTransformer {
         debug!("Total blocks with jump patterns: {}", transformations.len());
 
         // Use config to limit the number of transformations
-        let max_transforms = if transformations.is_empty() {
-            0
-        } else {
-            let total_patterns: usize = transformations
-                .iter()
-                .map(|(_, patterns)| patterns.len())
-                .sum();
-
-            debug!("Total jump patterns found: {}", total_patterns);
-
-            // Use max_size_delta as a ratio to control how many jumps to transform
-            let transform_ratio = self.config.max_size_delta.clamp(0.0, 1.0);
-            let max_count = ((total_patterns as f32) * transform_ratio).ceil() as usize;
-            debug!(
-                "Transform ratio: {}, max transforms: {}",
-                transform_ratio, max_count
-            );
-            max_count.max(1) // Transform at least one if any exist
-        };
-
-        // Shuffle and limit transformations based on config
         if !transformations.is_empty() {
             // Flatten all patterns with their block indices
             let mut all_patterns: Vec<(NodeIndex, usize)> = Vec::new(); // (node_idx, pattern_idx)
@@ -125,9 +102,8 @@ impl Transform for JumpAddressTransformer {
                 }
             }
 
-            // Shuffle and limit
+            // Shuffle to introduce some variability but keep all patterns
             all_patterns.shuffle(rng);
-            all_patterns.truncate(max_transforms);
             debug!("Selected {} patterns to transform", all_patterns.len());
 
             // Rebuild transformations list with limited patterns
@@ -156,13 +132,10 @@ impl Transform for JumpAddressTransformer {
                 node_idx.index()
             );
 
-            if let Block::Body {
-                instructions,
-                max_stack,
-                start_pc,
-                ..
-            } = &mut ir.cfg[*node_idx]
-            {
+            if let Block::Body(body) = &mut ir.cfg[*node_idx] {
+                let instructions = &mut body.instructions;
+                let max_stack = &mut body.max_stack;
+                let start_pc = body.start_pc;
                 debug!(
                     "  Block start_pc: {:#x}, {} instructions",
                     start_pc,

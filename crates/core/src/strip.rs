@@ -1,8 +1,12 @@
 //! Module for stripping EVM bytecode to extract the runtime blob and prepare it for
 //! obfuscation.
 
-use crate::detection::{Section, SectionKind};
-use crate::result::Error;
+use crate::{
+    detection::{Section, SectionKind},
+    result::Error,
+};
+use hex::encode;
+use revm::primitives::{B256, Bytes};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 
@@ -18,24 +22,24 @@ pub struct RuntimeSpan {
 pub struct Removed {
     pub offset: usize,
     pub kind: SectionKind,
-    pub data: Vec<u8>,
+    pub data: Bytes,
 }
 
 /// Report detailing the stripping process and enabling reassembly.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleanReport {
     /// Layout of runtime spans with their original offsets and lengths.
     pub runtime_layout: Vec<RuntimeSpan>,
     /// List of removed sections with their original data.
     pub removed: Vec<Removed>,
     /// Optional Keccak-256 hash of the original Swarm data (if Auxdata provides it).
-    pub swarm_hash: Option<[u8; 32]>,
+    pub swarm_hash: Option<B256>,
     /// Number of bytes saved by removing non-runtime sections.
     pub bytes_saved: usize,
     /// Length of the cleaned runtime bytecode.
     pub clean_len: usize,
     /// Keccak-256 hash of the cleaned runtime bytecode.
-    pub clean_keccak: [u8; 32],
+    pub clean_keccak: B256,
     /// Mapping of old PCs to new PCs after stripping.
     pub program_counter_mapping: Vec<(usize, usize)>,
 }
@@ -57,10 +61,10 @@ pub fn strip_bytecode(bytes: &[u8], sections: &[Section]) -> Result<(Vec<u8>, Cl
     let mut report = CleanReport {
         removed: Vec::new(),
         runtime_layout: Vec::new(),
-        swarm_hash: None,                    // Will be populated if found
-        clean_len: 0,                        // Will be set at the end
-        clean_keccak: [0u8; 32],             // Will be calculated at the end
-        program_counter_mapping: Vec::new(), // Will be populated if needed
+        swarm_hash: None,
+        clean_len: 0,
+        clean_keccak: B256::ZERO,
+        program_counter_mapping: Vec::new(),
         bytes_saved: 0,
     };
 
@@ -92,7 +96,7 @@ pub fn strip_bytecode(bytes: &[u8], sections: &[Section]) -> Result<(Vec<u8>, Cl
                 report.removed.push(Removed {
                     kind: s.kind,
                     offset: s.offset,
-                    data: bytes[s.offset..s.end()].to_vec(),
+                    data: Bytes::from(bytes[s.offset..s.end()].to_vec()),
                 });
                 // Count ALL non-runtime bytes as "bytes saved"
                 report.bytes_saved += s.len;
@@ -112,7 +116,7 @@ pub fn strip_bytecode(bytes: &[u8], sections: &[Section]) -> Result<(Vec<u8>, Cl
     let mut hasher = Keccak256::new();
     hasher.update(&clean_runtime);
     let hash_result = hasher.finalize();
-    report.clean_keccak.copy_from_slice(&hash_result);
+    report.clean_keccak = B256::from_slice(&hash_result);
 
     tracing::debug!(
         "Stripping complete: {} bytes clean runtime, {} bytes saved",
@@ -147,7 +151,7 @@ impl CleanReport {
             .find(|r| matches!(r.kind, SectionKind::Init))
             .ok_or("No Init section found")?;
 
-        let init_bytes = &mut init_section.data;
+        let mut init_bytes = init_section.data.clone().to_vec();
 
         // Get the runtime offset from runtime_layout
         let new_runtime_offset = self
@@ -182,7 +186,7 @@ impl CleanReport {
         );
 
         // Debug: print the init code bytes
-        tracing::debug!("Full init code (hex): {}", hex::encode(&init_bytes));
+        tracing::debug!("Full init code (hex): {}", encode(&init_bytes));
         if codecopy_pos > 5 {
             tracing::debug!(
                 "Init code structure: offsets 16-24: {:02x?}",
@@ -288,7 +292,9 @@ impl CleanReport {
         );
 
         // Debug: print the UPDATED init code
-        tracing::debug!("Updated init code (hex): {}", hex::encode(init_bytes));
+        tracing::debug!("Updated init code (hex): {}", encode(&init_bytes));
+
+        init_section.data = Bytes::from(init_bytes);
 
         Ok(())
     }
@@ -434,5 +440,150 @@ impl CleanReport {
 
             out
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_bytecode;
+    use crate::detection::{Section, SectionKind};
+    use crate::result::Error;
+    use revm::primitives::B256;
+    use sha3::{Digest, Keccak256};
+    fn section(kind: SectionKind, offset: usize, len: usize) -> Section {
+        Section { kind, offset, len }
+    }
+
+    //   0x00..0x1a : init (constructor)
+    //   0x1a..0x23 : runtime
+    //   0x23..end  : auxdata (Solidity CBOR metadata)
+    const STORAGE_HEX: &str = include_str!("../../../tests/bytecode/storage.hex");
+
+    #[test]
+    fn returns_error_when_runtime_missing() {
+        let bytes = hex::decode(STORAGE_HEX.trim()).unwrap();
+        let sections = vec![
+            section(SectionKind::Init, 0, 0x1a),
+            section(SectionKind::Auxdata, 0x23, bytes.len() - 0x23),
+        ];
+
+        let err = strip_bytecode(&bytes, &sections).unwrap_err();
+        assert!(matches!(err, Error::NoRuntimeFound));
+    }
+
+    #[test]
+    fn strips_non_runtime_sections_and_preserves_metadata() {
+        let bytes = hex::decode(STORAGE_HEX.trim()).unwrap();
+        let sections = vec![
+            section(SectionKind::Init, 0, 0x1a),
+            section(SectionKind::Runtime, 0x1a, 0x9),
+            section(SectionKind::Auxdata, 0x23, bytes.len() - 0x23),
+        ];
+
+        let (clean, report) = strip_bytecode(&bytes, &sections).unwrap();
+
+        assert_eq!(clean, bytes[0x1a..0x23].to_vec());
+        assert_eq!(report.runtime_layout.len(), 1);
+        assert_eq!(report.runtime_layout[0].offset, 0x1a);
+        assert_eq!(report.runtime_layout[0].len, 0x9);
+        assert_eq!(report.removed.len(), 2);
+        assert_eq!(report.removed[0].kind, SectionKind::Init);
+        assert_eq!(report.removed[0].offset, 0);
+        assert_eq!(report.removed[0].data.as_ref(), &bytes[0..0x1a]);
+        assert_eq!(report.removed[1].kind, SectionKind::Auxdata);
+        assert_eq!(report.removed[1].offset, 0x23);
+        assert_eq!(report.removed[1].data.as_ref(), &bytes[0x23..]);
+        assert_eq!(report.bytes_saved, bytes.len() - clean.len());
+        assert_eq!(report.clean_len, clean.len());
+        let expected_hash: [u8; 32] = Keccak256::digest(&clean).into();
+        assert_eq!(report.clean_keccak, B256::from_slice(&expected_hash));
+        assert!(report.program_counter_mapping.is_empty());
+    }
+
+    #[test]
+    fn concatenates_multiple_runtime_spans_in_offset_order() {
+        let bytes = hex::decode(STORAGE_HEX.trim()).unwrap();
+        let sections = vec![
+            section(SectionKind::Runtime, 0x1a, 0x4),
+            section(SectionKind::Init, 0, 0x1a),
+            section(SectionKind::Runtime, 0x1e, 0x5),
+            section(SectionKind::Auxdata, 0x23, bytes.len() - 0x23),
+        ];
+
+        let (clean, report) = strip_bytecode(&bytes, &sections).unwrap();
+
+        let mut expected = bytes[0x1a..0x1e].to_vec();
+        expected.extend_from_slice(&bytes[0x1e..0x23]);
+        assert_eq!(clean, expected);
+        assert_eq!(report.runtime_layout.len(), 2);
+        assert_eq!(report.runtime_layout[0].offset, 0x1a);
+        assert_eq!(report.runtime_layout[0].len, 0x4);
+        assert_eq!(report.runtime_layout[1].offset, 0x1e);
+        assert_eq!(report.runtime_layout[1].len, 0x5);
+    }
+
+    #[test]
+    fn reassembles_original_layout_when_runtime_unchanged() {
+        let bytes = hex::decode(STORAGE_HEX.trim()).unwrap();
+        let sections = vec![
+            section(SectionKind::Init, 0, 0x1a),
+            section(SectionKind::Runtime, 0x1a, 0x9),
+            section(SectionKind::Auxdata, 0x23, bytes.len() - 0x23),
+        ];
+
+        let (clean, mut report) = strip_bytecode(&bytes, &sections).unwrap();
+        let rebuilt = report.reassemble(&clean);
+
+        assert_eq!(rebuilt, bytes);
+    }
+
+    #[test]
+    fn reassembles_with_changed_runtime_length_sequentially() {
+        let bytes = hex::decode(STORAGE_HEX.trim()).unwrap();
+        let sections = vec![
+            section(SectionKind::Init, 0, 0x1a),
+            section(SectionKind::Runtime, 0x1a, 0x9),
+            section(SectionKind::Auxdata, 0x23, bytes.len() - 0x23),
+        ];
+
+        let (_, mut report) = strip_bytecode(&bytes, &sections).unwrap();
+        let mut new_runtime = bytes[0x1a..0x23].to_vec();
+        // appending two extra bytes
+        new_runtime.extend_from_slice(&[0xde, 0xad]);
+        let rebuilt = report.reassemble(&new_runtime);
+
+        let runtime_start = 0x1a;
+        let mut expected_prefix = Vec::new();
+        let mut expected_suffix = Vec::new();
+
+        for removed in &report.removed {
+            if removed.offset < runtime_start {
+                expected_prefix.extend_from_slice(&removed.data);
+            } else {
+                expected_suffix.extend_from_slice(&removed.data);
+            }
+        }
+
+        assert_eq!(
+            &rebuilt[..expected_prefix.len()],
+            expected_prefix.as_slice()
+        );
+        assert_eq!(
+            &rebuilt[expected_prefix.len()..expected_prefix.len() + new_runtime.len()],
+            new_runtime.as_slice()
+        );
+        assert_eq!(
+            &rebuilt[expected_prefix.len() + new_runtime.len()..],
+            expected_suffix.as_slice()
+        );
+        assert!(
+            report
+                .removed
+                .iter()
+                .find(|r| r.offset == 0)
+                .and_then(|r| r.data.windows(2).find(|w| w == &[0x60, 0x0b]))
+                .is_some(),
+            "init code should be updated to push new runtime length"
+        );
     }
 }
