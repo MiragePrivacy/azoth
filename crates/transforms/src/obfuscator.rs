@@ -400,7 +400,7 @@ pub async fn obfuscate_bytecode(
     let final_snapshot = snapshot_bundle(&cfg_ir);
     cfg_ir.record_operation(
         OperationKind::Finalize,
-        CfgIrDiff::FullSnapshot(final_snapshot),
+        CfgIrDiff::FullSnapshot(Box::new(final_snapshot)),
         None,
     );
     let trace = cfg_ir.trace.clone();
@@ -420,7 +420,7 @@ pub async fn obfuscate_bytecode(
             size_limit_exceeded,
             unknown_opcodes_preserved: config.preserve_unknown_opcodes,
         },
-        selector_mapping: cfg_ir.selector_mapping, // Extract from CFG bundle
+        selector_mapping: cfg_ir.selector_mapping,
         trace,
     })
 }

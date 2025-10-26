@@ -73,7 +73,7 @@ pub enum CfgIrDiff {
         blocks: Vec<BlockPcDiff>,
         instructions: Vec<InstructionPcDiff>,
     },
-    FullSnapshot(CfgIrSnapshot),
+    FullSnapshot(Box<CfgIrSnapshot>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

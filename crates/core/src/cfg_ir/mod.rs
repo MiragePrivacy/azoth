@@ -346,7 +346,7 @@ impl CfgIrBundle {
             OperationKind::ReplaceBody {
                 instruction_count: instructions.len(),
             },
-            CfgIrDiff::FullSnapshot(snapshot),
+            CfgIrDiff::FullSnapshot(Box::new(snapshot)),
             None,
         );
         Ok(())
@@ -493,14 +493,14 @@ impl CfgIrBundle {
         let after_lookup: HashMap<_, _> = after_blocks.iter().cloned().collect();
         let mut block_diffs = Vec::new();
         for (node, old_pc) in before_blocks {
-            if let Some(new_pc) = after_lookup.get(&node) {
-                if old_pc != *new_pc {
-                    block_diffs.push(BlockPcDiff {
-                        node: node.index(),
-                        old_start_pc: old_pc,
-                        new_start_pc: *new_pc,
-                    });
-                }
+            if let Some(new_pc) = after_lookup.get(&node)
+                && old_pc != *new_pc
+            {
+                block_diffs.push(BlockPcDiff {
+                    node: node.index(),
+                    old_start_pc: old_pc,
+                    new_start_pc: *new_pc,
+                });
             }
         }
 
@@ -1062,7 +1062,7 @@ pub fn build_cfg_ir(
             body_blocks,
             sections: sections.len(),
         },
-        CfgIrDiff::FullSnapshot(snapshot),
+        CfgIrDiff::FullSnapshot(Box::new(snapshot)),
         None,
     );
     Ok(bundle)

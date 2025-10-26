@@ -40,7 +40,7 @@ async fn test_storage_cfg_runtime_bounds_detected() {
         .expect("build_cfg_ir should seed a trace event");
     assert!(matches!(build_event.kind, OperationKind::Build { .. }));
     let snapshot = match &build_event.diff {
-        CfgIrDiff::FullSnapshot(snapshot) => snapshot,
+        CfgIrDiff::FullSnapshot(snapshot) => snapshot.as_ref(),
         other => panic!("expected full snapshot diff, got {other:?}"),
     };
     assert_eq!(snapshot.runtime_bounds, cfg_ir.runtime_bounds);
@@ -62,7 +62,7 @@ async fn test_storage_cfg_graph_shape() {
         _ => panic!("expected build event to record body blocks"),
     };
     let snapshot = match &build_event.diff {
-        CfgIrDiff::FullSnapshot(snapshot) => snapshot,
+        CfgIrDiff::FullSnapshot(snapshot) => snapshot.as_ref(),
         other => panic!("expected full snapshot diff, got {other:?}"),
     };
     assert_eq!(snapshot.blocks.len(), cfg_ir.cfg.node_count());
