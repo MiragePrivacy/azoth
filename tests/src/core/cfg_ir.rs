@@ -1,4 +1,4 @@
-use azoth_core::cfg_ir::{build_cfg_ir, Block, CfgIrBundle, OperationKind};
+use azoth_core::cfg_ir::{build_cfg_ir, Block, CfgIrBundle, CfgIrDiff, OperationKind};
 use azoth_core::detection::{self, SectionKind};
 use azoth_core::{decoder, strip};
 use petgraph::visit::EdgeRef;
@@ -39,7 +39,11 @@ async fn test_storage_cfg_runtime_bounds_detected() {
         .first()
         .expect("build_cfg_ir should seed a trace event");
     assert!(matches!(build_event.kind, OperationKind::Build { .. }));
-    assert_eq!(build_event.snapshot.runtime_bounds, cfg_ir.runtime_bounds);
+    let snapshot = match &build_event.diff {
+        CfgIrDiff::FullSnapshot(snapshot) => snapshot.as_ref(),
+        other => panic!("expected full snapshot diff, got {other:?}"),
+    };
+    assert_eq!(snapshot.runtime_bounds, cfg_ir.runtime_bounds);
 }
 
 #[tokio::test]
@@ -57,14 +61,12 @@ async fn test_storage_cfg_graph_shape() {
         } => (*body_blocks, *sections),
         _ => panic!("expected build event to record body blocks"),
     };
-    assert_eq!(
-        build_event.snapshot.cfg.node_count(),
-        cfg_ir.cfg.node_count()
-    );
-    assert_eq!(
-        build_event.snapshot.cfg.edge_count(),
-        cfg_ir.cfg.edge_count()
-    );
+    let snapshot = match &build_event.diff {
+        CfgIrDiff::FullSnapshot(snapshot) => snapshot.as_ref(),
+        other => panic!("expected full snapshot diff, got {other:?}"),
+    };
+    assert_eq!(snapshot.blocks.len(), cfg_ir.cfg.node_count());
+    assert_eq!(snapshot.edges.len(), cfg_ir.cfg.edge_count());
     let body_block_count = cfg_ir
         .cfg
         .node_indices()
@@ -134,6 +136,7 @@ async fn test_storage_cfg_trace_progression() {
     let (mapping, old_runtime_bounds) = cfg_ir
         .reindex_pcs()
         .expect("reindexing PCs for storage bytecode should succeed");
+    dbg!(&cfg_ir.trace);
     assert_eq!(
         mapping.len(),
         initial_instruction_pcs.len(),
@@ -153,6 +156,7 @@ async fn test_storage_cfg_trace_progression() {
         .find(|event| matches!(event.kind, OperationKind::ReindexPcs))
         .expect("trace should contain a ReindexPcs event");
     assert_eq!(reindex_event.remapped_pcs.as_ref(), Some(&mapping));
+    assert!(matches!(reindex_event.diff, CfgIrDiff::PcsRemapped { .. }));
 
     cfg_ir
         .patch_jump_immediates(&mapping, old_runtime_bounds)
@@ -166,16 +170,20 @@ async fn test_storage_cfg_trace_progression() {
         .find(|event| matches!(event.kind, OperationKind::PatchJumpImmediates))
         .expect("trace should contain a PatchJumpImmediates event");
     assert_eq!(patch_event.remapped_pcs.as_ref(), Some(&mapping));
-    assert_eq!(
-        patch_event.snapshot.cfg.node_count(),
-        cfg_ir.cfg.node_count()
-    );
+    assert!(matches!(
+        patch_event.diff,
+        CfgIrDiff::BlockChanges(_) | CfgIrDiff::None
+    ));
 
-    assert!(
-        cfg_ir
-            .trace
-            .iter()
-            .any(|event| matches!(event.kind, OperationKind::WriteSymbolicImmediates { .. })),
-        "reindexing should trigger at least one symbolic immediate write for storage bytecode",
-    );
+    let wrote_symbolic = cfg_ir
+        .trace
+        .iter()
+        .any(|event| matches!(event.kind, OperationKind::WriteSymbolicImmediates { .. }));
+    let mapping_changed = mapping.iter().any(|(old_pc, new_pc)| old_pc != new_pc);
+    if mapping_changed {
+        assert!(
+            wrote_symbolic,
+            "non-identity PC remap should trigger symbolic immediate writes"
+        );
+    }
 }

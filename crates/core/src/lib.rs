@@ -7,7 +7,7 @@ pub mod seed;
 pub mod strip;
 pub mod validator;
 
-use hex::FromHex;
+use hex::{FromHex, FromHexError};
 pub use result::{Error, Result};
 use std::fs;
 use std::path::Path;
@@ -55,7 +55,7 @@ pub fn normalize_hex_string(input: &str) -> Result<String> {
 
     // Validate hex characters
     if !clean.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(Error::HexDecode(hex::FromHexError::InvalidHexCharacter {
+        return Err(Error::HexDecode(FromHexError::InvalidHexCharacter {
             c: clean
                 .chars()
                 .find(|c| !c.is_ascii_hexdigit())
