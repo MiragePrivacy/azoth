@@ -1,8 +1,7 @@
-use crate::{PassConfig, Transform};
+use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, CfgIrBundle};
 use azoth_core::decoder::Instruction;
 use azoth_core::Opcode;
-use azoth_utils::errors::TransformError;
 use petgraph::graph::NodeIndex;
 use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, Rng};
@@ -14,13 +13,12 @@ use tracing::debug;
 /// Instead of: PUSH1 0x42 JUMPI
 /// Produces:   PUSH1 0x20 PUSH1 0x22 ADD JUMPI
 /// Where 0x20 + 0x22 = 0x42
-pub struct JumpAddressTransformer {
-    config: PassConfig,
-}
+#[derive(Default)]
+pub struct JumpAddressTransformer;
 
 impl JumpAddressTransformer {
-    pub fn new(config: PassConfig) -> Self {
-        Self { config }
+    pub fn new() -> Self {
+        Self
     }
 
     /// Finds PUSH + JUMP/JUMPI patterns and transforms them
@@ -32,8 +30,8 @@ impl JumpAddressTransformer {
                 (instructions.get(i), instructions.get(i + 1))
             {
                 // Look for PUSH followed by JUMP or JUMPI
-                if push_instr.opcode.starts_with("PUSH")
-                    && (jump_instr.opcode == "JUMP" || jump_instr.opcode == "JUMPI")
+                if matches!(push_instr.op, Opcode::PUSH(_) | Opcode::PUSH0)
+                    && matches!(jump_instr.op, Opcode::JUMP | Opcode::JUMPI)
                 {
                     patterns.push(i);
                 }
@@ -58,17 +56,6 @@ impl JumpAddressTransformer {
         (part1, part2)
     }
 
-    /// Determines the appropriate PUSH opcode size for a value
-    pub fn get_push_opcode_for_value(&self, value: u64) -> String {
-        let bytes_needed = if value == 0 {
-            1
-        } else {
-            (64 - value.leading_zeros()).div_ceil(8) as usize
-        };
-
-        format!("PUSH{}", bytes_needed.max(1))
-    }
-
     /// Formats a value as hex string with appropriate padding
     fn format_hex_value(&self, value: u64, bytes: usize) -> String {
         format!("{:0width$x}", value, width = bytes * 2)
@@ -80,7 +67,7 @@ impl Transform for JumpAddressTransformer {
         "JumpAddressTransformer"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool, TransformError> {
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
         debug!("=== JumpAddressTransformer Transform Start ===");
 
         let mut changed = false;
@@ -88,8 +75,8 @@ impl Transform for JumpAddressTransformer {
 
         // Process each block to find and transform jump patterns
         for node_idx in ir.cfg.node_indices().collect::<Vec<_>>() {
-            if let Block::Body { instructions, .. } = &ir.cfg[node_idx] {
-                let patterns = self.find_jump_patterns(instructions);
+            if let Block::Body(body) = &ir.cfg[node_idx] {
+                let patterns = self.find_jump_patterns(&body.instructions);
 
                 if !patterns.is_empty() {
                     debug!(
@@ -106,27 +93,6 @@ impl Transform for JumpAddressTransformer {
         debug!("Total blocks with jump patterns: {}", transformations.len());
 
         // Use config to limit the number of transformations
-        let max_transforms = if transformations.is_empty() {
-            0
-        } else {
-            let total_patterns: usize = transformations
-                .iter()
-                .map(|(_, patterns)| patterns.len())
-                .sum();
-
-            debug!("Total jump patterns found: {}", total_patterns);
-
-            // Use max_size_delta as a ratio to control how many jumps to transform
-            let transform_ratio = self.config.max_size_delta.clamp(0.0, 1.0);
-            let max_count = ((total_patterns as f32) * transform_ratio).ceil() as usize;
-            debug!(
-                "Transform ratio: {}, max transforms: {}",
-                transform_ratio, max_count
-            );
-            max_count.max(1) // Transform at least one if any exist
-        };
-
-        // Shuffle and limit transformations based on config
         if !transformations.is_empty() {
             // Flatten all patterns with their block indices
             let mut all_patterns: Vec<(NodeIndex, usize)> = Vec::new(); // (node_idx, pattern_idx)
@@ -136,9 +102,8 @@ impl Transform for JumpAddressTransformer {
                 }
             }
 
-            // Shuffle and limit
+            // Shuffle to introduce some variability but keep all patterns
             all_patterns.shuffle(rng);
-            all_patterns.truncate(max_transforms);
             debug!("Selected {} patterns to transform", all_patterns.len());
 
             // Rebuild transformations list with limited patterns
@@ -147,7 +112,7 @@ impl Transform for JumpAddressTransformer {
                 // Find or create entry for this node
                 if let Some((_, patterns)) = limited_transformations
                     .iter_mut()
-                    .find(|(idx, _)| *idx == node_idx)
+                    .find(|(index, _)| *index == node_idx)
                 {
                     patterns.push(pattern_idx);
                 } else {
@@ -167,13 +132,10 @@ impl Transform for JumpAddressTransformer {
                 node_idx.index()
             );
 
-            if let Block::Body {
-                instructions,
-                max_stack,
-                start_pc,
-                ..
-            } = &mut ir.cfg[*node_idx]
-            {
+            if let Block::Body(body) = &mut ir.cfg[*node_idx] {
+                let instructions = &mut body.instructions;
+                let max_stack = &mut body.max_stack;
+                let start_pc = body.start_pc;
                 debug!(
                     "  Block start_pc: {:#x}, {} instructions",
                     start_pc,
@@ -194,35 +156,33 @@ impl Transform for JumpAddressTransformer {
                             if let Ok(target) = u64::from_str_radix(target_hex, 16) {
                                 let (part1, part2) = self.split_jump_target(target, rng);
 
-                                // Determine opcode sizes
-                                let part1_opcode = self.get_push_opcode_for_value(part1);
-                                let part2_opcode = self.get_push_opcode_for_value(part2);
-
                                 // Calculate byte sizes for formatting
-                                let part1_bytes = part1_opcode
-                                    .strip_prefix("PUSH")
-                                    .and_then(|s| s.parse::<usize>().ok())
-                                    .unwrap_or(1);
-                                let part2_bytes = part2_opcode
-                                    .strip_prefix("PUSH")
-                                    .and_then(|s| s.parse::<usize>().ok())
-                                    .unwrap_or(1);
+                                let part1_bytes = if part1 == 0 {
+                                    1
+                                } else {
+                                    (64 - part1.leading_zeros()).div_ceil(8) as usize
+                                };
+                                let part2_bytes = if part2 == 0 {
+                                    1
+                                } else {
+                                    (64 - part2.leading_zeros()).div_ceil(8) as usize
+                                };
 
                                 // Create new instruction sequence
                                 let new_instructions = vec![
                                     Instruction {
                                         pc: push_instr.pc,
-                                        opcode: part1_opcode,
+                                        op: Opcode::PUSH(part1_bytes as u8),
                                         imm: Some(self.format_hex_value(part1, part1_bytes)),
                                     },
                                     Instruction {
                                         pc: push_instr.pc + part1_bytes + 1,
-                                        opcode: part2_opcode,
+                                        op: Opcode::PUSH(part2_bytes as u8),
                                         imm: Some(self.format_hex_value(part2, part2_bytes)),
                                     },
                                     Instruction {
                                         pc: push_instr.pc + part1_bytes + part2_bytes + 2,
-                                        opcode: Opcode::ADD.to_string(),
+                                        op: Opcode::ADD,
                                         imm: None,
                                     },
                                 ];
@@ -259,7 +219,8 @@ impl Transform for JumpAddressTransformer {
                 total_transformed
             );
             debug!("Reindexing PCs...");
-            ir.reindex_pcs().map_err(TransformError::CoreError)?;
+            ir.reindex_pcs()
+                .map_err(|e| Error::CoreError(e.to_string()))?;
             debug!("=== JumpAddressTransformer Transform Complete ===");
         }
 

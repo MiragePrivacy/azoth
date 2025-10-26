@@ -7,6 +7,31 @@ pub mod decode;
 pub mod obfuscate;
 pub mod strip;
 
+use thiserror::Error;
+
+/// Errors that can occur during obfuscation.
+#[derive(Debug, Error)]
+pub enum ObfuscateError {
+    /// The hex string has an odd length, making it invalid.
+    #[error("hex string has odd length: {0}")]
+    OddLength(usize),
+    /// Failed to decode hex string to bytes.
+    #[error("hex decode error: {0}")]
+    HexDecode(#[from] hex::FromHexError),
+    /// File read/write error.
+    #[error("file error: {0}")]
+    File(#[from] std::io::Error),
+    /// Transform application failed.
+    #[error("transform error: {0}")]
+    Transform(String),
+    /// Invalid transform pass specified.
+    #[error("invalid pass: {0}")]
+    InvalidPass(String),
+    /// JSON serialization error.
+    #[error("serialization error: {0}")]
+    Serialize(#[from] serde_json::Error),
+}
+
 /// CLI subcommands for Bytecloak.
 #[derive(Subcommand)]
 pub enum Cmd {

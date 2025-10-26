@@ -1,8 +1,7 @@
-use crate::{PassConfig, Transform};
-use azoth_core::cfg_ir::{Block, CfgIrBundle, EdgeType};
+use crate::{Error, Result, Transform};
+use azoth_core::cfg_ir::{Block, BlockBody, BlockControl, CfgIrBundle, EdgeType};
 use azoth_core::decoder::Instruction;
 use azoth_core::Opcode;
-use azoth_utils::errors::TransformError;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use rand::prelude::SliceRandom;
@@ -11,13 +10,14 @@ use sha3::{Digest, Keccak256};
 use tracing::debug;
 
 /// Injects opaque predicates to increase control flow complexity and potency.
-pub struct OpaquePredicate {
-    config: PassConfig,
-}
+#[derive(Default)]
+pub struct OpaquePredicate;
 
 impl OpaquePredicate {
-    pub fn new(config: PassConfig) -> Self {
-        Self { config }
+    const MAX_RATIO: f32 = 0.2;
+
+    pub fn new() -> Self {
+        Self
     }
 
     fn generate_constant(&self, seed: u64) -> [u8; 32] {
@@ -26,17 +26,8 @@ impl OpaquePredicate {
         hasher.finalize().into()
     }
 
-    fn is_non_terminal(&self, instr: &Instruction) -> bool {
-        !Opcode::is_control_flow(&match instr.opcode.as_str() {
-            "STOP" => Opcode::STOP,
-            "RETURN" => Opcode::RETURN,
-            "REVERT" => Opcode::REVERT,
-            "SELFDESTRUCT" => Opcode::SELFDESTRUCT,
-            "INVALID" => Opcode::INVALID,
-            "JUMP" => Opcode::JUMP,
-            "JUMPI" => Opcode::JUMPI,
-            _ => Opcode::UNKNOWN(0),
-        })
+    fn is_non_terminal(&self, instruction: &Instruction) -> bool {
+        !Opcode::is_control_flow(&instruction.op)
     }
 }
 
@@ -45,19 +36,18 @@ impl Transform for OpaquePredicate {
         "OpaquePredicate"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool, TransformError> {
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
         debug!("=== OpaquePredicate Transform Start ===");
 
         let mut changed = false;
-        let max_opaque = self.config.max_opaque_ratio;
         let mut eligible_blocks: Vec<NodeIndex> = ir
             .cfg
             .node_indices()
             .filter(|&n| {
-                if let Block::Body { instructions, .. } = &ir.cfg[n] {
-                    instructions
+                if let Block::Body(body) = &ir.cfg[n] {
+                    body.instructions
                         .last()
-                        .is_some_and(|instr| self.is_non_terminal(instr))
+                        .is_some_and(|instruction| self.is_non_terminal(instruction))
                 } else {
                     false
                 }
@@ -69,7 +59,7 @@ impl Transform for OpaquePredicate {
             eligible_blocks.len()
         );
 
-        let max_predicates = ((eligible_blocks.len() as f32) * max_opaque).ceil() as usize;
+        let max_predicates = ((eligible_blocks.len() as f32) * Self::MAX_RATIO).ceil() as usize;
         if max_predicates == 0 || eligible_blocks.is_empty() {
             debug!("No eligible blocks - skipping");
             return Ok(false);
@@ -80,10 +70,10 @@ impl Transform for OpaquePredicate {
         eligible_blocks.shuffle(rng);
         let selected: Vec<NodeIndex> = eligible_blocks.into_iter().take(predicate_count).collect();
 
-        for (idx, block_id) in selected.iter().enumerate() {
+        for (index, block_id) in selected.iter().enumerate() {
             debug!(
                 "Processing block {}/{} (node_idx={})",
-                idx + 1,
+                index + 1,
                 selected.len(),
                 block_id.index()
             );
@@ -107,37 +97,38 @@ impl Transform for OpaquePredicate {
                 true_start_pc, false_start_pc
             );
 
-            let true_label = ir.cfg.add_node(Block::Body {
+            let true_label = ir.cfg.add_node(Block::Body(BlockBody {
                 start_pc: true_start_pc,
                 instructions: vec![Instruction {
                     pc: true_start_pc,
-                    opcode: Opcode::JUMPDEST.to_string(),
+                    op: Opcode::JUMPDEST,
                     imm: None,
                 }],
                 max_stack: 0,
-            });
+                control: BlockControl::Unknown,
+            }));
 
-            let false_label = ir.cfg.add_node(Block::Body {
+            let false_label = ir.cfg.add_node(Block::Body(BlockBody {
                 start_pc: false_start_pc,
                 instructions: vec![
                     Instruction {
                         pc: false_start_pc,
-                        opcode: Opcode::JUMPDEST.to_string(),
+                        op: Opcode::JUMPDEST,
                         imm: None,
                     },
                     Instruction {
                         pc: false_start_pc + 1,
-                        opcode: Opcode::PUSH(1).to_string(),
+                        op: Opcode::PUSH(1),
                         imm: Some("00".to_string()),
                     },
                     Instruction {
                         pc: false_start_pc + 2,
-                        opcode: Opcode::JUMP.to_string(),
+                        op: Opcode::JUMP,
                         imm: Some(
                             original_fallthrough
                                 .map(|n| {
-                                    if let Block::Body { start_pc, .. } = &ir.cfg[n] {
-                                        format!("{start_pc:x}")
+                                    if let Block::Body(body) = &ir.cfg[n] {
+                                        format!("{:x}", body.start_pc)
                                     } else {
                                         "0".to_string()
                                     }
@@ -147,14 +138,12 @@ impl Transform for OpaquePredicate {
                     },
                 ],
                 max_stack: 1,
-            });
+                control: BlockControl::Unknown,
+            }));
 
-            if let Block::Body {
-                instructions,
-                start_pc,
-                ..
-            } = &mut ir.cfg[*block_id]
-            {
+            if let Block::Body(body) = &mut ir.cfg[*block_id] {
+                let instructions = &mut body.instructions;
+                let start_pc = body.start_pc;
                 debug!(
                     "  Block start_pc: {:#x}, {} instructions",
                     start_pc,
@@ -166,37 +155,37 @@ impl Transform for OpaquePredicate {
                 instructions.extend(vec![
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::PUSH(32).to_string(),
+                        op: Opcode::PUSH(32),
                         imm: Some(constant_hex.clone()),
                     },
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::PUSH(32).to_string(),
+                        op: Opcode::PUSH(32),
                         imm: Some(constant_hex),
                     },
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::EQ.to_string(),
+                        op: Opcode::EQ,
                         imm: None,
                     },
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::PUSH(2).to_string(),
+                        op: Opcode::PUSH(2),
                         imm: Some(format!("{true_start_pc:x}")),
                     },
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::JUMPI.to_string(),
+                        op: Opcode::JUMPI,
                         imm: None,
                     },
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::JUMPDEST.to_string(),
+                        op: Opcode::JUMPDEST,
                         imm: None,
                     },
                     Instruction {
                         pc: 0,
-                        opcode: Opcode::JUMP.to_string(),
+                        op: Opcode::JUMP,
                         imm: Some(format!("{false_start_pc:x}")),
                     },
                 ]);
@@ -225,7 +214,9 @@ impl Transform for OpaquePredicate {
         if changed {
             debug!("Inserted {} opaque predicates", predicate_count);
             debug!("Reindexing PCs...");
-            ir.reindex_pcs().map_err(TransformError::CoreError)?;
+            let _ = ir
+                .reindex_pcs()
+                .map_err(|e| Error::CoreError(e.to_string()))?;
             debug!("=== OpaquePredicate Transform Complete ===");
         }
         Ok(changed)

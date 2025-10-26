@@ -1,8 +1,7 @@
 //! Mirage Privacy Protocol - Obfuscation Workflow
 
+use azoth_core::seed::Seed;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig, ObfuscationResult};
-use azoth_transform::PassConfig;
-use azoth_utils::seed::Seed;
 use serde_json::json;
 use std::fs;
 
@@ -154,29 +153,13 @@ fn create_mirage_config(seed_k2: &Seed) -> ObfuscationConfig {
     // Build Mirage-specific transforms (function_dispatcher is added automatically)
     let transforms = vec![
         Box::new(azoth_transform::shuffle::Shuffle) as Box<dyn azoth_transform::Transform>,
-        Box::new(
-            azoth_transform::jump_address_transformer::JumpAddressTransformer::new(PassConfig {
-                max_size_delta: 0.2,
-                ..Default::default()
-            }),
-        ),
-        Box::new(azoth_transform::opaque_predicate::OpaquePredicate::new(
-            PassConfig {
-                max_opaque_ratio: 0.3,
-                ..Default::default()
-            },
-        )),
+        Box::new(azoth_transform::jump_address_transformer::JumpAddressTransformer::new()),
+        Box::new(azoth_transform::opaque_predicate::OpaquePredicate::new()),
     ];
 
     ObfuscationConfig {
         seed: seed_k2.clone(),
         transforms,
-        pass_config: PassConfig {
-            accept_threshold: 0.0,
-            aggressive: true,
-            max_size_delta: 0.15,  // 15% size increase limit
-            max_opaque_ratio: 0.3, // Apply to 30% of blocks
-        },
         preserve_unknown_opcodes: true,
     }
 }

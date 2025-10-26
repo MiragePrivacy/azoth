@@ -1,7 +1,10 @@
 use crate::function_dispatcher::FunctionDispatcher;
-use crate::{PassConfig, Transform};
-use azoth_core::{cfg_ir, decoder, detection, encoder, process_bytecode_to_cfg};
-use azoth_utils::seed::Seed;
+use crate::Transform;
+use azoth_core::seed::Seed;
+use azoth_core::{
+    cfg_ir::{self, snapshot_bundle, CfgIrDiff, OperationKind, TraceEvent},
+    decoder, detection, encoder, process_bytecode_to_cfg, validator, Opcode,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -12,8 +15,6 @@ pub struct ObfuscationConfig {
     pub seed: Seed,
     /// List of transforms to apply
     pub transforms: Vec<Box<dyn Transform>>,
-    /// Pass configuration for transform behavior
-    pub pass_config: PassConfig,
     /// Whether to preserve unknown opcodes
     pub preserve_unknown_opcodes: bool,
 }
@@ -24,7 +25,6 @@ impl ObfuscationConfig {
         Self {
             seed,
             transforms: Vec::new(),
-            pass_config: PassConfig::default(),
             preserve_unknown_opcodes: true,
         }
     }
@@ -35,7 +35,6 @@ impl Default for ObfuscationConfig {
         Self {
             seed: Seed::generate(),
             transforms: Vec::new(),
-            pass_config: PassConfig::default(),
             preserve_unknown_opcodes: true,
         }
     }
@@ -48,7 +47,6 @@ impl std::fmt::Debug for ObfuscationConfig {
                 "transforms",
                 &format!("{} transforms", self.transforms.len()),
             )
-            .field("pass_config", &self.pass_config)
             .field("preserve_unknown_opcodes", &self.preserve_unknown_opcodes)
             .finish()
     }
@@ -79,6 +77,9 @@ pub struct ObfuscationResult {
     pub metadata: ObfuscationMetadata,
     /// Mapping from original selectors to tokens (if token dispatcher was applied)
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
+    /// Trace of CFG operations captured during obfuscation
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace: Vec<TraceEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,8 +146,9 @@ pub async fn obfuscate_bytecode(
         // Filter instructions to only those in runtime section
         let runtime_instructions: Vec<_> = instructions
             .iter()
-            .filter(|instr| {
-                instr.pc >= runtime_sec.offset && instr.pc < runtime_sec.offset + runtime_sec.len
+            .filter(|instruction| {
+                instruction.pc >= runtime_sec.offset
+                    && instruction.pc < runtime_sec.offset + runtime_sec.len
             })
             .cloned()
             .collect();
@@ -169,7 +171,6 @@ pub async fn obfuscate_bytecode(
             dispatcher.selectors.len()
         );
         all_transforms.push(Box::new(FunctionDispatcher::with_dispatcher_info(
-            config.pass_config.clone(),
             dispatcher,
         )));
     } else {
@@ -272,23 +273,60 @@ pub async fn obfuscate_bytecode(
         tracing::debug!("  {}", log_entry);
     }
 
-    // Step 5: Extract and encode instructions
+    // Step 5: Reindex PCs
+    tracing::debug!("  Reindexing PCs to normalize to 0-based addressing");
+    let (pc_mapping, old_runtime_bounds) = cfg_ir.reindex_pcs()?;
+    tracing::debug!("  PC reindexing complete: {} mappings", pc_mapping.len());
+
+    // Patch jump immediates using the PC mapping
+    cfg_ir.patch_jump_immediates(&pc_mapping, old_runtime_bounds)?;
+    tracing::debug!("  Patched jump immediates after PC reindexing");
+
+    // Step 6: Extract and encode instructions
     let all_instructions = extract_instructions_from_cfg(&cfg_ir);
     tracing::debug!(
         "  Extracted {} instructions from CFG",
         all_instructions.len()
     );
 
-    // Step 6: Encode back to bytecode
-    let obfuscated_bytes = if config.preserve_unknown_opcodes {
-        encoder::encode_with_original(&all_instructions, Some(&bytes))?
-    } else {
-        encoder::encode(&all_instructions)?
-    };
+    // Step 7: Encode back to bytecode (always with original for unknown opcode preservation)
+    let obfuscated_bytes = encoder::encode(&all_instructions, &bytes)?;
 
     tracing::debug!("  Encoded to {} bytes", obfuscated_bytes.len());
 
-    // Step 7: Reassemble final bytecode
+    tracing::debug!("  Validating obfuscated runtime jump targets");
+    if let Err(e) = validator::validate_jump_targets(&obfuscated_bytes).await {
+        eprintln!("\nVALIDATION FAILED");
+        eprintln!("Error: {}", e);
+        eprintln!(
+            "Obfuscated bytecode ({} bytes): 0x{}",
+            obfuscated_bytes.len(),
+            hex::encode(&obfuscated_bytes)
+        );
+
+        // Decode and show instructions around problematic area
+        eprintln!("Decoding bytecode to show instructions...");
+        match decoder::decode_bytecode(&hex::encode(&obfuscated_bytes), false).await {
+            Ok((instructions, _, _, _)) => {
+                eprintln!("Total instructions: {}", instructions.len());
+                eprintln!("\nAll instructions:");
+                for (i, instr) in instructions.iter().enumerate() {
+                    eprintln!(
+                        "  [{:3}] PC=0x{:02x} {:?} imm={:?}",
+                        i, instr.pc, instr.op, instr.imm
+                    );
+                }
+            }
+            Err(decode_err) => {
+                eprintln!("Failed to decode bytecode: {}", decode_err);
+            }
+        }
+
+        return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
+    }
+    tracing::debug!("  Jump validation passed");
+
+    // Step 8: Reassemble final bytecode
     let final_bytecode = cfg_ir.clean_report.reassemble(&obfuscated_bytes);
     let obfuscated_size = final_bytecode.len();
 
@@ -342,15 +380,31 @@ pub async fn obfuscate_bytecode(
         0.0
     };
 
-    let size_limit_exceeded = if config.pass_config.max_size_delta > 0.0 {
-        let max_allowed_size =
-            (original_size as f32 * (1.0 + config.pass_config.max_size_delta)).ceil() as usize;
-        obfuscated_size > max_allowed_size
-    } else {
-        false
-    };
+    let size_limit_exceeded = false;
 
     // Step 11: Build result
+    tracing::debug!("=== Building ObfuscationResult ===");
+    if let Some(ref mapping) = cfg_ir.selector_mapping {
+        tracing::debug!("Selector mapping has {} entries:", mapping.len());
+        for (selector, token) in mapping {
+            tracing::debug!(
+                "  Selector 0x{:08x} -> Token 0x{}",
+                selector,
+                hex::encode(token)
+            );
+        }
+    } else {
+        tracing::debug!("No selector mapping in result");
+    }
+
+    let final_snapshot = snapshot_bundle(&cfg_ir);
+    cfg_ir.record_operation(
+        OperationKind::Finalize,
+        CfgIrDiff::FullSnapshot(Box::new(final_snapshot)),
+        None,
+    );
+    let trace = cfg_ir.trace.clone();
+
     Ok(ObfuscationResult {
         obfuscated_bytecode: format!("0x{}", hex::encode(&final_bytecode)),
         original_size,
@@ -366,7 +420,8 @@ pub async fn obfuscate_bytecode(
             size_limit_exceeded,
             unknown_opcodes_preserved: config.preserve_unknown_opcodes,
         },
-        selector_mapping: cfg_ir.selector_mapping, // Extract from CFG bundle
+        selector_mapping: cfg_ir.selector_mapping,
+        trace,
     })
 }
 
@@ -376,10 +431,10 @@ fn analyze_instructions(instructions: &[decoder::Instruction]) -> (usize, usize,
     let mut unknown_count = 0;
     let mut unknown_types = HashSet::new();
 
-    for instr in instructions {
-        if instr.opcode == "unknown" || instr.opcode.starts_with("UNKNOWN_") {
+    for instruction in instructions {
+        if matches!(instruction.op, Opcode::INVALID | Opcode::UNKNOWN(_)) {
             unknown_count += 1;
-            unknown_types.insert(instr.opcode.clone());
+            unknown_types.insert(format!("{}", instruction.op));
         }
     }
 
@@ -396,8 +451,8 @@ fn count_instructions_in_cfg(cfg_ir: &cfg_ir::CfgIrBundle) -> usize {
         .cfg
         .node_indices()
         .filter_map(|n| {
-            if let cfg_ir::Block::Body { instructions, .. } = &cfg_ir.cfg[n] {
-                Some(instructions.len())
+            if let cfg_ir::Block::Body(body) = &cfg_ir.cfg[n] {
+                Some(body.instructions.len())
             } else {
                 None
             }
@@ -410,8 +465,8 @@ fn extract_instructions_from_cfg(cfg_ir: &cfg_ir::CfgIrBundle) -> Vec<decoder::I
     let mut all_instructions = Vec::new();
 
     for node_idx in cfg_ir.cfg.node_indices() {
-        if let cfg_ir::Block::Body { instructions, .. } = &cfg_ir.cfg[node_idx] {
-            all_instructions.extend(instructions.clone());
+        if let cfg_ir::Block::Body(body) = &cfg_ir.cfg[node_idx] {
+            all_instructions.extend(body.instructions.clone());
         }
     }
 

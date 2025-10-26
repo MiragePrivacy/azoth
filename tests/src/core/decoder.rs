@@ -1,7 +1,5 @@
-use azoth_core::decoder::{
-    decode_bytecode, decode_bytecode_from_bytes, parse_assembly, SourceType,
-};
-use azoth_utils::errors::DecodeError;
+use azoth_core::decoder::{decode_bytecode, parse_assembly, SourceType};
+use azoth_core::result::Error;
 use heimdall::{disassemble, DisassemblerArgsBuilder};
 
 #[allow(dead_code)]
@@ -13,8 +11,8 @@ async fn test_hex_roundtrip() {
     let (ins, info, asm, _) = decode_bytecode(BYTECODE, false).await.unwrap();
     tracing::debug!("\nRaw assembly:\n{}", asm);
     tracing::debug!("Parsed instructions:");
-    for instr in &ins {
-        tracing::debug!("{}", instr);
+    for instruction in &ins {
+        tracing::debug!("{}", instruction);
     }
     assert_eq!(ins.len(), 5);
 
@@ -26,37 +24,9 @@ async fn test_hex_roundtrip() {
 }
 
 #[tokio::test]
-async fn test_decode_from_bytes() {
-    let bytes = hex::decode(BYTECODE.trim_start_matches("0x")).unwrap();
-    let (ins, info, asm) = decode_bytecode_from_bytes(&bytes, SourceType::HexString)
-        .await
-        .unwrap();
-
-    tracing::debug!("\nRaw assembly from bytes:\n{}", asm);
-    tracing::debug!("Parsed instructions from bytes:");
-    for instr in &ins {
-        tracing::debug!("{}", instr);
-    }
-    assert_eq!(ins.len(), 5);
-
-    assert_eq!(info.byte_length, bytes.len());
-    assert_eq!(info.source, SourceType::HexString);
-    assert!(!info.keccak_hash.is_empty());
-
-    // Test with different source type
-    let (ins2, info2, _) = decode_bytecode_from_bytes(&bytes, SourceType::File)
-        .await
-        .unwrap();
-    assert_eq!(ins2, ins); // Instructions should be identical
-    assert_eq!(info2.byte_length, info.byte_length);
-    assert_eq!(info2.keccak_hash, info.keccak_hash);
-    assert_eq!(info2.source, SourceType::File); // Source should be different
-}
-
-#[tokio::test]
 async fn test_bad_hex_fails() {
     let result = decode_bytecode("0xZZ42", false).await;
-    assert!(matches!(result, Err(DecodeError::HexDecode(_))));
+    assert!(matches!(result, Err(Error::HexDecode(_))));
 }
 
 #[tokio::test]
@@ -68,13 +38,13 @@ async fn test_invalid_assembly_fails() {
         .unwrap();
     let asm = disassemble(args)
         .await
-        .map_err(|e| DecodeError::Heimdall(e.to_string()));
+        .map_err(|e| Error::Heimdall(e.to_string()));
     match asm {
         Ok(asm) => {
             tracing::debug!("\nRaw assembly from invalid input:\n{}", asm);
             let result = parse_assembly(&asm);
-            assert!(matches!(result, Err(DecodeError::Parse { .. })));
+            assert!(matches!(result, Err(Error::ParseError { .. })));
         }
-        Err(e) => assert!(matches!(e, DecodeError::Heimdall(_))),
+        Err(e) => assert!(matches!(e, Error::Heimdall(_))),
     }
 }

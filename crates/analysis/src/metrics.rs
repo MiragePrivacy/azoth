@@ -1,24 +1,10 @@
-/// Module for computing analytical metrics to evaluate EVM bytecode obfuscation transforms.
-///
-/// Implements a minimal set of metrics quantified by bytecode size, control flow complexity,
-/// stack usage, and dominator overlap to assess transform potency (analyst effort) and gas
-/// efficiency. The module provides functions to collect metrics from a `CfgIrBundle` and
-/// `CleanReport`, compare pre- and post-obfuscation states, and compute
-/// dominator/post-dominator pairs for control flow analysis.
-///
-/// # Usage
-/// ```rust,ignore
-/// let cfg_ir = azoth_core::process_bytecode_to_cfg_only("0x600160015601", false).await.unwrap();
-/// let metrics = metrics::collect_metrics(&cfg_ir, &report).unwrap();
-/// println!("{}", serde_json::to_string_pretty(&metrics).unwrap());
-/// ```
-use azoth_core::cfg_ir::{Block, CfgIrBundle, EdgeType};
+use crate::{Error, Result};
+use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle, EdgeType};
 use azoth_core::strip::CleanReport;
-use azoth_utils::errors::MetricsError;
 use petgraph::{
     algo::dominators::simple_fast,
-    graph::{DiGraph, NodeIndex},
-    stable_graph::IndexType,
+    graph::NodeIndex,
+    stable_graph::{IndexType, StableDiGraph},
     visit::Reversed,
 };
 use serde::{Deserialize, Serialize};
@@ -59,21 +45,21 @@ pub struct Metrics {
 ///
 /// # Returns
 /// A `Metrics` struct with computed metrics, or an error if the CFG is invalid.
-pub fn collect_metrics(ir: &CfgIrBundle, report: &CleanReport) -> Result<Metrics, MetricsError> {
+pub fn collect_metrics(ir: &CfgIrBundle, report: &CleanReport) -> Result<Metrics> {
     if ir.cfg.node_count() < 2 {
-        return Err(MetricsError::EmptyCfg);
+        return Err(Error::EmptyCfg);
     }
 
-    let (doms, post_doms) = dominator_pairs(&ir.cfg);
-    let overlap = dom_overlap(&doms, &post_doms);
+    let (dominators, post_dominators) = dominator_pairs(&ir.cfg);
+    let overlap = dom_overlap(&dominators, &post_dominators);
 
     let block_cnt = ir
         .cfg
         .node_indices()
-        .filter(|&n| matches!(ir.cfg[n], Block::Body { .. }))
+        .filter(|&n| matches!(ir.cfg[n], Block::Body(_)))
         .count();
     if block_cnt == 0 {
-        return Err(MetricsError::NoBodyBlocks);
+        return Err(Error::NoBodyBlocks);
     }
 
     let max_stack_peak = max_stack_per_block(ir).values().max().copied().unwrap_or(0);
@@ -102,11 +88,11 @@ pub fn collect_metrics(ir: &CfgIrBundle, report: &CleanReport) -> Result<Metrics
 pub fn max_stack_per_block(ir: &CfgIrBundle) -> HashMap<usize, usize> {
     let mut map = HashMap::new();
     for node in ir.cfg.node_indices() {
-        if let Some(Block::Body {
+        if let Some(Block::Body(BlockBody {
             start_pc,
             max_stack,
             ..
-        }) = ir.cfg.node_weight(node)
+        })) = ir.cfg.node_weight(node)
         {
             map.insert(*start_pc, *max_stack);
         }
@@ -129,25 +115,27 @@ type DominatorMap<Ix> = HashMap<NodeIndex<Ix>, NodeIndex<Ix>>;
 /// # Returns
 /// A tuple of two hash maps: (dominators, post-dominators), mapping node indices to their immediate
 /// dominator/post-dominator.
-pub fn dominator_pairs<Ix>(g: &DiGraph<Block, EdgeType, Ix>) -> (DominatorMap<Ix>, DominatorMap<Ix>)
+pub fn dominator_pairs<Ix>(
+    g: &StableDiGraph<Block, EdgeType, Ix>,
+) -> (DominatorMap<Ix>, DominatorMap<Ix>)
 where
     Ix: IndexType,
 {
     let entry = NodeIndex::<Ix>::new(0);
     let exit = NodeIndex::<Ix>::new(g.node_count() - 1);
 
-    let doms = simple_fast(g, entry);
+    let dominators_tree = simple_fast(g, entry);
     let mut dom_map = HashMap::new();
     for n in g.node_indices() {
-        if let Some(idom) = doms.immediate_dominator(n) {
+        if let Some(idom) = dominators_tree.immediate_dominator(n) {
             dom_map.insert(n, idom);
         }
     }
 
-    let post = simple_fast(Reversed(g), exit);
+    let post_dominators_tree = simple_fast(Reversed(g), exit);
     let mut pdom_map = HashMap::new();
     for n in g.node_indices() {
-        if let Some(ipdom) = post.immediate_dominator(n) {
+        if let Some(ipdom) = post_dominators_tree.immediate_dominator(n) {
             pdom_map.insert(n, ipdom);
         }
     }
@@ -162,23 +150,23 @@ where
 /// obfuscation potency.
 ///
 /// # Arguments
-/// * `doms` - Map of nodes to their immediate dominators.
-/// * `pdoms` - Map of nodes to their immediate post-dominators.
+/// * `dominators` - Map of nodes to their immediate dominators.
+/// * `post_dominators` - Map of nodes to their immediate post-dominators.
 ///
 /// # Returns
 /// The fraction of nodes where the dominator and post-dominator are the same.
-pub fn dom_overlap<Ix>(doms: &DominatorMap<Ix>, pdoms: &DominatorMap<Ix>) -> f64
+pub fn dom_overlap<Ix>(dominators: &DominatorMap<Ix>, post_dominators: &DominatorMap<Ix>) -> f64
 where
     Ix: IndexType + Hash + Eq,
 {
-    let common = doms
+    let common = dominators
         .iter()
-        .filter(|(n, d)| pdoms.get(*n) == Some(*d))
+        .filter(|(n, d)| post_dominators.get(*n) == Some(*d))
         .count();
-    if doms.is_empty() {
+    if dominators.is_empty() {
         0.0
     } else {
-        common as f64 / doms.len() as f64
+        common as f64 / dominators.len() as f64
     }
 }
 

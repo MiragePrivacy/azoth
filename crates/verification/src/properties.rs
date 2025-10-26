@@ -49,7 +49,7 @@ impl SecurityProperty {
                 let selector_hex = hex::encode(function_selector);
                 let callers: Vec<String> = authorized_callers
                     .iter()
-                    .map(|addr| format!("0x{}", hex::encode(addr)))
+                    .map(|address| format!("0x{}", hex::encode(address)))
                     .collect();
 
                 format!(
@@ -69,7 +69,7 @@ impl SecurityProperty {
             } => {
                 let selectors: Vec<String> = protected_functions
                     .iter()
-                    .map(|sel| format!("#x{}", hex::encode(sel)))
+                    .map(|selector| format!("#x{}", hex::encode(selector)))
                     .collect();
 
                 format!(

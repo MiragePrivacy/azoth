@@ -7,6 +7,8 @@ use azoth_core::{
 async fn test_dispatcher_detection() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
 
     let bytecode = "0x60c060405234801561000f575f5ffd5b5060405161162b38038061162b833981810160405281019061003191906100fd565b8073ffffffffffffffffffffffffffffffffffffffff1660a08173ffffffffffffffffffffffffffffffffffffffff16815250503373ffffffffffffffffffffffffffffffffffffffff1660808173ffffffffffffffffffffffffffffffffffffffff168152505050610128565b5f5ffd5b5f73ffffffffffffffffffffffffffffffffffffffff82169050919050565b5f6100cc826100a3565b9050919050565b6100dc816100c2565b81146100e6575f5ffd5b50565b5f815190506100f7816100d3565b92915050565b5f602082840312156101125761011161009f565b5b5f61011f848285016100e9565b91505092915050565b60805160a0516114b86101735f395f818161052d015281816107c8015281816109b60152610c4801525f8181610290015281816103c5015281816105d701526108c401526114b85ff3fe608060405234801561000f575f5ffd5b50600436106100fe575f3560e01c80638bd03d0a11610095578063d415b3f911610064578063d415b3f91461022a578063e522538114610248578063f3a504f214610252578063fe03a46014610270576100fe565b80638bd03d0a146101b65780639940686e146101d4578063a65e2cfd146101f0578063cb766a561461020c576100fe565b80633ccfd60b116100d15780003ccfd60b146101665780635a4fd6451461017057806380f323a71461018e57806381972d00146101ac576100fe565b8063046f7da2146101025780631aa7c0ec1461010c578063308657d71461012a57806333ee5f3514610148575b5f5ffd5b";
@@ -37,7 +39,7 @@ async fn test_dispatcher_detection() {
     let runtime_start_pc = runtime_section.offset;
     let runtime_instr_start = instructions
         .iter()
-        .position(|instr| instr.pc >= runtime_start_pc)
+        .position(|instruction| instruction.pc >= runtime_start_pc)
         .expect("Should find runtime start instruction");
 
     let runtime_instructions = &instructions[runtime_instr_start..];
@@ -49,19 +51,24 @@ async fn test_dispatcher_detection() {
     );
     tracing::debug!("Runtime instructions count: {}", runtime_instructions.len());
     tracing::debug!("First 20 runtime instructions:");
-    for (i, instr) in runtime_instructions.iter().take(20).enumerate() {
-        tracing::debug!("  {}: PC={} {} {:?}", i, instr.pc, instr.opcode, instr.imm);
+    for (i, instruction) in runtime_instructions.iter().take(20).enumerate() {
+        tracing::debug!(
+            "  {}: PC={} {} {:?}",
+            i,
+            instruction.pc,
+            instruction.op,
+            instruction.imm
+        );
     }
 
-    // Let's also look for the dispatcher pattern manually in the runtime
     tracing::debug!("Looking for dispatcher pattern in runtime instructions...");
     for (i, window) in runtime_instructions.windows(4).enumerate() {
-        if window[0].opcode == "PUSH1"
+        if window[0].op == azoth_core::Opcode::PUSH(1)
             && window[0].imm.as_deref() == Some("00")
-            && window[1].opcode == "CALLDATALOAD"
-            && window[2].opcode == "PUSH1"
+            && window[1].op == azoth_core::Opcode::CALLDATALOAD
+            && window[2].op == azoth_core::Opcode::PUSH(1)
             && window[2].imm.as_deref() == Some("e0")
-            && window[3].opcode == "SHR"
+            && window[3].op == azoth_core::Opcode::SHR
         {
             tracing::debug!(
                 "Found dispatcher extraction pattern at runtime instruction {}",
@@ -71,7 +78,6 @@ async fn test_dispatcher_detection() {
         }
     }
 
-    // Let's also check what's at the REAL start of runtime based on bytecode analysis
     tracing::debug!(
         "Checking for dispatcher in actual runtime bytecode starting from PC {}",
         runtime_start_pc
@@ -82,7 +88,7 @@ async fn test_dispatcher_detection() {
         let dispatcher_pc = 228;
         if let Some(dispatcher_instr_start) = instructions
             .iter()
-            .position(|instr| instr.pc >= dispatcher_pc)
+            .position(|instruction| instruction.pc >= dispatcher_pc)
         {
             let dispatcher_instructions =
                 &instructions[dispatcher_instr_start..runtime_instr_start.min(instructions.len())];
@@ -119,19 +125,25 @@ async fn test_dispatcher_detection() {
 
     tracing::debug!("Runtime instructions count: {}", runtime_instructions.len());
     tracing::debug!("First 20 runtime instructions:");
-    for (i, instr) in runtime_instructions.iter().take(20).enumerate() {
-        tracing::debug!("  {}: PC={} {} {:?}", i, instr.pc, instr.opcode, instr.imm);
+    for (i, instruction) in runtime_instructions.iter().take(20).enumerate() {
+        tracing::debug!(
+            "  {}: PC={} {} {:?}",
+            i,
+            instruction.pc,
+            instruction.op,
+            instruction.imm
+        );
     }
 
     // Let's also look for the dispatcher pattern manually
     tracing::debug!("Looking for dispatcher pattern in runtime instructions...");
     for (i, window) in runtime_instructions.windows(4).enumerate() {
-        if window[0].opcode == "PUSH1"
+        if window[0].op == azoth_core::Opcode::PUSH(1)
             && window[0].imm.as_deref() == Some("00")
-            && window[1].opcode == "CALLDATALOAD"
-            && window[2].opcode == "PUSH1"
+            && window[1].op == azoth_core::Opcode::CALLDATALOAD
+            && window[2].op == azoth_core::Opcode::PUSH(1)
             && window[2].imm.as_deref() == Some("e0")
-            && window[3].opcode == "SHR"
+            && window[3].op == azoth_core::Opcode::SHR
         {
             tracing::debug!(
                 "Found dispatcher extraction pattern at runtime instruction {}",
@@ -241,21 +253,19 @@ async fn test_dispatcher_detection() {
                     expected_selectors.len()
                 );
             }
-
-            // The 0x3ccfd60b selector might be in a different part of the bytecode
-            if !detected_selectors.contains(&0x3ccfd60b) {
-                tracing::info!(
-                    "Note: Missing 0x3ccfd60b - this might be in a different dispatcher section"
-                );
-            }
         }
         None => {
             tracing::error!("❌ Failed to detect function dispatcher in runtime instructions");
 
-            // Debug: Let's examine the first few runtime instructions to see what we're missing
             tracing::error!("Debug: First 20 runtime instructions:");
-            for (i, instr) in runtime_instructions.iter().take(20).enumerate() {
-                tracing::error!("  {}: PC={} {} {:?}", i, instr.pc, instr.opcode, instr.imm);
+            for (i, instruction) in runtime_instructions.iter().take(20).enumerate() {
+                tracing::error!(
+                    "  {}: PC={} {} {:?}",
+                    i,
+                    instruction.pc,
+                    instruction.op,
+                    instruction.imm
+                );
             }
 
             panic!("Failed to detect function dispatcher in runtime instructions");

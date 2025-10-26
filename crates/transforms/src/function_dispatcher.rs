@@ -1,813 +1,326 @@
-use crate::{PassConfig, Transform};
-use azoth_core::cfg_ir::{Block, CfgIrBundle};
+//! Function dispatcher transforma
+
+use crate::{Error, Result, Transform};
+use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle};
 use azoth_core::decoder::Instruction;
 use azoth_core::detection::{detect_function_dispatcher, DispatcherInfo, FunctionSelector};
 use azoth_core::Opcode;
-use azoth_utils::errors::TransformError;
-use rand::{rngs::StdRng, Rng};
+use petgraph::graph::NodeIndex;
+use rand::{rngs::StdRng, RngCore};
 use sha3::{Digest, Keccak256};
 use std::collections::{HashMap, HashSet};
 use tracing::debug;
 
-/// Function Dispatcher that replaces 4-byte selectors with variable-size tokens
-/// and completely disguises the dispatcher pattern to prevent detection.
+/// Function dispatcher transform
 ///
-/// **IMPORTANT:** This transform must run **before** any jump-address transforms
-/// to ensure PC integrity is maintained across the transformation pipeline.
+/// The transform remaps each 4-byte selector used in the dispatcher and in
+/// internal call sites to a deterministic but secret token.  The dispatcher
+/// layout is preserved – we only patch the immediate values – which keeps the
+/// original control-flow graph intact and avoids introducing brittle jump
+/// rewriting.
+#[derive(Default)]
 pub struct FunctionDispatcher {
-    config: PassConfig,
-    /// pre-detected dispatcher info
     cached_dispatcher: Option<DispatcherInfo>,
 }
 
 impl FunctionDispatcher {
-    pub fn new(config: PassConfig) -> Self {
+    /// Creates an empty dispatcher transform without cached metadata.
+    pub fn new() -> Self {
         Self {
-            config,
             cached_dispatcher: None,
         }
     }
 
-    /// Creates a new FunctionDispatcher with pre-detected dispatcher information.
-    /// This avoids redundant dispatcher detection when the obfuscator has already
-    /// identified the dispatcher pattern.
-    pub fn with_dispatcher_info(config: PassConfig, dispatcher_info: DispatcherInfo) -> Self {
+    /// Seeds the transform with a pre-detected dispatcher description.
+    pub fn with_dispatcher_info(dispatcher_info: DispatcherInfo) -> Self {
         Self {
-            config,
             cached_dispatcher: Some(dispatcher_info),
         }
     }
 
-    /// Derives a cryptographically secure token from selector using keyed hash
-    ///
-    /// ```assembly
-    /// selector: 0xa9059cbb
-    /// secret: [random 32 bytes]
-    /// keccak256(secret || 0xa9059cbb) = 0x8f3a2b1c9d...(`||` -> concatenate)
-    /// token (2 bytes): [0x8f, 0x3a]
-    /// ```
-    fn derive_token(&self, selector: u32, secret: &[u8], token_size: usize) -> Vec<u8> {
-        let mut hasher = Keccak256::new();
-        hasher.update(secret);
-        hasher.update(selector.to_be_bytes());
-        let hash = hasher.finalize();
-        hash[..token_size.min(32)].to_vec()
+    /// Flattens runtime blocks into a linear instruction list plus CFG index map.
+    fn collect_runtime_instructions(
+        &self,
+        ir: &CfgIrBundle,
+    ) -> (Vec<Instruction>, HashMap<usize, (NodeIndex, usize)>) {
+        let (runtime_start, runtime_end) = ir.runtime_bounds.unwrap_or((0, usize::MAX));
+
+        let mut nodes: Vec<_> = ir.cfg.node_indices().collect();
+        nodes.sort_by_key(|idx| match &ir.cfg[*idx] {
+            Block::Body(body) => body.start_pc,
+            _ => usize::MAX,
+        });
+
+        let mut runtime_instructions = Vec::new();
+        let mut index_by_pc = HashMap::new();
+
+        for node in nodes {
+            if let Block::Body(body) = &ir.cfg[node] {
+                for (offset, instruction) in body.instructions.iter().enumerate() {
+                    if instruction.pc >= runtime_start && instruction.pc < runtime_end {
+                        index_by_pc.insert(instruction.pc, (node, offset));
+                        runtime_instructions.push(instruction.clone());
+                    }
+                }
+            }
+        }
+
+        (runtime_instructions, index_by_pc)
     }
 
-    /// Generates collision-free mapping from selectors to variable-size tokens
-    ///
-    /// before:
-    /// ```assembly
-    /// 0xa9059cbb → transfer(address,uint256)
-    /// 0x7ff36ab5 → balanceOf(address)
-    /// ```
-    ///
-    /// after:
-    /// ```assembly
-    /// 0xa9059cbb → [0x8f, 0x3a]    (2-byte token)
-    /// 0x7ff36ab5 → [0x42]          (1-byte token)
-    /// ```
-    pub fn generate_mapping(
+    /// Returns cached dispatcher metadata or detects it from the runtime slice.
+    fn dispatcher_info(&self, runtime: &[Instruction]) -> Option<DispatcherInfo> {
+        if let Some(info) = &self.cached_dispatcher {
+            Some(info.clone())
+        } else {
+            detect_function_dispatcher(runtime)
+        }
+    }
+
+    /// Builds a deterministic selector→token mapping anchored by a random secret.
+    fn generate_mapping(
         &self,
         selectors: &[FunctionSelector],
         rng: &mut StdRng,
-    ) -> Result<HashMap<u32, Vec<u8>>, TransformError> {
-        let mut mapping = HashMap::new();
-        let mut used_tokens = HashSet::new();
+    ) -> Result<HashMap<u32, Vec<u8>>> {
+        if selectors.is_empty() {
+            return Ok(HashMap::new());
+        }
 
-        // Generate random secret for this contract
-        let secret: Vec<u8> = (0..32).map(|_| rng.random::<u8>()).collect();
+        let mut secret = [0u8; 32];
+        rng.fill_bytes(&mut secret);
 
-        for selector_info in selectors {
-            // Generate token with variable size (1-8 bytes)
-            let token_size = 4;
-            let mut token = self.derive_token(selector_info.selector, &secret, token_size);
+        let mut mapping = HashMap::with_capacity(selectors.len());
+        let mut used_tokens = HashSet::with_capacity(selectors.len());
 
-            // Handle collisions
-            let mut attempt = 0;
-            while used_tokens.contains(&token) && attempt < 100 {
-                let mut new_secret = secret.clone();
-                new_secret[0] = new_secret[0].wrapping_add(attempt as u8 + 1);
-                token = self.derive_token(selector_info.selector, &new_secret, token_size);
-                attempt += 1;
-            }
-
-            if attempt >= 100 {
-                return Err(TransformError::Generic(
-                    "Could not generate unique token after 100 attempts".to_string(),
-                ));
-            }
-
-            mapping.insert(selector_info.selector, token.clone());
-            used_tokens.insert(token.clone());
+        for selector in selectors {
+            let token = self.derive_unique_token(selector.selector, &secret, &mut used_tokens)?;
+            mapping.insert(selector.selector, token);
         }
 
         Ok(mapping)
     }
 
-    /// Creates variable-size token extraction with universal dispatcher disguise
-    ///
-    /// Completely hides any dispatcher pattern by disguising calldata loading.
-    /// Instead of obvious signatures, uses randomized mathematical operations:
-    /// - Arithmetic disguises (SUB, XOR, ADD combinations)
-    /// - Memory-based disguises (MSTORE/MLOAD patterns)
-    /// - Complex multi-step calculations
-    ///
-    /// All disguises mathematically resolve to offset 0x00 for CALLDATALOAD.
-    fn create_token_extraction(
+    /// Derives a 4 byte token for a selector while avoiding collisions and identity.
+    fn derive_unique_token(
         &self,
-        max_token_size: usize,
-        rng: &mut StdRng,
-    ) -> Result<Vec<Instruction>, TransformError> {
-        let mut instructions = Vec::new();
+        selector: u32,
+        secret: &[u8; 32],
+        used_tokens: &mut HashSet<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
+        const TOKEN_LEN: usize = 4;
+        const MAX_ATTEMPTS: u32 = 1_000;
 
-        // Phase 1: Disguised calldata offset calculation (always results in 0x00)
-        let disguise_method = rng.random_range(0..6);
+        let selector_bytes = selector.to_be_bytes();
 
-        match disguise_method {
-            0 => {
-                // SUB disguise: val - val = 0
-                let val = rng.random_range(1..=255);
-                instructions.extend(vec![
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val:02x}")))?,
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val:02x}")))?,
-                    self.create_instruction(Opcode::SUB, None)?,
-                ]);
-                debug!("Using SUB disguise with value 0x{:02x}", val);
-            }
-            1 => {
-                // XOR disguise: val ^ val = 0
-                let val = rng.random_range(1..=255);
-                instructions.extend(vec![
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val:02x}")))?,
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val:02x}")))?,
-                    self.create_instruction(Opcode::XOR, None)?,
-                ]);
-                debug!("Using XOR disguise with value 0x{:02x}", val);
-            }
-            2 => {
-                // Memory disguise: store 0, then load it
-                let mem_offset = rng.random_range(0x20..=0x80); // Random memory slot
-                instructions.extend(vec![
-                    self.create_instruction(Opcode::PUSH(1), Some("00".to_string()))?,
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{mem_offset:02x}")))?,
-                    self.create_instruction(Opcode::MSTORE, None)?,
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{mem_offset:02x}")))?,
-                    self.create_instruction(Opcode::MLOAD, None)?,
-                ]);
-                debug!("Using memory disguise with offset 0x{:02x}", mem_offset);
-            }
-            4 => {
-                // Modulo disguise: val % (val + 1) where val < val + 1 = val, then val - val = 0
-                let val = rng.random_range(1..=200);
-                let divisor = val + 1;
-                instructions.extend(vec![
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val:02x}")))?,
-                    self.create_instruction(Opcode::DUP(1), None)?, // duplicate val
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{divisor:02x}")))?,
-                    self.create_instruction(Opcode::MOD, None)?, // val % (val + 1) = val
-                    self.create_instruction(Opcode::SUB, None)?, // val - val = 0
-                ]);
-                debug!(
-                    "Using modulo disguise with value 0x{:02x} % 0x{:02x}",
-                    val, divisor
-                );
-            }
-            _ => {
-                // Multi-layer disguise: ((a * b) / b) - a = 0
-                let val1 = rng.random_range(2..=50); // Avoid 0 and 1 for multiplication/division
-                let val2 = rng.random_range(2..=50);
-                instructions.extend(vec![
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val1:02x}")))?,
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val2:02x}")))?,
-                    self.create_instruction(Opcode::MUL, None)?, // a * b
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val2:02x}")))?,
-                    self.create_instruction(Opcode::DIV, None)?, // (a * b) / b = a
-                    self.create_instruction(Opcode::PUSH(1), Some(format!("{val1:02x}")))?,
-                    self.create_instruction(Opcode::SUB, None)?, // a - a = 0
-                ]);
-                debug!(
-                    "Using multi-layer disguise with values 0x{:02x}, 0x{:02x}",
-                    val1, val2
-                );
+        for counter in 0..MAX_ATTEMPTS {
+            let mut hasher = Keccak256::new();
+            hasher.update(secret);
+            hasher.update(selector_bytes);
+            hasher.update(counter.to_be_bytes());
+            let hash = hasher.finalize();
+
+            let token = hash[..TOKEN_LEN].to_vec();
+            if token != selector_bytes && used_tokens.insert(token.clone()) {
+                return Ok(token);
             }
         }
 
-        // Phase 2: Load calldata from calculated offset (always 0x00)
-        instructions.push(self.create_instruction(Opcode::CALLDATALOAD, None)?);
-
-        // Phase 3: Token extraction using variable-size mask
-        //
-        // The choice for `ffff`(or any other size it takes) isn't arbitrary, it's hexadecimal where f represents
-        // the binary value `1111`
-        // Input:  1010110101001101...  (calldata)
-        // Mask:   111111111111111111111111  (ffffff)
-        // AND:    1010110101001101...  (preserves first 24 bits)
-        let mask = match max_token_size {
-            1 => "ff",               // 1 byte:  0xFF
-            2 => "ffff",             // 2 bytes: 0xFFFF
-            3 => "ffffff",           // 3 bytes: 0xFFFFFF
-            4 => "ffffffff",         // 4 bytes: 0xFFFFFFFF
-            5 => "ffffffffff",       // 5 bytes: 0xFFFFFFFFFF
-            6 => "ffffffffffff",     // 6 bytes: 0xFFFFFFFFFFFF
-            7 => "ffffffffffffff",   // 7 bytes: 0xFFFFFFFFFFFFFF
-            8 => "ffffffffffffffff", // 8 bytes: 0xFFFFFFFFFFFFFFFF
-            _ => "ffffffffffffffff", // Default to 8 bytes max
-        };
-
-        let push_size = max_token_size.clamp(1, 8);
-
-        // Phase 4: Apply mask to extract token
-        instructions.extend(vec![
-            self.create_instruction(Opcode::PUSH(push_size as u8), Some(mask.to_string()))?,
-            self.create_instruction(Opcode::AND, None)?,
-        ]);
-
-        // Phase 5: Optional noise operations (Bernoulli trial)
-        // we flip a biased coin that lands true with probability 0.3 (30 %) and false otherwise
-        if rng.random_bool(0.3) {
-            match rng.random_range(0..3) {
-                0 => {
-                    // DUP + POP = no-op
-                    instructions.extend(vec![
-                        self.create_instruction(Opcode::DUP(1), None)?,
-                        self.create_instruction(Opcode::POP, None)?,
-                    ]);
-                    debug!("Added DUP+POP noise operations");
-                }
-                1 => {
-                    // Add 0 = no-op
-                    instructions.extend(vec![
-                        self.create_instruction(Opcode::PUSH(1), Some("00".to_string()))?,
-                        self.create_instruction(Opcode::ADD, None)?,
-                    ]);
-                    debug!("Added ADD 0 noise operations");
-                }
-                _ => {
-                    // OR with 0 = no-op
-                    instructions.extend(vec![
-                        self.create_instruction(Opcode::PUSH(1), Some("00".to_string()))?,
-                        self.create_instruction(Opcode::OR, None)?,
-                    ]);
-                    debug!("Added OR 0 noise operations");
-                }
-            }
-        }
-
-        debug!(
-            "Created disguised token extraction with {} instructions",
-            instructions.len()
-        );
-        Ok(instructions)
+        Err(Error::Generic(
+            "dispatcher: failed to derive unique selector token".into(),
+        ))
     }
 
-    /// Creates the obfuscated dispatcher using variable-size tokens and disguised pattern
-    fn create_obfuscated_dispatcher(
+    /// Rewrites dispatcher PUSH4 immediates to their tokens without touching layout.
+    fn apply_dispatcher_patches(
         &self,
-        selectors: &[FunctionSelector],
+        ir: &mut CfgIrBundle,
+        runtime: &[Instruction],
+        index_by_pc: &HashMap<usize, (NodeIndex, usize)>,
+        info: &DispatcherInfo,
         mapping: &HashMap<u32, Vec<u8>>,
-        rng: &mut StdRng,
-    ) -> Result<(Vec<Instruction>, usize), TransformError> {
-        let mut instructions = Vec::new();
-        let max_stack_needed = 3;
+    ) -> Result<bool> {
+        let mut per_block: HashMap<NodeIndex, Vec<(usize, String)>> = HashMap::new();
 
-        // Phase 1: Disguised token extraction (completely hides dispatcher signature)
-        let max_token_size = mapping.values().map(|token| token.len()).max().unwrap_or(1);
-        instructions.extend(self.create_token_extraction(max_token_size, rng)?);
+        for selector in &info.selectors {
+            let instruction = runtime.get(selector.instruction_index).ok_or_else(|| {
+                Error::Generic(format!(
+                    "dispatcher: selector index {} out of bounds",
+                    selector.instruction_index
+                ))
+            })?;
 
-        // Phase 2: Token-based selector comparisons (shuffled order for additional obfuscation)
-        let mut selector_order: Vec<_> = selectors.iter().collect();
-        if self.config.aggressive {
-            use rand::seq::SliceRandom;
-            selector_order.shuffle(rng);
-            debug!("Shuffled selector comparison order");
+            let (node, offset) = index_by_pc.get(&instruction.pc).ok_or_else(|| {
+                Error::Generic(format!(
+                    "dispatcher: instruction at pc {} not found in CFG",
+                    instruction.pc
+                ))
+            })?;
+
+            let token = mapping.get(&selector.selector).ok_or_else(|| {
+                Error::Generic(format!(
+                    "dispatcher: missing token for selector 0x{:08x}",
+                    selector.selector
+                ))
+            })?;
+
+            per_block
+                .entry(*node)
+                .or_default()
+                .push((*offset, hex::encode(token)));
         }
 
-        for selector_info in selector_order {
-            if let Some(token) = mapping.get(&selector_info.selector) {
-                instructions
-                    .extend(self.create_token_comparison(token, selector_info.target_address)?);
-            }
+        let mut modified = false;
+
+        for (node, patches) in per_block {
+            let changed = self.patch_block(ir, node, |body| {
+                let mut changed = false;
+                for (offset, token_hex) in &patches {
+                    if let Some(instr) = body.instructions.get_mut(*offset) {
+                        let needs_update = instr.imm.as_deref() != Some(token_hex.as_str())
+                            || !matches!(instr.op, Opcode::PUSH(4));
+                        if needs_update {
+                            instr.op = Opcode::PUSH(4);
+                            instr.imm = Some(token_hex.clone());
+                            changed = true;
+                        }
+                    }
+                }
+                changed
+            })?;
+            modified |= changed;
         }
 
-        // Phase 3: Default case protection (prevents execution of random code)
-        instructions.extend(vec![
-            self.create_instruction(Opcode::PUSH(1), Some("00".to_string()))?,
-            self.create_instruction(Opcode::DUP(1), None)?,
-            self.create_instruction(Opcode::REVERT, None)?,
-        ]);
-
-        debug!(
-            "Created complete obfuscated dispatcher with {} instructions",
-            instructions.len()
-        );
-        Ok((instructions, max_stack_needed))
+        Ok(modified)
     }
 
-    /// Creates token comparison sequence for variable-size tokens
-    ///
-    /// before:
-    /// ```assembly
-    /// DUP1                 // duplicate selector on stack
-    /// PUSH4 0xa9059cbb     // push 4-byte selector to compare
-    /// EQ                   // compare: stack_top == 0xa9059cbb
-    /// PUSH2 0x001a         // target address if match
-    /// JUMPI                // jump to function if equal
-    /// ```
-    ///
-    /// after:
-    /// ```assembly
-    /// DUP1                 // duplicate token on stack
-    /// PUSH2 0x8f3a         // push 2-byte derived token
-    /// EQ                   // compare: stack_top == 0x8f3a
-    /// PUSH2 0x001a         // same target address  
-    /// JUMPI                // jump to function if equal
-    /// ```
-    fn create_token_comparison(
-        &self,
-        token: &[u8],
-        target_address: u64,
-    ) -> Result<Vec<Instruction>, TransformError> {
-        let mut comparison = vec![self.create_instruction(Opcode::DUP(1), None)?];
-
-        // Push token with appropriate size
-        let push_size = token.len().clamp(1, 32);
-        let token_hex = hex::encode(token);
-        comparison.push(self.create_instruction(Opcode::PUSH(push_size as u8), Some(token_hex))?);
-
-        comparison.extend(vec![
-            self.create_instruction(Opcode::EQ, None)?,
-            self.create_push_instruction(target_address, Some(2))?,
-            self.create_instruction(Opcode::JUMPI, None)?,
-        ]);
-
-        Ok(comparison)
-    }
-
-    /// Updates internal CALL instructions to use tokens instead of selectors
-    ///
-    /// before update internal calls:
-    /// ```assembly
-    /// PUSH4 <selector> // Function selector
-    /// CALL             // Or DELEGATECALL, STATICCALL
-    /// ```
-    /// after:
-    /// ```assembly
-    /// PUSH1/2/3 <token> // Variable-size corresponding token
-    /// CALL              // Same call instruction
-    /// ```
-    pub fn update_internal_calls(
+    /// Syncs internal CALL sites with dispatcher tokens so remapped selectors still fire.
+    fn update_internal_calls(
         &self,
         ir: &mut CfgIrBundle,
         mapping: &HashMap<u32, Vec<u8>>,
-    ) -> Result<(), TransformError> {
-        for node_idx in ir.cfg.node_indices().collect::<Vec<_>>() {
-            if let Block::Body { instructions, .. } = &mut ir.cfg[node_idx] {
-                let mut i = 0;
-                while i < instructions.len().saturating_sub(1) {
-                    // Look for PUSH4 <selector> followed by CALL variants
-                    if instructions[i].opcode == "PUSH4"
-                        && matches!(
-                            instructions[i + 1].opcode.as_str(),
-                            "CALL" | "DELEGATECALL" | "STATICCALL"
-                        )
-                    {
-                        if let Some(imm) = &instructions[i].imm {
-                            if let Ok(selector) = u32::from_str_radix(imm, 16) {
-                                if let Some(token) = mapping.get(&selector) {
-                                    // Replace PUSH4 <selector> with PUSH(n) <token>
-                                    let token_size = token.len().clamp(1, 32);
-                                    let token_hex = hex::encode(token);
-                                    instructions[i] = self.create_instruction(
-                                        Opcode::PUSH(token_size as u8),
-                                        Some(token_hex),
-                                    )?;
-                                }
-                            }
-                        }
-                    }
-                    i += 1;
+    ) -> Result<bool> {
+        let nodes: Vec<_> = ir.cfg.node_indices().collect();
+        let mut modified = false;
+
+        for node in nodes {
+            let original = match ir.cfg.node_weight(node) {
+                Some(Block::Body(body)) => body.clone(),
+                _ => continue,
+            };
+
+            let mut new_body = original.clone();
+            let mut changed = false;
+
+            for idx in 0..new_body.instructions.len().saturating_sub(1) {
+                if new_body.instructions[idx].op != Opcode::PUSH(4) {
+                    continue;
+                }
+
+                if !matches!(
+                    new_body.instructions[idx + 1].op,
+                    Opcode::CALL | Opcode::DELEGATECALL | Opcode::STATICCALL
+                ) {
+                    continue;
+                }
+
+                let Some(ref immediate) = new_body.instructions[idx].imm else {
+                    continue;
+                };
+
+                let Ok(selector) = u32::from_str_radix(immediate, 16) else {
+                    continue;
+                };
+
+                let Some(token) = mapping.get(&selector) else {
+                    continue;
+                };
+
+                let token_hex = hex::encode(token);
+                if new_body.instructions[idx].imm.as_deref() != Some(token_hex.as_str()) {
+                    new_body.instructions[idx].imm = Some(token_hex);
+                    changed = true;
                 }
             }
+
+            if changed {
+                ir.overwrite_block(node, new_body)
+                    .map_err(|e| Error::CoreError(e.to_string()))?;
+                modified = true;
+            }
         }
-        Ok(())
+
+        Ok(modified)
     }
 
-    /// Detects any standard function dispatcher pattern
-    pub fn detect_dispatcher(
-        &self,
-        instructions: &[Instruction],
-    ) -> Option<(usize, usize, Vec<FunctionSelector>)> {
-        if let Some(dispatcher_info) = detect_function_dispatcher(instructions) {
-            debug!(
-                "Detected dispatcher: {} selectors, pattern: {:?}",
-                dispatcher_info.selectors.len(),
-                dispatcher_info.extraction_pattern
-            );
-            Some((
-                dispatcher_info.start_offset,
-                dispatcher_info.end_offset,
-                dispatcher_info.selectors,
-            ))
-        } else {
-            None
-        }
-    }
-
-    /// Creates a safe instruction with proper opcode validation
-    pub fn create_instruction(
-        &self,
-        opcode: Opcode,
-        imm: Option<String>,
-    ) -> Result<Instruction, TransformError> {
-        Ok(Instruction {
-            pc: 0, // Will be set during PC reindexing
-            opcode: opcode.to_string(),
-            imm,
-        })
-    }
-
-    /// Creates a PUSH instruction with proper size validation
-    pub fn create_push_instruction(
-        &self,
-        value: u64,
-        target_bytes: Option<usize>,
-    ) -> Result<Instruction, TransformError> {
-        let bytes_needed = if value == 0 {
-            1
-        } else {
-            (64 - value.leading_zeros()).div_ceil(8) as usize
+    /// Overwrites a CFG block
+    fn patch_block<F>(&self, ir: &mut CfgIrBundle, node: NodeIndex, mut f: F) -> Result<bool>
+    where
+        F: FnMut(&mut BlockBody) -> bool,
+    {
+        let original = match ir.cfg.node_weight(node) {
+            Some(Block::Body(body)) => body.clone(),
+            _ => return Ok(false),
         };
 
-        let push_size = target_bytes.unwrap_or(bytes_needed).clamp(1, 32);
-        let opcode = Opcode::PUSH(push_size as u8);
-        let hex_value = format!("{:0width$x}", value, width = push_size * 2);
-
-        self.create_instruction(opcode, Some(hex_value))
-    }
-
-    /// Estimates the byte size of instructions for size delta calculation
-    fn estimate_bytecode_size(&self, instructions: &[Instruction]) -> usize {
-        instructions
-            .iter()
-            .map(|instr| {
-                if instr.opcode.starts_with("PUSH") {
-                    if let Some(Ok(push_size)) = instr
-                        .opcode
-                        .strip_prefix("PUSH")
-                        .map(|s| s.parse::<usize>())
-                    {
-                        1 + push_size
-                    } else {
-                        1
-                    }
-                } else {
-                    1
-                }
-            })
-            .sum()
+        let mut new_body = original.clone();
+        if f(&mut new_body) {
+            ir.overwrite_block(node, new_body)
+                .map_err(|e| Error::CoreError(e.to_string()))?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
 impl Transform for FunctionDispatcher {
+    /// Identifies the transform in logging and registries.
     fn name(&self) -> &'static str {
         "FunctionDispatcher"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool, TransformError> {
-        debug!("=== FunctionDispatcher Transform Start ===");
-
-        // Find the runtime section
-        let runtime_section = ir
-            .sections
-            .iter()
-            .find(|s| s.kind == azoth_core::detection::SectionKind::Runtime);
-
-        let (runtime_start, runtime_end) = if let Some(section) = runtime_section {
-            (section.offset, section.offset + section.len)
-        } else {
-            // No runtime section found - analyze all instructions
-            debug!("No runtime section found, analyzing all instructions");
-            (0, usize::MAX)
-        };
-
-        debug!(
-            "Runtime section: PC range [{:#x}, {:#x})",
-            runtime_start, runtime_end
-        );
-
-        // Collect blocks from the runtime section and sort by PC to maintain correct order
-        let mut runtime_blocks: Vec<_> = ir
-            .cfg
-            .node_indices()
-            .filter_map(|node_idx| {
-                if let Block::Body {
-                    instructions,
-                    start_pc,
-                    ..
-                } = &ir.cfg[node_idx]
-                {
-                    if *start_pc >= runtime_start && *start_pc < runtime_end {
-                        return Some((node_idx, *start_pc, instructions.clone()));
-                    }
-                }
-                None
-            })
-            .collect();
-
-        // Sort by start_pc to ensure instructions are in correct linear order
-        runtime_blocks.sort_by_key(|(_, start_pc, _)| *start_pc);
-
-        // Now collect instructions in PC order
-        let mut all_instructions = Vec::new();
-        let mut block_boundaries = Vec::new();
-
-        for (node_idx, start_pc, instructions) in runtime_blocks {
-            block_boundaries.push((node_idx, all_instructions.len(), start_pc));
-            all_instructions.extend(instructions);
+    /// Detects the dispatcher, remaps selectors, and patches dispatcher + call sites.
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
+        let (runtime_instructions, index_by_pc) = self.collect_runtime_instructions(ir);
+        if runtime_instructions.is_empty() {
+            debug!("No runtime instructions available; skipping dispatcher transform");
+            return Ok(false);
         }
 
-        debug!(
-            "Analyzing {} instructions across {} runtime blocks",
-            all_instructions.len(),
-            block_boundaries.len()
-        );
-
-        // Use cached dispatcher info if available, otherwise detect
-        let dispatcher_result = if let Some(ref cached) = self.cached_dispatcher {
-            debug!(
-                "Using pre-detected dispatcher info: {} selectors",
-                cached.selectors.len()
-            );
-            Some((
-                cached.start_offset,
-                cached.end_offset,
-                cached.selectors.clone(),
-            ))
-        } else {
-            self.detect_dispatcher(&all_instructions)
-        };
-
-        if let Some((start, end, selectors)) = dispatcher_result {
-            debug!(
-                "Found dispatcher at offset {}..{} with {} selectors",
-                start,
-                end,
-                selectors.len()
-            );
-
-            // Infer the base address from JUMPDESTs using a voting algorithm.
-            // For each (target, jumpdest) pair, vote for base = jumpdest - target.
-            // Pick the base with maximum votes (ideally full coverage).
-            // NOTE: base can be LESS than runtime_start (e.g., 0x23A < 0x241 is valid).
-
-            // Step 1: Collect all JUMPDEST PCs from runtime instructions
-            let jumpdests: HashSet<u32> = all_instructions
-                .iter()
-                .filter(|ins| ins.opcode == "JUMPDEST")
-                .map(|ins| ins.pc as u32)
-                .collect();
-
-            debug!("Found {} JUMPDESTs in runtime", jumpdests.len());
-
-            // Step 2: Extract targets from selectors
-            let targets: Vec<u32> = selectors.iter().map(|s| s.target_address as u32).collect();
-
-            debug!(
-                "Dispatcher has {} targets: {:x?}",
-                targets.len(),
-                &targets[..targets.len().min(5)]
-            );
-
-            // Step 3: Vote for base = jumpdest - target
-            let mut votes: HashMap<u32, usize> = HashMap::new();
-            for &target in &targets {
-                for &jd in &jumpdests {
-                    if jd >= target {
-                        let base_candidate = jd - target;
-                        // Sanity window: base should be reasonable (0 for runtime-only, or typical range)
-                        // Allow 0 for runtime-only bytecode where targets are already absolute
-                        if base_candidate == 0 || (0x80..=0x1000).contains(&base_candidate) {
-                            *votes.entry(base_candidate).or_default() += 1;
-                        }
-                    }
-                }
-            }
-
-            // Step 4: Pick the base with most votes
-            let (&best_base, &vote_count) = votes
-                .iter()
-                .max_by_key(|(_, &count)| count)
-                .ok_or_else(|| {
-                    TransformError::Generic(
-                        "dispatcher: no valid base candidates found from JUMPDEST voting".into(),
-                    )
-                })?;
-
-            debug!(
-                "Best base from voting: {:#x} with {} votes (runtime_start={:#x})",
-                best_base, vote_count, runtime_start
-            );
-
-            // Step 5: Validate full coverage (all targets must map to JUMPDESTs)
-            let mut validated_selectors = Vec::new();
-            let mut failed = Vec::new();
-
-            for (i, selector_info) in selectors.iter().enumerate() {
-                let target = selector_info.target_address as u32;
-                let absolute_pc = best_base + target;
-                let is_jumpdest = jumpdests.contains(&absolute_pc);
-
-                if is_jumpdest {
-                    validated_selectors.push(selector_info.clone());
-                    if i < 5 {
-                        debug!(
-                            "  t{}: sel=0x{:08x} off=0x{:x} -> abs=0x{:x} JD=true",
-                            i, selector_info.selector, target, absolute_pc
-                        );
-                    }
-                } else {
-                    failed.push((selector_info.selector, target, absolute_pc));
-                    debug!(
-                        "  t{}: sel=0x{:08x} off=0x{:x} -> abs=0x{:x} JD=FALSE",
-                        i, selector_info.selector, target, absolute_pc
-                    );
-                }
-            }
-
-            debug!(
-                "Validation: {}/{} targets map to JUMPDESTs",
-                validated_selectors.len(),
-                selectors.len()
-            );
-
-            // Step 6: Require full coverage
-            if !failed.is_empty() {
-                let failures_summary: Vec<_> = failed
-                    .iter()
-                    .map(|(sel, t, abs)| format!("0x{:08x}->0x{:x} (abs: 0x{:x})", sel, t, abs))
-                    .collect();
-                return Err(TransformError::Generic(format!(
-                    "dispatcher: base {:#x} doesn't achieve full coverage. Failed targets: [{}]",
-                    best_base,
-                    failures_summary.join(", ")
-                )));
-            }
-
-            let base = best_base as usize;
-
-            debug!("Validating dispatcher targets against CFG...");
-            debug!(
-                "Targets are in deployed bytecode coordinates, using validated base +{:#x}",
-                base
-            );
-
-            // Log all validated selectors
-            for selector_info in &validated_selectors {
-                let deployed_target = selector_info.target_address as usize;
-                let original_target_pc = base + deployed_target;
-                debug!(
-                    "  ✓ Selector 0x{:08x} -> 0x{:x} (original PC: 0x{:x})",
-                    selector_info.selector, deployed_target, original_target_pc
-                );
-            }
-
-            debug!(
-                "All {} targets validated successfully",
-                validated_selectors.len()
-            );
-            let selectors = validated_selectors;
-
-            // Generate cryptographically secure token mapping
-            let mapping = self.generate_mapping(&selectors, rng)?;
-            debug!("Generated {} token mappings", mapping.len());
-
-            // Find which blocks contain the dispatcher
-            let mut affected_blocks = Vec::new();
-            for (node_idx, block_start, start_pc) in block_boundaries {
-                let block_instructions = if let Block::Body { instructions, .. } = &ir.cfg[node_idx]
-                {
-                    instructions.len()
-                } else {
-                    continue;
-                };
-
-                let block_end = block_start + block_instructions;
-                if block_start < end && block_end > start {
-                    affected_blocks.push((node_idx, block_start, start_pc));
-                    debug!(
-                        "Block {} is affected (PC 0x{:x})",
-                        node_idx.index(),
-                        start_pc
-                    );
-                }
-            }
-
-            if affected_blocks.is_empty() {
-                debug!("No affected blocks found - skipping");
+        let dispatcher_info = match self.dispatcher_info(&runtime_instructions) {
+            Some(info) => info,
+            None => {
+                debug!("Dispatcher not detected; skipping transform");
                 return Ok(false);
             }
+        };
 
-            // Calculate original dispatcher size
-            let mut total_original_size = 0;
-            for (block_idx, block_start, _) in &affected_blocks {
-                if let Block::Body { instructions, .. } = &ir.cfg[*block_idx] {
-                    let block_dispatcher_start = if start >= *block_start {
-                        start - block_start
-                    } else {
-                        0
-                    };
-                    let block_dispatcher_end = if end >= *block_start {
-                        (end - block_start).min(instructions.len())
-                    } else {
-                        0
-                    };
-
-                    if block_dispatcher_start < instructions.len()
-                        && block_dispatcher_end > block_dispatcher_start
-                    {
-                        let block_section =
-                            &instructions[block_dispatcher_start..block_dispatcher_end];
-                        total_original_size += self.estimate_bytecode_size(block_section);
-                    }
-                }
-            }
-
-            // Generate the complete disguised dispatcher
-            let (new_instructions, needed_stack) =
-                self.create_obfuscated_dispatcher(&selectors, &mapping, rng)?;
-
-            let new_size = self.estimate_bytecode_size(&new_instructions);
-            let size_delta = new_size as isize - total_original_size as isize;
-
-            debug!(
-                "Dispatcher transformation: {} → {} bytes (Δ{:+})",
-                total_original_size, new_size, size_delta
-            );
-
-            // Clear original dispatcher sections from all affected blocks
-            for (block_idx, block_start, _) in &affected_blocks {
-                if let Block::Body {
-                    instructions,
-                    max_stack,
-                    ..
-                } = &mut ir.cfg[*block_idx]
-                {
-                    let block_dispatcher_start = if start >= *block_start {
-                        start - block_start
-                    } else {
-                        0
-                    };
-                    let block_dispatcher_end = if end >= *block_start {
-                        (end - block_start).min(instructions.len())
-                    } else {
-                        0
-                    };
-
-                    if block_dispatcher_start < instructions.len()
-                        && block_dispatcher_end > block_dispatcher_start
-                    {
-                        instructions.drain(block_dispatcher_start..block_dispatcher_end);
-                        *max_stack = (*max_stack).max(needed_stack);
-                    }
-                }
-            }
-
-            // Insert the disguised dispatcher into the first affected block
-            let (first_block_idx, first_block_start, first_block_start_pc) = affected_blocks[0];
-            if let Block::Body { instructions, .. } = &mut ir.cfg[first_block_idx] {
-                let insertion_point = start.saturating_sub(first_block_start);
-
-                for (i, new_instr) in new_instructions.into_iter().enumerate() {
-                    instructions.insert(insertion_point + i, new_instr);
-                }
-            }
-
-            // Update any internal CALL instructions to use tokens
-            self.update_internal_calls(ir, &mapping)?;
-
-            // Update CFG structure and addresses
-            let region_start = first_block_start_pc;
-            ir.update_jump_targets(size_delta, region_start, None)
-                .map_err(TransformError::CoreError)?;
-
-            ir.reindex_pcs().map_err(TransformError::CoreError)?;
-
-            // Rebuild edges for all affected blocks
-            for (block_idx, _, _) in &affected_blocks {
-                ir.rebuild_edges_for_block(*block_idx)
-                    .map_err(TransformError::CoreError)?;
-            }
-
-            // Store the mapping in the CFG bundle
-            ir.selector_mapping = Some(mapping);
-
-            debug!("=== FunctionDispatcher Transform Complete ===");
-            return Ok(true);
-        } else {
-            debug!("No dispatcher pattern detected - skipping transformation");
+        if dispatcher_info.selectors.is_empty() {
+            debug!("Dispatcher detection produced no selectors; skipping transform");
+            return Ok(false);
         }
 
-        Ok(false)
+        let mapping = self.generate_mapping(&dispatcher_info.selectors, rng)?;
+        debug!("Remapping {} selectors", mapping.len());
+
+        let dispatcher_modified = self.apply_dispatcher_patches(
+            ir,
+            &runtime_instructions,
+            &index_by_pc,
+            &dispatcher_info,
+            &mapping,
+        )?;
+
+        let calls_modified = self.update_internal_calls(ir, &mapping)?;
+
+        if dispatcher_modified || calls_modified {
+            ir.selector_mapping = Some(mapping);
+            debug!("Function dispatcher tokens applied successfully");
+            Ok(true)
+        } else {
+            debug!("Dispatcher mapping produced no changes");
+            Ok(false)
+        }
     }
 }

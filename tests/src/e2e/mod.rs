@@ -34,13 +34,17 @@ pub fn mock_token_bytecode() -> Bytes {
 }
 
 #[allow(dead_code)]
-pub const ESCROW_CONTRACT_BYTECODE: &str =
-    include_str!("../../../examples/escrow-bytecode/artifacts/bytecode.hex");
+pub const ESCROW_CONTRACT_DEPLOYMENT_BYTECODE: &str =
+    include_str!("../../../examples/escrow-bytecode/artifacts/deployment_bytecode.hex");
+
+#[allow(dead_code)]
+pub const ESCROW_CONTRACT_RUNTIME_BYTECODE: &str =
+    include_str!("../../../examples/escrow-bytecode/artifacts/runtime_bytecode.hex");
 
 /// Prepare escrow contract bytecode with constructor arguments
 #[allow(dead_code)]
 pub fn prepare_bytecode(base_bytecode: &str) -> Result<Bytes> {
-    let normalized_hex = azoth_core::decoder::normalize_hex_string(base_bytecode)
+    let normalized_hex = azoth_core::normalize_hex_string(base_bytecode)
         .map_err(|e| eyre!("Failed to normalize bytecode: {}", e))?;
 
     let mut bytecode_bytes =
@@ -262,7 +266,7 @@ impl_calldata_builders!(ObfuscatedCaller for EscrowMappings {
     fn is_bonded_call_data() -> is_bonded;
     fn collect_call_data() -> collect;
     fn withdraw_call_data() -> withdraw;
-    fn fund_call_data() -> fund;
+    fn fund_call_data(reward_amount: U256, payment_amount: U256) -> fund;
     fn funded_call_data() -> funded;
 });
 
@@ -279,3 +283,9 @@ mod deploy;
 
 #[cfg(test)]
 mod escrow;
+
+#[cfg(test)]
+mod test_original;
+
+#[cfg(test)]
+mod test_counter;

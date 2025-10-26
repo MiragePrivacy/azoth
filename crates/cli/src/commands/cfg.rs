@@ -1,9 +1,7 @@
-/// Module for the `cfg` subcommand, which visualizes the control flow graph (CFG) of EVM
-/// bytecode.
-///
-/// This module processes input bytecode, constructs a CFG using the `cfg_ir` module, and
-/// generates a Graphviz .dot file representing the CFG. The output can be written to a file or
-/// printed to stdout.
+//! This module processes input bytecode, constructs a CFG using the `cfg_ir` module, and
+//! generates a Graphviz .dot file representing the CFG. The output can be written to a file or
+//! printed to stdout.
+
 use async_trait::async_trait;
 use azoth_core::cfg_ir::{build_cfg_ir, Block, CfgIrBundle, EdgeType};
 use azoth_core::decoder::decode_bytecode;
@@ -32,7 +30,7 @@ impl super::Command for CfgArgs {
         let (instructions, _, _, bytes) = decode_bytecode(&self.input, is_file).await?;
         let sections = locate_sections(&bytes, &instructions)?;
         let (_clean_runtime, clean_report) = strip_bytecode(&bytes, &sections)?;
-        let cfg_ir = build_cfg_ir(&instructions, &sections, clean_report)?;
+        let cfg_ir = build_cfg_ir(&instructions, &sections, clean_report, &bytes)?;
 
         let dot = generate_dot(&cfg_ir);
         if let Some(out_path) = self.output {
@@ -60,13 +58,9 @@ fn generate_dot(cfg_ir: &CfgIrBundle) -> String {
         let label = match block {
             Block::Entry => "Entry".to_string(),
             Block::Exit => "Exit".to_string(),
-            Block::Body {
-                start_pc,
-                instructions,
-                ..
-            } => {
-                let instrs: Vec<String> = instructions.iter().map(|i| i.to_string()).collect();
-                format!("Block_{}\\n{}", start_pc, instrs.join("\\n"))
+            Block::Body(body) => {
+                let instrs: Vec<String> = body.instructions.iter().map(|i| i.to_string()).collect();
+                format!("Block_{}\\n{}", body.start_pc, instrs.join("\\n"))
             }
         };
         dot.push_str(&format!("    {} [label=\"{}\"];\n", node.index(), label));

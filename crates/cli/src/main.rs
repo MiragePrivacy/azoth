@@ -1,8 +1,3 @@
-/// Entry point for the Bytecloak CLI, an EVM bytecode obfuscation tool.
-///
-/// This module parses command-line arguments and dispatches to subcommands for decoding,
-/// stripping, CFG visualization, or obfuscating EVM bytecode. It initializes logging and
-/// handles the main execution flow.
 use azoth_cli::commands::{Cmd, Command};
 use clap::Parser;
 
@@ -24,6 +19,8 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
         .init();
 
     let cli = Cli::parse();

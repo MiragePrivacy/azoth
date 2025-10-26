@@ -1,8 +1,7 @@
-/// Module for the `strip` subcommand, which extracts the runtime bytecode from EVM bytecode.
-///
-/// This module processes input bytecode, removes non-runtime sections (e.g., init code,
-/// auxdata), and outputs either the cleaned runtime bytecode as a hex string or a JSON report
-/// detailing the stripping process.
+//! This module processes input bytecode, removes non-runtime sections (e.g., init code,
+//! auxdata), and outputs either the cleaned runtime bytecode as a hex string or a JSON report
+//! detailing the stripping process.
+
 use async_trait::async_trait;
 use azoth_core::decoder::decode_bytecode;
 use azoth_core::detection::locate_sections;
