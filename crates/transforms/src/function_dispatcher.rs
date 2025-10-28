@@ -148,7 +148,8 @@ impl FunctionDispatcher {
         ))
     }
 
-    /// Replaces the canonical selector extraction with a single-byte mask variant.
+    /// Takes the canonical Solidity dispatcher preamble `CALLDATALOAD → PUSH1 0xe0 → SHR`
+    /// and mutates it so the selector extraction now returns a single byte `CALLDATALOAD → PUSH1 0x03 → BYTE`
     fn rewrite_selector_extraction(
         &self,
         ir: &mut CfgIrBundle,
