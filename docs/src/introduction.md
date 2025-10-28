@@ -2,4 +2,4 @@ Azoth is a deterministic EVM bytecode obfuscator designed to make Mirage executi
 
 The toolchain dissects contract bytecode, reconstructs control-flow, and applies deterministic rewrites that reshape structure without inflating gas usage or breaking deployability.
 
-Within this documentation you will find guidance on the command-line interface, core architecture, transforms, analysis, and verification systems, and the source for the book lives alongside Azoth on GitHub at https://github.com/MiragePrivacy/azoth/tree/master/docs
+Within this documentation you will find guidance on the command-line interface, core architecture, transforms, analysis, and verification systems, and the source for the book [lives alongside](https://github.com/MiragePrivacy/azoth/tree/master/docs) Azoth on GitHub
