@@ -14,15 +14,19 @@ use sha3::{Digest, Keccak256};
 use std::collections::{HashMap, HashSet};
 use tracing::debug;
 
-const SELECTOR_TOKEN_LEN: usize = 1;
+/// Number of bytes written into each PUSH immediate after obfuscation.
+/// We leave this at 4 so the dispatcher still uses PUSH4 comparisons.
+const SELECTOR_TOKEN_LEN: usize = 4;
+/// Because we only encode one unique byte per selector, we can map at most 256 distinct selectors without collisions. If
+/// a dispatcher has more than 256 entries, we skip the transform entirely so we don’t generate ambiguous tokens or break
+/// execution
 const MAX_BYTE_TOKEN_SELECTORS: usize = 256;
 
 /// Function dispatcher transform
 ///
 /// The transform mutates the dispatcher so it extracts a single obfuscated byte
 /// instead of the canonical 4-byte selector, then remaps dispatcher comparisons
-/// and internal call sites to deterministic but secret tokens. All edits go
-/// through the CFG IR utilities so the control-flow structure stays intact.
+/// and internal call sites to deterministic but secret tokens.
 #[derive(Default)]
 pub struct FunctionDispatcher {
     cached_dispatcher: Option<DispatcherInfo>,
@@ -96,43 +100,30 @@ impl FunctionDispatcher {
         rng.fill_bytes(&mut secret);
 
         let mut mapping = HashMap::with_capacity(selectors.len());
-        let mut used_tokens = HashSet::with_capacity(selectors.len());
+        let mut used_bytes = HashSet::with_capacity(selectors.len());
 
         for selector in selectors {
-            let token = self.derive_unique_token(
-                selector.selector,
-                &secret,
-                &mut used_tokens,
-                SELECTOR_TOKEN_LEN,
-            )?;
+            let selector_byte =
+                self.derive_unique_selector_byte(selector.selector, &secret, &mut used_bytes)?;
+
+            let mut token = vec![0u8; SELECTOR_TOKEN_LEN];
+            token[SELECTOR_TOKEN_LEN - 1] = selector_byte;
             mapping.insert(selector.selector, token);
         }
 
         Ok(mapping)
     }
 
-    /// Derives a 4 byte token for a selector while avoiding collisions and identity.
-    fn derive_unique_token(
+    /// Derives a single-byte identifier for a selector while avoiding collisions and identity.
+    fn derive_unique_selector_byte(
         &self,
         selector: u32,
         secret: &[u8; 32],
-        used_tokens: &mut HashSet<Vec<u8>>,
-        token_len: usize,
-    ) -> Result<Vec<u8>> {
+        used_bytes: &mut HashSet<u8>,
+    ) -> Result<u8> {
         const MAX_ATTEMPTS: u32 = 1_000;
 
-        if token_len == 0 || token_len > 32 {
-            return Err(Error::Generic(
-                "dispatcher: unsupported selector token length".into(),
-            ));
-        }
-
         let selector_bytes = selector.to_be_bytes();
-        let selector_prefix = if token_len <= selector_bytes.len() {
-            Some(selector_bytes[..token_len].to_vec())
-        } else {
-            None
-        };
 
         for counter in 0..MAX_ATTEMPTS {
             let mut hasher = Keccak256::new();
@@ -141,16 +132,14 @@ impl FunctionDispatcher {
             hasher.update(counter.to_be_bytes());
             let hash = hasher.finalize();
 
-            let token = hash[..token_len].to_vec();
-            if selector_prefix
-                .as_ref()
-                .is_some_and(|prefix| &token == prefix)
-            {
+            let candidate = hash[hash.len() - 1];
+
+            if candidate == selector_bytes[selector_bytes.len() - 1] {
                 continue;
             }
 
-            if used_tokens.insert(token.clone()) {
-                return Ok(token);
+            if used_bytes.insert(candidate) {
+                return Ok(candidate);
             }
         }
 
@@ -181,11 +170,11 @@ impl FunctionDispatcher {
 
         let patch_plan: Vec<(usize, Opcode, Option<String>)> = match pattern {
             ExtractionPattern::Standard => vec![
-                (start + 2, Opcode::PUSH(1), Some("00".to_string())),
+                (start + 2, Opcode::PUSH(1), Some("03".to_string())),
                 (start + 3, Opcode::BYTE, None),
             ],
             ExtractionPattern::Newer => vec![
-                (start + 1, Opcode::PUSH(1), Some("00".to_string())),
+                (start + 1, Opcode::PUSH(1), Some("03".to_string())),
                 (start + 2, Opcode::BYTE, None),
             ],
             other => {
@@ -235,7 +224,7 @@ impl FunctionDispatcher {
                         };
 
                         if instr.op != *opcode || !immediate_matches {
-                            instr.op = opcode.clone();
+                            instr.op = *opcode;
                             instr.imm = imm.clone();
                             changed = true;
                         }
@@ -469,6 +458,67 @@ impl Transform for FunctionDispatcher {
         } else {
             debug!("Dispatcher mapping produced no changes");
             Ok(false)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FunctionDispatcher;
+    use crate::Transform;
+    use azoth_core::process_bytecode_to_cfg;
+    use hex::encode as hex_encode;
+    use rand::{rngs::StdRng, SeedableRng};
+
+    static COUNTER_DEPLOYMENT: &str =
+        include_str!("../../../tests/bytecode/counter/counter_deployment.hex");
+
+    #[tokio::test]
+    async fn prints_obfuscated_runtime_dispatcher() {
+        let (mut bundle, _, _, _) = process_bytecode_to_cfg(COUNTER_DEPLOYMENT, false)
+            .await
+            .expect("cfg construction");
+        let mut rng = StdRng::seed_from_u64(0xdead_beef_cafe_babe);
+
+        let transform = FunctionDispatcher::new();
+        let changed = transform
+            .apply(&mut bundle, &mut rng)
+            .expect("dispatcher transform succeeds");
+        assert!(changed, "transform should mutate dispatcher");
+
+        let runtime_bounds = bundle.runtime_bounds().expect("runtime bounds");
+
+        let mut runtime_instrs = Vec::new();
+        for node in bundle.cfg.node_indices() {
+            if let Some(block) = bundle.cfg.node_weight(node) {
+                if let azoth_core::cfg_ir::Block::Body(body) = block {
+                    if body.start_pc >= runtime_bounds.0 && body.start_pc < runtime_bounds.1 {
+                        for instr in &body.instructions {
+                            if instr.pc >= runtime_bounds.0 && instr.pc < runtime_bounds.1 {
+                                runtime_instrs.push(instr.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        runtime_instrs.sort_by_key(|ins| ins.pc);
+
+        println!("\n=== Obfuscated dispatcher runtime slice ===");
+        for instr in runtime_instrs.iter().take(64) {
+            let imm = instr.imm.as_deref().unwrap_or("");
+            println!("{:04x}: {:<8} {}", instr.pc, instr.op, imm);
+        }
+
+        let mapping = bundle
+            .selector_mapping
+            .as_ref()
+            .expect("selector mapping should be populated");
+
+        println!("\nSelector mapping:");
+        for (selector, token) in mapping {
+            println!("  0x{selector:08x} -> {}", hex_encode(token));
         }
     }
 }
