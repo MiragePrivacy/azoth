@@ -234,7 +234,7 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
 }
 
 /// Locates the calldata extraction pattern in the first 200 instructions and returns its index and length.
-fn find_extraction_pattern(
+pub fn find_extraction_pattern(
     instructions: &[Instruction],
 ) -> Option<(usize, usize, ExtractionPattern)> {
     for i in 0..instructions.len().saturating_sub(3).min(200) {
