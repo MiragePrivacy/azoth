@@ -34,9 +34,8 @@ fn selector_token(mapping: &HashMap<u32, Vec<u8>>, selector: u32) -> Result<Byte
         ));
     }
 
-    // The dispatcher uses CALLDATALOAD(0) which loads 32 bytes starting at offset 0,
-    // then shifts right by 0xe0 (224 bits) to extract the leftmost 4 bytes.
-    // So we need to left-pad the token to 32 bytes.
+    // The dispatcher now loads 32 bytes from offset 0 and extracts the high-order byte with BYTE.
+    // Place the obfuscated token in the first byte and leave the remaining bytes zeroed.
     let mut padded = vec![0u8; 32];
     padded[..token.len()].copy_from_slice(token);
     Ok(Bytes::from(padded))

@@ -33,6 +33,24 @@ pub fn mock_token_bytecode() -> Bytes {
     ])
 }
 
+fn selector_from_token_bytes(token: &[u8]) -> Result<Selector, String> {
+    if token.is_empty() {
+        return Err("selector token must not be empty".into());
+    }
+    if token.len() > 32 {
+        return Err(format!(
+            "selector token too long: {} bytes (max 32)",
+            token.len()
+        ));
+    }
+
+    let mut prefix = [0u8; 4];
+    let copy_len = token.len().min(4);
+    prefix[..copy_len].copy_from_slice(&token[..copy_len]);
+
+    Ok(Selector::from_slice(&prefix))
+}
+
 #[allow(dead_code)]
 pub const ESCROW_CONTRACT_DEPLOYMENT_BYTECODE: &str =
     include_str!("../../../examples/escrow-bytecode/artifacts/deployment_bytecode.hex");
@@ -100,15 +118,12 @@ macro_rules! define_contract_selectors {
                     let mut mappings = Self::default();
 
                     for (&original_u32, token) in selector_mapping {
-                        if token.len() != 4 {
-                            return Err(format!(
-                                "Expected 4-byte token, got {} bytes for selector 0x{:08x}",
-                                token.len(),
-                                original_u32
-                            ));
-                        }
-
-                        let obfuscated = Selector::from_slice(token);
+                        let obfuscated = selector_from_token_bytes(token).map_err(|e| {
+                            format!(
+                                "Failed to convert selector 0x{:08x} token: {}",
+                                original_u32, e
+                            )
+                        })?;
 
                         match original_u32 {
                             $(

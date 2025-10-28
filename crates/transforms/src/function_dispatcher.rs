@@ -3,7 +3,10 @@
 use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle};
 use azoth_core::decoder::Instruction;
-use azoth_core::detection::{detect_function_dispatcher, DispatcherInfo, FunctionSelector};
+use azoth_core::detection::{
+    detect_function_dispatcher, find_extraction_pattern, DispatcherInfo, ExtractionPattern,
+    FunctionSelector,
+};
 use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
 use rand::{rngs::StdRng, RngCore};
@@ -11,13 +14,15 @@ use sha3::{Digest, Keccak256};
 use std::collections::{HashMap, HashSet};
 use tracing::debug;
 
+const SELECTOR_TOKEN_LEN: usize = 1;
+const MAX_BYTE_TOKEN_SELECTORS: usize = 256;
+
 /// Function dispatcher transform
 ///
-/// The transform remaps each 4-byte selector used in the dispatcher and in
-/// internal call sites to a deterministic but secret token.  The dispatcher
-/// layout is preserved – we only patch the immediate values – which keeps the
-/// original control-flow graph intact and avoids introducing brittle jump
-/// rewriting.
+/// The transform mutates the dispatcher so it extracts a single obfuscated byte
+/// instead of the canonical 4-byte selector, then remaps dispatcher comparisons
+/// and internal call sites to deterministic but secret tokens. All edits go
+/// through the CFG IR utilities so the control-flow structure stays intact.
 #[derive(Default)]
 pub struct FunctionDispatcher {
     cached_dispatcher: Option<DispatcherInfo>,
@@ -94,7 +99,12 @@ impl FunctionDispatcher {
         let mut used_tokens = HashSet::with_capacity(selectors.len());
 
         for selector in selectors {
-            let token = self.derive_unique_token(selector.selector, &secret, &mut used_tokens)?;
+            let token = self.derive_unique_token(
+                selector.selector,
+                &secret,
+                &mut used_tokens,
+                SELECTOR_TOKEN_LEN,
+            )?;
             mapping.insert(selector.selector, token);
         }
 
@@ -107,11 +117,22 @@ impl FunctionDispatcher {
         selector: u32,
         secret: &[u8; 32],
         used_tokens: &mut HashSet<Vec<u8>>,
+        token_len: usize,
     ) -> Result<Vec<u8>> {
-        const TOKEN_LEN: usize = 4;
         const MAX_ATTEMPTS: u32 = 1_000;
 
+        if token_len == 0 || token_len > 32 {
+            return Err(Error::Generic(
+                "dispatcher: unsupported selector token length".into(),
+            ));
+        }
+
         let selector_bytes = selector.to_be_bytes();
+        let selector_prefix = if token_len <= selector_bytes.len() {
+            Some(selector_bytes[..token_len].to_vec())
+        } else {
+            None
+        };
 
         for counter in 0..MAX_ATTEMPTS {
             let mut hasher = Keccak256::new();
@@ -120,8 +141,15 @@ impl FunctionDispatcher {
             hasher.update(counter.to_be_bytes());
             let hash = hasher.finalize();
 
-            let token = hash[..TOKEN_LEN].to_vec();
-            if token != selector_bytes && used_tokens.insert(token.clone()) {
+            let token = hash[..token_len].to_vec();
+            if selector_prefix
+                .as_ref()
+                .is_some_and(|prefix| &token == prefix)
+            {
+                continue;
+            }
+
+            if used_tokens.insert(token.clone()) {
                 return Ok(token);
             }
         }
@@ -129,6 +157,100 @@ impl FunctionDispatcher {
         Err(Error::Generic(
             "dispatcher: failed to derive unique selector token".into(),
         ))
+    }
+
+    /// Replaces the canonical selector extraction with a single-byte mask variant.
+    fn rewrite_selector_extraction(
+        &self,
+        ir: &mut CfgIrBundle,
+        runtime: &[Instruction],
+        index_by_pc: &HashMap<usize, (NodeIndex, usize)>,
+        info: &DispatcherInfo,
+    ) -> Result<bool> {
+        let Some((start, _, pattern)) = find_extraction_pattern(runtime) else {
+            debug!("Selector extraction pattern not found; skipping rewrite");
+            return Ok(false);
+        };
+
+        if pattern != info.extraction_pattern {
+            debug!(
+                "Extraction pattern mismatch (detected {:?}, runtime {:?}); proceeding with runtime pattern",
+                info.extraction_pattern, pattern
+            );
+        }
+
+        let patch_plan: Vec<(usize, Opcode, Option<String>)> = match pattern {
+            ExtractionPattern::Standard => vec![
+                (start + 2, Opcode::PUSH(1), Some("00".to_string())),
+                (start + 3, Opcode::BYTE, None),
+            ],
+            ExtractionPattern::Newer => vec![
+                (start + 1, Opcode::PUSH(1), Some("00".to_string())),
+                (start + 2, Opcode::BYTE, None),
+            ],
+            other => {
+                debug!(
+                    "Unsupported extraction pattern {:?}; leaving dispatcher preamble untouched",
+                    other
+                );
+                return Ok(false);
+            }
+        };
+
+        let mut per_block: HashMap<NodeIndex, Vec<(usize, Opcode, Option<String>)>> =
+            HashMap::new();
+
+        for (instruction_index, opcode, imm) in patch_plan {
+            let instruction = runtime.get(instruction_index).ok_or_else(|| {
+                Error::Generic(format!(
+                    "dispatcher: extraction instruction index {} out of bounds",
+                    instruction_index
+                ))
+            })?;
+
+            let (node, offset) = index_by_pc.get(&instruction.pc).ok_or_else(|| {
+                Error::Generic(format!(
+                    "dispatcher: extraction instruction at pc {} not present in CFG",
+                    instruction.pc
+                ))
+            })?;
+
+            per_block
+                .entry(*node)
+                .or_default()
+                .push((*offset, opcode, imm.clone()));
+        }
+
+        let mut modified = false;
+
+        for (node, patches) in per_block {
+            let changed = self.patch_block(ir, node, |body| {
+                let mut changed = false;
+                for (offset, opcode, imm) in &patches {
+                    if let Some(instr) = body.instructions.get_mut(*offset) {
+                        let immediate_matches = match (&imm, &instr.imm) {
+                            (Some(expected), Some(actual)) => actual == expected,
+                            (None, None) => true,
+                            _ => false,
+                        };
+
+                        if instr.op != *opcode || !immediate_matches {
+                            instr.op = opcode.clone();
+                            instr.imm = imm.clone();
+                            changed = true;
+                        }
+                    }
+                }
+                changed
+            })?;
+            modified |= changed;
+        }
+
+        if modified {
+            debug!("Selector extraction rewritten to BYTE-based single-byte pattern");
+        }
+
+        Ok(modified)
     }
 
     /// Rewrites dispatcher PUSH4 immediates to their tokens without touching layout.
@@ -140,7 +262,7 @@ impl FunctionDispatcher {
         info: &DispatcherInfo,
         mapping: &HashMap<u32, Vec<u8>>,
     ) -> Result<bool> {
-        let mut per_block: HashMap<NodeIndex, Vec<(usize, String)>> = HashMap::new();
+        let mut per_block: HashMap<NodeIndex, Vec<(usize, u8, String)>> = HashMap::new();
 
         for selector in &info.selectors {
             let instruction = runtime.get(selector.instruction_index).ok_or_else(|| {
@@ -164,10 +286,19 @@ impl FunctionDispatcher {
                 ))
             })?;
 
-            per_block
-                .entry(*node)
-                .or_default()
-                .push((*offset, hex::encode(token)));
+            let push_size = token.len();
+            if push_size == 0 || push_size > 32 {
+                return Err(Error::Generic(format!(
+                    "dispatcher: token for selector 0x{:08x} has invalid length {}",
+                    selector.selector, push_size
+                )));
+            }
+
+            per_block.entry(*node).or_default().push((
+                *offset,
+                push_size as u8,
+                hex::encode(token),
+            ));
         }
 
         let mut modified = false;
@@ -175,12 +306,12 @@ impl FunctionDispatcher {
         for (node, patches) in per_block {
             let changed = self.patch_block(ir, node, |body| {
                 let mut changed = false;
-                for (offset, token_hex) in &patches {
+                for (offset, push_size, token_hex) in &patches {
                     if let Some(instr) = body.instructions.get_mut(*offset) {
                         let needs_update = instr.imm.as_deref() != Some(token_hex.as_str())
-                            || !matches!(instr.op, Opcode::PUSH(4));
+                            || !matches!(instr.op, Opcode::PUSH(n) if n == *push_size);
                         if needs_update {
-                            instr.op = Opcode::PUSH(4);
+                            instr.op = Opcode::PUSH(*push_size);
                             instr.imm = Some(token_hex.clone());
                             changed = true;
                         }
@@ -213,9 +344,9 @@ impl FunctionDispatcher {
             let mut changed = false;
 
             for idx in 0..new_body.instructions.len().saturating_sub(1) {
-                if new_body.instructions[idx].op != Opcode::PUSH(4) {
+                let Opcode::PUSH(_) = new_body.instructions[idx].op else {
                     continue;
-                }
+                };
 
                 if !matches!(
                     new_body.instructions[idx + 1].op,
@@ -238,6 +369,8 @@ impl FunctionDispatcher {
 
                 let token_hex = hex::encode(token);
                 if new_body.instructions[idx].imm.as_deref() != Some(token_hex.as_str()) {
+                    let push_width = token.len() as u8;
+                    new_body.instructions[idx].op = Opcode::PUSH(push_width);
                     new_body.instructions[idx].imm = Some(token_hex);
                     changed = true;
                 }
@@ -301,6 +434,21 @@ impl Transform for FunctionDispatcher {
             return Ok(false);
         }
 
+        if dispatcher_info.selectors.len() > MAX_BYTE_TOKEN_SELECTORS {
+            debug!(
+                "Dispatcher has {} selectors; skipping byte-selector pattern",
+                dispatcher_info.selectors.len()
+            );
+            return Ok(false);
+        }
+
+        let extraction_modified = self.rewrite_selector_extraction(
+            ir,
+            &runtime_instructions,
+            &index_by_pc,
+            &dispatcher_info,
+        )?;
+
         let mapping = self.generate_mapping(&dispatcher_info.selectors, rng)?;
         debug!("Remapping {} selectors", mapping.len());
 
@@ -314,9 +462,9 @@ impl Transform for FunctionDispatcher {
 
         let calls_modified = self.update_internal_calls(ir, &mapping)?;
 
-        if dispatcher_modified || calls_modified {
+        if extraction_modified || dispatcher_modified || calls_modified {
             ir.selector_mapping = Some(mapping);
-            debug!("Function dispatcher tokens applied successfully");
+            debug!("Function dispatcher obfuscation applied successfully");
             Ok(true)
         } else {
             debug!("Dispatcher mapping produced no changes");
