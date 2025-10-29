@@ -14,12 +14,10 @@ use tracing::debug;
 
 pub(super) const SELECTOR_TOKEN_LEN: usize = 4;
 pub(super) const MAX_BYTE_TOKEN_SELECTORS: usize = 256;
-pub(super) const MAX_PACKED_TOKEN_SELECTORS: usize = 16;
 
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 enum DispatcherPattern {
-    Packed,
     Byte,
 }
 
@@ -268,7 +266,7 @@ impl Transform for FunctionDispatcher {
             return Ok(false);
         }
 
-        let pattern_order = vec![DispatcherPattern::Packed];
+        let pattern_order = vec![DispatcherPattern::Byte];
 
         let mut selected_mapping: Option<HashMap<u32, Vec<u8>>> = None;
         let mut extraction_modified = false;
@@ -277,17 +275,13 @@ impl Transform for FunctionDispatcher {
 
         for pattern in pattern_order {
             let result = match pattern {
-                DispatcherPattern::Packed => self.try_apply_packed_pattern(
+                DispatcherPattern::Byte => self.try_apply_byte_pattern(
                     ir,
                     &runtime_instructions,
                     &index_by_pc,
                     &dispatcher_info,
                     rng,
                 )?,
-                DispatcherPattern::Byte => {
-                    // Byte-selector pattern disabled while testing packed jump-table implementation.
-                    continue;
-                }
             };
 
             if let Some((mapping, extraction, dispatcher)) = result {
@@ -295,7 +289,6 @@ impl Transform for FunctionDispatcher {
                 extraction_modified = extraction;
                 dispatcher_modified = dispatcher;
                 used_pattern = Some(match pattern {
-                    DispatcherPattern::Packed => "PackedJumpTable",
                     DispatcherPattern::Byte => "ByteSelector",
                 });
                 break;
