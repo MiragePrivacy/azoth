@@ -2,8 +2,6 @@
 
 mod patterns;
 
-use patterns::{ByteSelectorPattern, PatchPlan, MAX_SELECTOR_COUNT};
-
 use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle};
 use azoth_core::decoder::Instruction;
@@ -14,27 +12,35 @@ use rand::rngs::StdRng;
 use std::collections::HashMap;
 use tracing::debug;
 
+pub(super) const SELECTOR_TOKEN_LEN: usize = 4;
+pub(super) const MAX_BYTE_TOKEN_SELECTORS: usize = 256;
+pub(super) const MAX_PACKED_TOKEN_SELECTORS: usize = 16;
+
+#[allow(dead_code)]
+#[derive(Copy, Clone, Debug)]
+enum DispatcherPattern {
+    Packed,
+    Byte,
+}
+
 #[derive(Default)]
 pub struct FunctionDispatcher {
     cached_dispatcher: Option<DispatcherInfo>,
 }
 
 impl FunctionDispatcher {
-    /// Creates an empty dispatcher transform without cached metadata.
     pub fn new() -> Self {
         Self {
             cached_dispatcher: None,
         }
     }
 
-    /// Seeds the transform with a pre-detected dispatcher description.
     pub fn with_dispatcher_info(dispatcher_info: DispatcherInfo) -> Self {
         Self {
             cached_dispatcher: Some(dispatcher_info),
         }
     }
 
-    /// Flattens runtime blocks into a linear instruction list plus CFG index map.
     fn collect_runtime_instructions(
         &self,
         ir: &CfgIrBundle,
@@ -64,7 +70,6 @@ impl FunctionDispatcher {
         (runtime_instructions, index_by_pc)
     }
 
-    /// Returns cached dispatcher metadata or detects it from the runtime slice.
     fn dispatcher_info(&self, runtime: &[Instruction]) -> Option<DispatcherInfo> {
         if let Some(info) = &self.cached_dispatcher {
             Some(info.clone())
@@ -73,40 +78,29 @@ impl FunctionDispatcher {
         }
     }
 
-    /// Applies a set of instruction-level edits returned by a dispatcher pattern.
-    ///
-    /// Each entry in the plan maps a block to the list of `(offset, opcode, immediate)`
-    /// replacements that should be applied inside that block.
-    /// Applies a set of instruction-level edits returned by a dispatcher pattern.
-    ///
-    /// Each entry in the plan maps a block to the list of `(offset, opcode, immediate)`
-    /// replacements that should be applied inside that block.
-    fn apply_instruction_patches(
+    fn apply_instruction_replacements(
         &self,
         ir: &mut CfgIrBundle,
-        patch_plan: PatchPlan,
+        edits: Vec<(NodeIndex, usize, Opcode, Option<String>)>,
     ) -> Result<bool> {
         let mut modified = false;
 
-        for (node, patches) in patch_plan {
+        for (node, pc, opcode, immediate) in edits {
             let changed = self.patch_block(ir, node, |body| {
-                let mut changed = false;
-                for (offset, opcode, immediate) in &patches {
-                    if let Some(instr) = body.instructions.get_mut(*offset) {
-                        let immediate_matches = match (&immediate, &instr.imm) {
-                            (Some(expected), Some(actual)) => actual == expected,
-                            (None, None) => true,
-                            _ => false,
-                        };
+                if let Some(instr) = body.instructions.iter_mut().find(|ins| ins.pc == pc) {
+                    let immediate_matches = match (&immediate, &instr.imm) {
+                        (Some(expected), Some(actual)) => actual == expected,
+                        (None, None) => true,
+                        _ => false,
+                    };
 
-                        if instr.op != *opcode || !immediate_matches {
-                            instr.op = *opcode;
-                            instr.imm = immediate.clone();
-                            changed = true;
-                        }
+                    if instr.op != opcode || !immediate_matches {
+                        instr.op = opcode;
+                        instr.imm = immediate.clone();
+                        return true;
                     }
                 }
-                changed
+                false
             })?;
             modified |= changed;
         }
@@ -175,7 +169,6 @@ impl FunctionDispatcher {
         Ok(modified)
     }
 
-    /// Overwrites a CFG block.
     fn patch_block<F>(&self, ir: &mut CfgIrBundle, node: NodeIndex, mut f: F) -> Result<bool>
     where
         F: FnMut(&mut BlockBody) -> bool,
@@ -193,6 +186,60 @@ impl FunctionDispatcher {
         } else {
             Ok(false)
         }
+    }
+
+    fn apply_dispatcher_patches(
+        &self,
+        ir: &mut CfgIrBundle,
+        runtime: &[Instruction],
+        index_by_pc: &HashMap<usize, (NodeIndex, usize)>,
+        info: &DispatcherInfo,
+        mapping: &HashMap<u32, Vec<u8>>,
+    ) -> Result<bool> {
+        let mut edits = Vec::with_capacity(info.selectors.len());
+
+        for selector in &info.selectors {
+            let instruction = runtime.get(selector.instruction_index).ok_or_else(|| {
+                Error::Generic(format!(
+                    "dispatcher: selector index {} out of bounds",
+                    selector.instruction_index
+                ))
+            })?;
+
+            let (node, _) = match index_by_pc.get(&instruction.pc) {
+                Some(pair) => *pair,
+                None => {
+                    return Err(Error::Generic(format!(
+                        "dispatcher: instruction at pc {} not found in CFG",
+                        instruction.pc
+                    )))
+                }
+            };
+
+            let token = mapping.get(&selector.selector).ok_or_else(|| {
+                Error::Generic(format!(
+                    "dispatcher: missing token for selector 0x{:08x}",
+                    selector.selector
+                ))
+            })?;
+
+            if token.is_empty() || token.len() > 32 {
+                return Err(Error::Generic(format!(
+                    "dispatcher: token for selector 0x{:08x} has invalid length {}",
+                    selector.selector,
+                    token.len()
+                )));
+            }
+
+            edits.push((
+                node,
+                instruction.pc,
+                Opcode::PUSH(token.len() as u8),
+                Some(hex::encode(token)),
+            ));
+        }
+
+        self.apply_instruction_replacements(ir, edits)
     }
 }
 
@@ -221,37 +268,52 @@ impl Transform for FunctionDispatcher {
             return Ok(false);
         }
 
-        if dispatcher_info.selectors.len() > MAX_SELECTOR_COUNT {
-            debug!(
-                "Dispatcher has {} selectors; skipping byte-selector pattern",
-                dispatcher_info.selectors.len()
-            );
-            return Ok(false);
+        let pattern_order = vec![DispatcherPattern::Packed];
+
+        let mut selected_mapping: Option<HashMap<u32, Vec<u8>>> = None;
+        let mut extraction_modified = false;
+        let mut dispatcher_modified = false;
+        let mut used_pattern: Option<&'static str> = None;
+
+        for pattern in pattern_order {
+            let result = match pattern {
+                DispatcherPattern::Packed => self.try_apply_packed_pattern(
+                    ir,
+                    &runtime_instructions,
+                    &index_by_pc,
+                    &dispatcher_info,
+                    rng,
+                )?,
+                DispatcherPattern::Byte => {
+                    // Byte-selector pattern disabled while testing packed jump-table implementation.
+                    continue;
+                }
+            };
+
+            if let Some((mapping, extraction, dispatcher)) = result {
+                selected_mapping = Some(mapping);
+                extraction_modified = extraction;
+                dispatcher_modified = dispatcher;
+                used_pattern = Some(match pattern {
+                    DispatcherPattern::Packed => "PackedJumpTable",
+                    DispatcherPattern::Byte => "ByteSelector",
+                });
+                break;
+            }
         }
 
-        let extraction_plan = ByteSelectorPattern::plan_extraction_patches(
-            &runtime_instructions,
-            &index_by_pc,
-            &dispatcher_info,
-        )?;
-        let extraction_modified = self.apply_instruction_patches(ir, extraction_plan)?;
-
-        let mapping = ByteSelectorPattern::generate_mapping(&dispatcher_info.selectors, rng)?;
-        debug!("Remapping {} selectors", mapping.len());
-
-        let dispatcher_plan = ByteSelectorPattern::plan_dispatcher_patches(
-            &runtime_instructions,
-            &index_by_pc,
-            &dispatcher_info,
-            &mapping,
-        )?;
-        let dispatcher_modified = self.apply_instruction_patches(ir, dispatcher_plan)?;
+        let Some(mapping) = selected_mapping else {
+            debug!("No dispatcher pattern applied; skipping transform");
+            return Ok(false);
+        };
 
         let calls_modified = self.update_internal_calls(ir, &mapping)?;
 
         if extraction_modified || dispatcher_modified || calls_modified {
             ir.selector_mapping = Some(mapping);
-            debug!("Function dispatcher obfuscation applied successfully");
+            if let Some(pattern_name) = used_pattern {
+                debug!("Function dispatcher obfuscated via {pattern_name}");
+            }
             Ok(true)
         } else {
             debug!("Dispatcher mapping produced no changes");
