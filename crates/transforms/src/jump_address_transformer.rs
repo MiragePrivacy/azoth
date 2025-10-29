@@ -3,16 +3,11 @@ use azoth_core::cfg_ir::{Block, CfgIrBundle};
 use azoth_core::decoder::Instruction;
 use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
-use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, Rng};
 use tracing::debug;
 
-/// Jump Address Transformer obfuscates JUMP/JUMPI targets by splitting addresses
-/// into arithmetic operations that compute the original target at runtime.
-///
-/// Instead of: PUSH1 0x42 JUMPI
-/// Produces:   PUSH1 0x20 PUSH1 0x22 ADD JUMPI
-/// Where 0x20 + 0x22 = 0x42
+/// Jump Address Transformer obfuscates direct jump patterns by splitting the
+/// destination immediate into an `ADD` across two `PUSH` instructions.
 #[derive(Default)]
 pub struct JumpAddressTransformer;
 
@@ -21,44 +16,172 @@ impl JumpAddressTransformer {
         Self
     }
 
-    /// Finds PUSH + JUMP/JUMPI patterns and transforms them
-    pub fn find_jump_patterns(&self, instructions: &[Instruction]) -> Vec<usize> {
-        let mut patterns = Vec::new();
+    fn capacity_for_width(width: usize) -> usize {
+        match width {
+            0 => 0,
+            w if w >= 8 => usize::MAX,
+            w => (1usize << (w * 8)) - 1,
+        }
+    }
 
-        for i in 0..instructions.len().saturating_sub(1) {
-            if let (Some(push_instr), Some(jump_instr)) =
-                (instructions.get(i), instructions.get(i + 1))
-            {
-                // Look for PUSH followed by JUMP or JUMPI
-                if matches!(push_instr.op, Opcode::PUSH(_) | Opcode::PUSH0)
-                    && matches!(jump_instr.op, Opcode::JUMP | Opcode::JUMPI)
-                {
-                    patterns.push(i);
-                }
+    fn format_immediate(value: usize, width: usize) -> Result<String> {
+        if width == 0 {
+            if value != 0 {
+                return Err(Error::InvalidImmediate(format!(
+                    "value 0x{value:x} does not fit PUSH0"
+                )));
             }
+            return Ok("00".into());
         }
 
-        patterns
+        let cap = Self::capacity_for_width(width);
+        if value > cap {
+            return Err(Error::InvalidImmediate(format!(
+                "value 0x{value:x} exceeds PUSH{width} capacity"
+            )));
+        }
+
+        Ok(format!("{value:0width$x}", width = width * 2))
     }
 
-    /// Splits a jump target into two values that add up to the original
-    pub fn split_jump_target(&self, target: u64, rng: &mut StdRng) -> (u64, u64) {
-        // Generate a random value less than the target
-        let split_point = if target > 1 {
-            rng.random_range(1..target)
+    fn assign_block_pcs(start_pc: usize, instructions: &mut [Instruction]) {
+        let mut pc = start_pc;
+        for instr in instructions {
+            instr.pc = pc;
+            pc += instr.byte_size();
+        }
+    }
+
+    fn choose_widths(&self, original_width: usize, rng: &mut StdRng) -> (usize, usize) {
+        let base_width = original_width.max(1);
+        let lhs_max = base_width.min(4);
+        let lhs_width = if lhs_max == 1 {
+            1
         } else {
-            0
+            rng.random_range(1..=lhs_max)
         };
 
-        let part1 = split_point;
-        let part2 = target - split_point;
+        let rhs_width = if original_width == 0 {
+            1
+        } else if base_width >= 4 {
+            8
+        } else {
+            (base_width + 4).min(8)
+        };
 
-        (part1, part2)
+        (lhs_width, rhs_width.max(lhs_width))
     }
 
-    /// Formats a value as hex string with appropriate padding
-    fn format_hex_value(&self, value: u64, bytes: usize) -> String {
-        format!("{:0width$x}", value, width = bytes * 2)
+    fn transform_block(
+        &self,
+        ir: &mut CfgIrBundle,
+        node_idx: NodeIndex,
+        rng: &mut StdRng,
+    ) -> Result<bool> {
+        let original_body = match ir.cfg.node_weight(node_idx) {
+            Some(Block::Body(body)) => body.clone(),
+            _ => return Ok(false),
+        };
+
+        let mut new_body = original_body.clone();
+        let mut new_instructions = Vec::with_capacity(original_body.instructions.len());
+        let mut changed = false;
+        let mut idx = 0usize;
+
+        while idx < original_body.instructions.len() {
+            let instr = &original_body.instructions[idx];
+            if let Some(jump_instr) = original_body.instructions.get(idx + 1) {
+                if matches!(instr.op, Opcode::PUSH(_) | Opcode::PUSH0)
+                    && matches!(jump_instr.op, Opcode::JUMP | Opcode::JUMPI)
+                    && instr.imm.is_some()
+                {
+                let target = usize::from_str_radix(instr.imm.as_deref().unwrap(), 16).map_err(
+                    |_| Error::InvalidImmediate("failed to parse jump immediate".into()),
+                )?;
+
+                let original_width = match instr.op {
+                    Opcode::PUSH(width) => width as usize,
+                    Opcode::PUSH0 => 0,
+                    _ => unreachable!(),
+                };
+
+                let (mut lhs_width, mut rhs_width) = self.choose_widths(original_width, rng);
+                let mut lhs_capacity = Self::capacity_for_width(lhs_width);
+                let mut rhs_capacity = Self::capacity_for_width(rhs_width);
+
+                if target > lhs_capacity.saturating_add(rhs_capacity) {
+                    rhs_width = 8;
+                    rhs_capacity = Self::capacity_for_width(rhs_width);
+                }
+
+                if target > lhs_capacity.saturating_add(rhs_capacity) {
+                    lhs_width = lhs_width.max(8);
+                    lhs_capacity = Self::capacity_for_width(lhs_width);
+                }
+
+                if target > lhs_capacity.saturating_add(rhs_capacity) {
+                    debug!(
+                        "Skipping jump split for block {} at pc 0x{:x}: target 0x{:x} too large",
+                        node_idx.index(),
+                        instr.pc,
+                        target
+                    );
+                    new_instructions.push(instr.clone());
+                    idx += 1;
+                    continue;
+                }
+
+                let min_lhs = target.saturating_sub(rhs_capacity);
+                let max_lhs = lhs_capacity.min(target);
+                let lhs_value = if min_lhs >= max_lhs {
+                    max_lhs
+                } else {
+                    rng.random_range(min_lhs..=max_lhs)
+                };
+                let rhs_value = target - lhs_value;
+
+                let push_a = Instruction {
+                    pc: instr.pc,
+                    op: Opcode::PUSH(lhs_width as u8),
+                    imm: Some(Self::format_immediate(lhs_value, lhs_width)?),
+                };
+                let push_b = Instruction {
+                    pc: instr.pc,
+                    op: Opcode::PUSH(rhs_width as u8),
+                    imm: Some(Self::format_immediate(rhs_value, rhs_width)?),
+                };
+                let add = Instruction {
+                    pc: instr.pc,
+                    op: Opcode::ADD,
+                    imm: None,
+                };
+
+                new_instructions.push(push_a);
+                new_instructions.push(push_b);
+                new_instructions.push(add);
+                new_instructions.push(jump_instr.clone());
+
+                    changed = true;
+                    idx += 2;
+                    continue;
+                }
+            }
+
+            new_instructions.push(instr.clone());
+            idx += 1;
+        }
+
+        if !changed {
+            return Ok(false);
+        }
+
+        Self::assign_block_pcs(original_body.start_pc, &mut new_instructions);
+        new_body.instructions = new_instructions;
+        new_body.max_stack = original_body.max_stack.saturating_add(1);
+
+        ir.overwrite_block(node_idx, new_body)
+            .map_err(|e| Error::CoreError(e.to_string()))?;
+        Ok(true)
     }
 }
 
@@ -70,160 +193,19 @@ impl Transform for JumpAddressTransformer {
     fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
         debug!("=== JumpAddressTransformer Transform Start ===");
 
-        let mut changed = false;
-        let mut transformations = Vec::new();
+        let nodes: Vec<_> = ir.cfg.node_indices().collect();
+        let mut modified = false;
 
-        // Process each block to find and transform jump patterns
-        for node_idx in ir.cfg.node_indices().collect::<Vec<_>>() {
-            if let Block::Body(body) = &ir.cfg[node_idx] {
-                let patterns = self.find_jump_patterns(&body.instructions);
-
-                if !patterns.is_empty() {
-                    debug!(
-                        "Found {} jump patterns in block {} (node_idx={})",
-                        patterns.len(),
-                        node_idx.index(),
-                        node_idx.index()
-                    );
-                    transformations.push((node_idx, patterns));
-                }
-            }
+        for node in nodes {
+            modified |= self.transform_block(ir, node, rng)?;
         }
 
-        debug!("Total blocks with jump patterns: {}", transformations.len());
-
-        // Use config to limit the number of transformations
-        if !transformations.is_empty() {
-            // Flatten all patterns with their block indices
-            let mut all_patterns: Vec<(NodeIndex, usize)> = Vec::new(); // (node_idx, pattern_idx)
-            for (node_idx, patterns) in &transformations {
-                for &pattern_idx in patterns {
-                    all_patterns.push((*node_idx, pattern_idx));
-                }
-            }
-
-            // Shuffle to introduce some variability but keep all patterns
-            all_patterns.shuffle(rng);
-            debug!("Selected {} patterns to transform", all_patterns.len());
-
-            // Rebuild transformations list with limited patterns
-            let mut limited_transformations: Vec<(NodeIndex, Vec<usize>)> = Vec::new();
-            for (node_idx, pattern_idx) in all_patterns {
-                // Find or create entry for this node
-                if let Some((_, patterns)) = limited_transformations
-                    .iter_mut()
-                    .find(|(index, _)| *index == node_idx)
-                {
-                    patterns.push(pattern_idx);
-                } else {
-                    limited_transformations.push((node_idx, vec![pattern_idx]));
-                }
-            }
-
-            transformations = limited_transformations;
-        }
-
-        // Apply transformations (iterate in reverse to maintain indices)
-        for (block_num, (node_idx, patterns)) in transformations.iter().enumerate() {
-            debug!(
-                "Transforming block {}/{} (node_idx={})",
-                block_num + 1,
-                transformations.len(),
-                node_idx.index()
-            );
-
-            if let Block::Body(body) = &mut ir.cfg[*node_idx] {
-                let instructions = &mut body.instructions;
-                let max_stack = &mut body.max_stack;
-                let start_pc = body.start_pc;
-                debug!(
-                    "  Block start_pc: {:#x}, {} instructions",
-                    start_pc,
-                    instructions.len()
-                );
-
-                // Process patterns in reverse order to maintain indices
-                for (pat_num, &pattern_idx) in patterns.iter().rev().enumerate() {
-                    debug!(
-                        "  Processing pattern {}/{} at instruction index {}",
-                        pat_num + 1,
-                        patterns.len(),
-                        pattern_idx
-                    );
-                    if let Some(push_instr) = instructions.get(pattern_idx) {
-                        if let Some(target_hex) = &push_instr.imm {
-                            // Parse the jump target
-                            if let Ok(target) = u64::from_str_radix(target_hex, 16) {
-                                let (part1, part2) = self.split_jump_target(target, rng);
-
-                                // Calculate byte sizes for formatting
-                                let part1_bytes = if part1 == 0 {
-                                    1
-                                } else {
-                                    (64 - part1.leading_zeros()).div_ceil(8) as usize
-                                };
-                                let part2_bytes = if part2 == 0 {
-                                    1
-                                } else {
-                                    (64 - part2.leading_zeros()).div_ceil(8) as usize
-                                };
-
-                                // Create new instruction sequence
-                                let new_instructions = vec![
-                                    Instruction {
-                                        pc: push_instr.pc,
-                                        op: Opcode::PUSH(part1_bytes as u8),
-                                        imm: Some(self.format_hex_value(part1, part1_bytes)),
-                                    },
-                                    Instruction {
-                                        pc: push_instr.pc + part1_bytes + 1,
-                                        op: Opcode::PUSH(part2_bytes as u8),
-                                        imm: Some(self.format_hex_value(part2, part2_bytes)),
-                                    },
-                                    Instruction {
-                                        pc: push_instr.pc + part1_bytes + part2_bytes + 2,
-                                        op: Opcode::ADD,
-                                        imm: None,
-                                    },
-                                ];
-
-                                // Replace the original PUSH instruction with the sequence
-                                instructions.remove(pattern_idx);
-                                for (offset, new_instr) in new_instructions.into_iter().enumerate()
-                                {
-                                    instructions.insert(pattern_idx + offset, new_instr);
-                                }
-
-                                // Update max_stack if needed (we temporarily use one extra stack slot)
-                                *max_stack = (*max_stack).max(2);
-                                changed = true;
-
-                                debug!(
-                                    "Transformed jump target 0x{:x} into 0x{:x} + 0x{:x}",
-                                    target, part1, part2
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if changed {
-            let total_transformed = transformations
-                .iter()
-                .map(|(_, patterns)| patterns.len())
-                .sum::<usize>();
-            debug!(
-                "Applied jump address transformation to {} patterns",
-                total_transformed
-            );
-            debug!("Reindexing PCs...");
+        if modified {
+            debug!("JumpAddressTransformer modified CFG; reindexing PCs");
             ir.reindex_pcs()
                 .map_err(|e| Error::CoreError(e.to_string()))?;
-            debug!("=== JumpAddressTransformer Transform Complete ===");
         }
 
-        Ok(changed)
+        Ok(modified)
     }
 }
