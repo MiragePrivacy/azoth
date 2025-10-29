@@ -1595,8 +1595,19 @@ fn apply_split_add_immediate(
         )));
     }
 
-    let part_a = total.min(max_a);
-    let part_b = total.saturating_sub(part_a);
+    // Split the value between the two PUSH instructions
+    // Try to split roughly in half while respecting capacity constraints
+    let half = total / 2;
+    let part_a = half.min(max_a);
+    let part_b = total.saturating_sub(part_a).min(max_b);
+
+    // Verify the split is valid
+    if part_a + part_b != total {
+        return Err(Error::InvalidImmediate(format!(
+            "value 0x{:x} cannot be split between PUSH capacities 0x{:x} and 0x{:x}",
+            total, max_a, max_b
+        )));
+    }
 
     apply_immediate(&mut instructions[push_a_idx], part_a)?;
     apply_immediate(&mut instructions[push_b_idx], part_b)?;
