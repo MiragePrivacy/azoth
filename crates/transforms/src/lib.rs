@@ -26,6 +26,9 @@ pub enum Error {
     /// Invalid jump target.
     #[error("invalid jump target: {0}")]
     InvalidJumpTarget(usize),
+    /// Invalid immediate value.
+    #[error("invalid immediate: {0}")]
+    InvalidImmediate(String),
     /// Metrics computation failed.
     #[error("metrics computation failed: {0}")]
     Metrics(#[from] MetricsError),
