@@ -1595,11 +1595,38 @@ fn apply_split_add_immediate(
         )));
     }
 
-    // Split the value between the two PUSH instructions
-    // Try to split roughly in half while respecting capacity constraints
-    let half = total / 2;
-    let part_a = half.min(max_a);
-    let part_b = total.saturating_sub(part_a).min(max_b);
+    // Try to preserve existing split if it's still valid
+    let current_a = parse_immediate(&instructions[push_a_idx]).unwrap_or(0);
+    let current_b = parse_immediate(&instructions[push_b_idx]).unwrap_or(0);
+
+    let (part_a, part_b) = if current_a + current_b == total
+        && current_a <= max_a
+        && current_b <= max_b
+    {
+        // Existing split is valid, preserve it
+        tracing::debug!(
+            "apply_split_add_immediate: preserving split for total=0x{:x}: part_a=0x{:x}, part_b=0x{:x}",
+            total,
+            current_a,
+            current_b
+        );
+        (current_a, current_b)
+    } else {
+        // Need to recalculate - split in half
+        let half = total / 2;
+        let new_a = half.min(max_a);
+        let new_b = total.saturating_sub(new_a).min(max_b);
+        tracing::debug!(
+            "apply_split_add_immediate: recalculating split for total=0x{:x}: current_a=0x{:x}+current_b=0x{:x}={:x}, new part_a=0x{:x}, part_b=0x{:x}",
+            total,
+            current_a,
+            current_b,
+            current_a + current_b,
+            new_a,
+            new_b
+        );
+        (new_a, new_b)
+    };
 
     // Verify the split is valid
     if part_a + part_b != total {
