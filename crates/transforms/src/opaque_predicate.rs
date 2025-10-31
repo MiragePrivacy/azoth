@@ -107,54 +107,48 @@ impl Transform for OpaquePredicate {
                 max_stack: 0,
                 control: BlockControl::Unknown,
             }));
+            ir.pc_to_block.insert(true_start_pc, true_label);
 
             let false_label = ir.cfg.add_node(Block::Body(BlockBody {
                 start_pc: false_start_pc,
                 instructions: vec![
                     Instruction {
-                        pc: false_start_pc,
+                        pc: 0, // Will be reassigned by reindex_pcs
                         op: Opcode::JUMPDEST,
                         imm: None,
                     },
                     Instruction {
-                        pc: false_start_pc + 1,
-                        op: Opcode::PUSH(1),
-                        imm: Some("00".to_string()),
+                        pc: 0,
+                        op: Opcode::PUSH(32), // Use PUSH32 for maximum capacity
+                        imm: Some("00".repeat(32)), // Placeholder
                     },
                     Instruction {
-                        pc: false_start_pc + 2,
+                        pc: 0,
                         op: Opcode::JUMP,
-                        imm: Some(
-                            original_fallthrough
-                                .map(|n| {
-                                    if let Block::Body(body) = &ir.cfg[n] {
-                                        format!("{:x}", body.start_pc)
-                                    } else {
-                                        "0".to_string()
-                                    }
-                                })
-                                .unwrap_or("0".to_string()),
-                        ),
+                        imm: None, // No immediate - will be set by symbolic target
                     },
                 ],
                 max_stack: 1,
-                control: BlockControl::Unknown,
+                control: BlockControl::Unknown, // Will be set below
             }));
+            ir.pc_to_block.insert(false_start_pc, false_label);
 
-            if let Block::Body(body) = &mut ir.cfg[*block_id] {
-                let instructions = &mut body.instructions;
-                let start_pc = body.start_pc;
-                debug!(
-                    "  Block start_pc: {:#x}, {} instructions",
-                    start_pc,
-                    instructions.len()
-                );
+            // Prepare the new body with opaque predicate instructions
+            let mut new_body = if let Block::Body(body) = &ir.cfg[*block_id] {
+                let mut body_copy = body.clone();
                 let seed = rng.random::<u64>();
                 let constant = self.generate_constant(seed);
                 let constant_hex = hex::encode(constant);
-                instructions.extend(vec![
+
+                debug!(
+                    "  Block start_pc: {:#x}, {} instructions",
+                    body_copy.start_pc,
+                    body_copy.instructions.len()
+                );
+
+                body_copy.instructions.extend(vec![
                     Instruction {
-                        pc: 0,
+                        pc: 0, // Will be reassigned by reindex_pcs
                         op: Opcode::PUSH(32),
                         imm: Some(constant_hex.clone()),
                     },
@@ -170,26 +164,20 @@ impl Transform for OpaquePredicate {
                     },
                     Instruction {
                         pc: 0,
-                        op: Opcode::PUSH(2),
-                        imm: Some(format!("{true_start_pc:x}")),
+                        op: Opcode::PUSH(32), // Use PUSH32 for maximum capacity
+                        imm: Some("00".repeat(32)), // Placeholder
                     },
                     Instruction {
                         pc: 0,
                         op: Opcode::JUMPI,
                         imm: None,
                     },
-                    Instruction {
-                        pc: 0,
-                        op: Opcode::JUMPDEST,
-                        imm: None,
-                    },
-                    Instruction {
-                        pc: 0,
-                        op: Opcode::JUMP,
-                        imm: Some(format!("{false_start_pc:x}")),
-                    },
                 ]);
-            }
+                body_copy.max_stack = body_copy.max_stack.max(4);
+                body_copy
+            } else {
+                continue;
+            };
 
             if let Some(target) = original_fallthrough {
                 let edge = ir.cfg.find_edge(*block_id, target).unwrap();
@@ -205,7 +193,46 @@ impl Transform for OpaquePredicate {
                 ir.cfg.add_edge(false_label, target, EdgeType::Jump);
                 ir.cfg.add_edge(true_label, target, EdgeType::Fallthrough);
                 debug!("  Connected branches back to original fallthrough");
+
+                // Determine encoding based on runtime bounds
+                let source_in_runtime = match (ir.runtime_bounds, ir.cfg.node_weight(*block_id)) {
+                    (Some((start, end)), Some(Block::Body(body))) => {
+                        body.start_pc >= start && body.start_pc < end
+                    }
+                    _ => false,
+                };
+                let encoding = if source_in_runtime {
+                    azoth_core::cfg_ir::JumpEncoding::RuntimeRelative
+                } else {
+                    azoth_core::cfg_ir::JumpEncoding::Absolute
+                };
+
+                // Set the BlockControl for the false label to jump symbolically
+                if let Some(Block::Body(body)) = ir.cfg.node_weight_mut(false_label) {
+                    body.control = BlockControl::Jump {
+                        target: azoth_core::cfg_ir::JumpTarget::Block {
+                            node: target,
+                            encoding,
+                        },
+                    };
+                }
+
+                // Set the BlockControl for the original block - it ends with JUMPI
+                new_body.control = BlockControl::Branch {
+                    true_target: azoth_core::cfg_ir::JumpTarget::Block {
+                        node: true_label,
+                        encoding,
+                    },
+                    false_target: azoth_core::cfg_ir::JumpTarget::Block {
+                        node: false_label,
+                        encoding,
+                    },
+                };
             }
+
+            // Update the original block with the new body
+            ir.overwrite_block(*block_id, new_body)
+                .map_err(|e| crate::Error::CoreError(e.to_string()))?;
 
             changed = true;
             debug!("  ✓ Opaque predicate inserted successfully");
