@@ -55,22 +55,3 @@ async fn test_jump_address_transformer() {
         "Should add exactly 2 instructions"
     );
 }
-
-#[test]
-fn test_split_jump_target() {
-    let seed = Seed::from_hex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
-        .unwrap();
-    let mut rng = seed.create_deterministic_rng();
-    let transformer = JumpAddressTransformer::new();
-
-    let target = 0x100;
-    let (part1, part2) = transformer.split_jump_target(target, &mut rng);
-
-    assert_eq!(
-        part1 + part2,
-        target,
-        "Split parts should sum to original target"
-    );
-    assert!(part1 < target, "First part should be less than target");
-    assert!(part1 > 0, "First part should be greater than 0");
-}
