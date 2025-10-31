@@ -66,7 +66,7 @@ impl BlockBody {
 
     /// Returns true when this block resides inside the runtime section described by
     /// `runtime_start`.
-    fn is_runtime(&self, runtime_start: Option<(usize, usize)>) -> bool {
+    pub fn is_runtime(&self, runtime_start: Option<(usize, usize)>) -> bool {
         if let Some((start, end)) = runtime_start {
             return self.start_pc >= start && self.start_pc < end;
         }
