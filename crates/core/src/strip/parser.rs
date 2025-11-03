@@ -4,7 +4,6 @@ use revm::primitives::U256;
 use std::collections::BTreeSet;
 use std::convert::TryInto;
 
-/// Minimal, byte-accurate representation of an init-code instruction.
 #[derive(Clone, Debug)]
 struct ParsedInstruction {
     pc: usize,
