@@ -46,79 +46,36 @@ pub struct CleanReport {
     pub program_counter_mapping: Vec<(usize, usize)>,
 }
 
-/// Strips non-runtime sections from bytecode, returning clean runtime and report.
-///
-/// This function identifies and removes constructor code, auxdata, padding, and
-/// optionally constructor arguments, leaving only the runtime bytecode that gets
-/// executed after deployment.
-///
-/// # Arguments
-/// * `bytes` - The complete bytecode including constructor and runtime
-/// * `sections` - Detected sections from `detection::locate_sections`
-///
-/// # Returns
-/// A tuple of (clean_runtime_bytes, cleanup_report)
+/// Strips non-runtime sections from bytecode, returning the clean runtime alongside a report.
 pub fn strip_bytecode(bytes: &[u8], sections: &[Section]) -> Result<(Vec<u8>, CleanReport), Error> {
-    let mut clean_runtime = Vec::new();
-    let mut report = CleanReport {
-        removed: Vec::new(),
-        runtime_layout: Vec::new(),
-        swarm_hash: None,
-        clean_len: 0,
-        clean_keccak: B256::ZERO,
-        program_counter_mapping: Vec::new(),
-        bytes_saved: 0,
-    };
-
     tracing::debug!("Stripping bytecode with {} sections", sections.len());
 
-    // Process each section and decide whether to strip or keep
-    for s in sections {
-        tracing::debug!(
-            "Processing section: {:?} at offset {} (len: {})",
-            s.kind,
-            s.offset,
-            s.len
-        );
+    let (runtime_layout, runtime_bytes) = collect_runtime(bytes, sections)?;
+    validate_runtime_layout(&runtime_layout, bytes.len())?;
 
-        match s.kind {
-            SectionKind::Runtime => {
-                tracing::debug!("Keeping Runtime section in clean bytecode");
-                // Runtime code goes into both the clean bytecode AND layout for reassembly
-                report.runtime_layout.push(RuntimeSpan {
-                    offset: s.offset,
-                    len: s.len,
-                });
-                clean_runtime.extend_from_slice(&bytes[s.offset..s.end()]);
-            }
+    let (removed, bytes_saved) = record_removed_sections(bytes, sections);
 
-            // All non-runtime sections get removed and preserved for reassembly
-            _ => {
-                tracing::debug!("Stripping section: {:?}", s.kind);
-                report.removed.push(Removed {
-                    kind: s.kind,
-                    offset: s.offset,
-                    data: Bytes::from(bytes[s.offset..s.end()].to_vec()),
-                });
-                // Count ALL non-runtime bytes as "bytes saved"
-                report.bytes_saved += s.len;
-            }
-        }
-    }
-
-    // Validation
-    if clean_runtime.is_empty() {
+    if runtime_bytes.is_empty() {
         return Err(Error::NoRuntimeFound);
     }
 
-    // Set final metadata
-    report.clean_len = clean_runtime.len();
+    let clean_len = runtime_bytes.len();
+    let clean_keccak = {
+        let mut hasher = Keccak256::new();
+        hasher.update(&runtime_bytes);
+        let hash_result = hasher.finalize();
+        B256::from_slice(&hash_result)
+    };
 
-    // Calculate keccak hash of clean runtime
-    let mut hasher = Keccak256::new();
-    hasher.update(&clean_runtime);
-    let hash_result = hasher.finalize();
-    report.clean_keccak = B256::from_slice(&hash_result);
+    let report = CleanReport {
+        runtime_layout,
+        removed,
+        swarm_hash: None,
+        bytes_saved,
+        clean_len,
+        clean_keccak,
+        program_counter_mapping: Vec::new(),
+    };
 
     tracing::debug!(
         "Stripping complete: {} bytes clean runtime, {} bytes saved",
@@ -126,7 +83,80 @@ pub fn strip_bytecode(bytes: &[u8], sections: &[Section]) -> Result<(Vec<u8>, Cl
         report.bytes_saved
     );
 
-    Ok((clean_runtime, report))
+    Ok((runtime_bytes, report))
+}
+
+fn collect_runtime(
+    bytes: &[u8],
+    sections: &[Section],
+) -> Result<(Vec<RuntimeSpan>, Vec<u8>), Error> {
+    let mut spans: Vec<RuntimeSpan> = sections
+        .iter()
+        .filter(|section| matches!(section.kind, SectionKind::Runtime))
+        .map(|section| RuntimeSpan {
+            offset: section.offset,
+            len: section.len,
+        })
+        .collect();
+
+    spans.sort_by_key(|span| span.offset);
+
+    let mut runtime = Vec::new();
+    for span in &spans {
+        let end = span
+            .offset
+            .checked_add(span.len)
+            .ok_or(Error::StripOutOfBounds(span.offset))?;
+        if end > bytes.len() {
+            return Err(Error::StripOutOfBounds(span.offset));
+        }
+        runtime.extend_from_slice(&bytes[span.offset..end]);
+    }
+
+    Ok((spans, runtime))
+}
+
+fn record_removed_sections(bytes: &[u8], sections: &[Section]) -> (Vec<Removed>, usize) {
+    let mut removed = Vec::new();
+    let mut bytes_saved = 0usize;
+
+    for section in sections {
+        if matches!(section.kind, SectionKind::Runtime) {
+            continue;
+        }
+
+        let data = &bytes[section.offset..section.end()];
+        removed.push(Removed {
+            offset: section.offset,
+            kind: section.kind,
+            data: Bytes::from(data.to_vec()),
+        });
+        bytes_saved += section.len;
+    }
+
+    (removed, bytes_saved)
+}
+
+fn validate_runtime_layout(spans: &[RuntimeSpan], total_len: usize) -> Result<(), Error> {
+    let mut last_end = 0usize;
+    for span in spans {
+        let end = span
+            .offset
+            .checked_add(span.len)
+            .ok_or(Error::StripOutOfBounds(span.offset))?;
+
+        if end > total_len {
+            return Err(Error::StripOutOfBounds(span.offset));
+        }
+
+        if span.len > 0 && span.offset < last_end {
+            return Err(Error::SectionOverlap(span.offset));
+        }
+
+        last_end = last_end.max(end);
+    }
+
+    Ok(())
 }
 
 impl CleanReport {
@@ -155,20 +185,10 @@ impl CleanReport {
         let init_bytes = self.removed[init_index].data.clone();
 
         // Get the runtime offset from runtime_layout
-        let new_runtime_offset = self
-            .runtime_layout
-            .iter()
-            .map(|span| span.offset)
-            .min()
-            .ok_or("No runtime layout found")?;
+        let new_runtime_offset = self.runtime_offset().ok_or("No runtime layout found")?;
 
         // Determine how much non-runtime data (typically metadata) follows the runtime.
-        let metadata_len: usize = self
-            .removed
-            .iter()
-            .filter(|r| matches!(r.kind, SectionKind::Auxdata))
-            .map(|r| r.data.len())
-            .sum();
+        let metadata_len = self.removed_post_runtime_len();
 
         let copy_target_len = new_runtime_len
             .checked_add(metadata_len)
@@ -220,12 +240,7 @@ impl CleanReport {
             );
 
             // Get the original runtime start offset to determine prefix/suffix split
-            let runtime_start_offset = self
-                .runtime_layout
-                .iter()
-                .map(|span| span.offset)
-                .min()
-                .unwrap_or(0);
+            let runtime_start_offset = self.runtime_offset().unwrap_or(0);
 
             tracing::debug!(
                 "Original runtime started at offset {}, preserving prefix structure",
@@ -336,6 +351,46 @@ impl CleanReport {
     }
 }
 
+impl CleanReport {
+    /// Returns the init code section if the constructor was present.
+    pub fn init_code(&self) -> Option<&Bytes> {
+        self.removed
+            .iter()
+            .find(|removed| matches!(removed.kind, SectionKind::Init))
+            .map(|removed| &removed.data)
+    }
+
+    /// Reconstructs the runtime bytes from the original bytecode.
+    pub fn runtime_bytes(&self, original: &[u8]) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(self.clean_len);
+        for span in &self.runtime_layout {
+            let end = span.offset.checked_add(span.len)?;
+            if end > original.len() {
+                return None;
+            }
+            out.extend_from_slice(&original[span.offset..end]);
+        }
+        Some(out)
+    }
+
+    /// Total length of removed sections that originally followed the runtime.
+    pub fn removed_post_runtime_len(&self) -> usize {
+        let Some(runtime_offset) = self.runtime_offset() else {
+            return 0;
+        };
+
+        self.removed
+            .iter()
+            .filter(|removed| removed.offset >= runtime_offset)
+            .map(|removed| removed.data.len())
+            .sum()
+    }
+
+    fn runtime_offset(&self) -> Option<usize> {
+        self.runtime_layout.iter().map(|span| span.offset).min()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::strip_bytecode;
@@ -420,6 +475,8 @@ mod tests {
         let expected_hash: [u8; 32] = Keccak256::digest(&clean).into();
         assert_eq!(report.clean_keccak, B256::from_slice(&expected_hash));
         assert!(report.program_counter_mapping.is_empty());
+        assert_eq!(report.runtime_bytes(&bytes).unwrap(), clean);
+        assert!(report.init_code().is_some());
     }
 
     #[test]
@@ -516,5 +573,6 @@ mod tests {
             "init code should push CODECOPY/RETURN length {} but did not",
             expected_copy_len
         );
+        assert_eq!(report.removed_post_runtime_len(), metadata_len);
     }
 }
