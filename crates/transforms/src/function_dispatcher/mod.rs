@@ -284,10 +284,10 @@ impl Transform for FunctionDispatcher {
                 )?,
             };
 
-            if let Some((mapping, extraction, dispatcher)) = result {
-                selected_mapping = Some(mapping);
-                extraction_modified = extraction;
-                dispatcher_modified = dispatcher;
+            if let Some(application) = result {
+                selected_mapping = Some(application.mapping);
+                extraction_modified = application.extraction_modified;
+                dispatcher_modified = application.dispatcher_modified;
                 used_pattern = Some(match pattern {
                     DispatcherPattern::Byte => "ByteSelector",
                 });
