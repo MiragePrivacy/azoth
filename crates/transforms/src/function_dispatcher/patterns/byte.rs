@@ -21,7 +21,7 @@ impl FunctionDispatcher {
         index_by_pc: &HashMap<usize, (NodeIndex, usize)>,
         info: &DispatcherInfo,
         rng: &mut StdRng,
-    ) -> Result<Option<(HashMap<u32, Vec<u8>>, bool, bool)>> {
+    ) -> Result<Option<BytePatternApplication>> {
         if info.selectors.len() > MAX_BYTE_TOKEN_SELECTORS {
             debug!(
                 "Byte dispatcher pattern skipped: {} selectors exceed limit {}",
@@ -42,7 +42,11 @@ impl FunctionDispatcher {
         let dispatcher_modified =
             self.apply_dispatcher_patches(ir, runtime, index_by_pc, info, &mapping)?;
 
-        Ok(Some((mapping, extraction_modified, dispatcher_modified)))
+        Ok(Some(BytePatternApplication {
+            mapping,
+            extraction_modified,
+            dispatcher_modified,
+        }))
     }
 
     pub(super) fn rewrite_selector_extraction(
@@ -156,4 +160,10 @@ fn derive_unique_selector_byte(
     Err(Error::Generic(
         "dispatcher: failed to derive unique selector token".into(),
     ))
+}
+
+pub struct BytePatternApplication {
+    pub mapping: HashMap<u32, Vec<u8>>,
+    pub extraction_modified: bool,
+    pub dispatcher_modified: bool,
 }
