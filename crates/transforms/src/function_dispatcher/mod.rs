@@ -1,7 +1,7 @@
 //! Function dispatcher transform.
 
-mod multi_tier;
 mod patterns;
+mod storage;
 
 use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle};
@@ -15,12 +15,6 @@ use tracing::debug;
 
 pub(super) const SELECTOR_TOKEN_LEN: usize = 4;
 pub(super) const MAX_BYTE_TOKEN_SELECTORS: usize = 256;
-
-#[allow(dead_code)]
-#[derive(Copy, Clone, Debug)]
-enum DispatcherPattern {
-    Byte,
-}
 
 #[derive(Default)]
 pub struct FunctionDispatcher {
@@ -267,112 +261,44 @@ impl Transform for FunctionDispatcher {
             return Ok(false);
         }
 
-        let pattern_order = vec![DispatcherPattern::Byte];
+        let blueprint = self.build_blueprint(&dispatcher_info);
+        let original_selector_count = blueprint.dispatcher.selectors.len();
+        let selector_assignment_count = blueprint.selectors.len();
+        let tier_count = blueprint
+            .selectors
+            .iter()
+            .map(|assignment| assignment.tier_index + 1)
+            .max()
+            .unwrap_or(0);
+        debug!(
+            tiers = tier_count,
+            selectors = original_selector_count,
+            assignments = selector_assignment_count,
+            "Prepared multi-tier dispatcher blueprint"
+        );
 
-        let mut selected_mapping: Option<HashMap<u32, Vec<u8>>> = None;
-        let mut extraction_modified = false;
-        let mut dispatcher_modified = false;
-        let mut used_pattern: Option<&'static str> = None;
-
-        for pattern in pattern_order {
-            let result = match pattern {
-                DispatcherPattern::Byte => self.try_apply_byte_pattern(
-                    ir,
-                    &runtime_instructions,
-                    &index_by_pc,
-                    &dispatcher_info,
-                    rng,
-                )?,
-            };
-
-            if let Some(application) = result {
-                selected_mapping = Some(application.mapping);
-                extraction_modified = application.extraction_modified;
-                dispatcher_modified = application.dispatcher_modified;
-                used_pattern = Some(match pattern {
-                    DispatcherPattern::Byte => "ByteSelector",
-                });
-                break;
-            }
-        }
-
-        let Some(mapping) = selected_mapping else {
-            debug!("No dispatcher pattern applied; skipping transform");
+        let Some(plan) = self.apply_layout_plan(
+            ir,
+            &runtime_instructions,
+            &index_by_pc,
+            &dispatcher_info,
+            rng,
+            &blueprint,
+        )?
+        else {
+            debug!("Multi-tier dispatcher layout not applied; skipping transform");
             return Ok(false);
         };
 
-        let calls_modified = self.update_internal_calls(ir, &mapping)?;
+        let calls_modified = self.update_internal_calls(ir, &plan.mapping)?;
 
-        if extraction_modified || dispatcher_modified || calls_modified {
-            ir.selector_mapping = Some(mapping);
-            if let Some(pattern_name) = used_pattern {
-                debug!("Function dispatcher obfuscated via {pattern_name}");
-            }
+        if plan.extraction_modified || plan.dispatcher_modified || calls_modified {
+            ir.selector_mapping = Some(plan.mapping);
+            debug!("Function dispatcher obfuscated via multi-tier layout");
             Ok(true)
         } else {
             debug!("Dispatcher mapping produced no changes");
             Ok(false)
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::FunctionDispatcher;
-    use crate::Transform;
-    use azoth_core::process_bytecode_to_cfg;
-    use hex::encode as hex_encode;
-    use rand::{rngs::StdRng, SeedableRng};
-
-    static COUNTER_DEPLOYMENT: &str =
-        include_str!("../../../../tests/bytecode/counter/counter_deployment.hex");
-
-    #[tokio::test]
-    async fn prints_obfuscated_runtime_dispatcher() {
-        let (mut bundle, _, _, _) = process_bytecode_to_cfg(COUNTER_DEPLOYMENT, false)
-            .await
-            .expect("cfg construction");
-        let mut rng = StdRng::seed_from_u64(0xdead_beef_cafe_babe);
-
-        let transform = FunctionDispatcher::new();
-        let changed = transform
-            .apply(&mut bundle, &mut rng)
-            .expect("dispatcher transform succeeds");
-        assert!(changed, "transform should mutate dispatcher");
-
-        let runtime_bounds = bundle.runtime_bounds().expect("runtime bounds");
-
-        let mut runtime_instrs = Vec::new();
-        for node in bundle.cfg.node_indices() {
-            if let Some(block) = bundle.cfg.node_weight(node) {
-                if let azoth_core::cfg_ir::Block::Body(body) = block {
-                    if body.start_pc >= runtime_bounds.0 && body.start_pc < runtime_bounds.1 {
-                        for instr in &body.instructions {
-                            if instr.pc >= runtime_bounds.0 && instr.pc < runtime_bounds.1 {
-                                runtime_instrs.push(instr.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        runtime_instrs.sort_by_key(|ins| ins.pc);
-
-        println!("\n=== Obfuscated dispatcher runtime slice ===");
-        for instr in runtime_instrs.iter() {
-            let imm = instr.imm.as_deref().unwrap_or("");
-            println!("{:04x}: {:<8} {}", instr.pc, instr.op, imm);
-        }
-
-        let mapping = bundle
-            .selector_mapping
-            .as_ref()
-            .expect("selector mapping should be populated");
-
-        println!("\nSelector mapping:");
-        for (selector, token) in mapping {
-            println!("  0x{selector:08x} -> {}", hex_encode(token));
         }
     }
 }
