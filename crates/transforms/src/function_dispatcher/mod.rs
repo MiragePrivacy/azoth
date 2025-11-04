@@ -1,5 +1,6 @@
 //! Function dispatcher transform.
 
+mod multi_tier;
 mod patterns;
 
 use crate::{Error, Result, Transform};
