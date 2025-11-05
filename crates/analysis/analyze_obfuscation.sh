@@ -455,8 +455,14 @@ def main():
     print(f"Standard deviation:        {stdev_length:.2f} bytes")
     if sequence_lengths:
         print(f"Range:                     {min_length}-{max_length} bytes")
+        print(f"25th percentile:           {p25:.2f} bytes")
+        print(f"75th percentile:           {p75:.2f} bytes")
+        print(f"95th percentile:           {p95:.2f} bytes")
     else:
         print("Range:                     N/A")
+        print("25th percentile:           N/A")
+        print("75th percentile:           N/A")
+        print("95th percentile:           N/A")
     print(f"Seeds generated:           {len(seeds_used)} (unique: {unique_seed_count})")
     print(f"Transforms used:           {TRANSFORM_LABEL}")
     print()
