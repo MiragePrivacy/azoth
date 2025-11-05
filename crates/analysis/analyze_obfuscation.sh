@@ -10,6 +10,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEFAULT_BYTECODE="$REPO_ROOT/examples/escrow-bytecode/artifacts/runtime_bytecode.hex"
 
 usage() {
+    local status="${1:-0}"
     echo "Usage: $0 <num_iterations> [bytecode_file]"
     echo ""
     echo "Arguments:"
@@ -19,13 +20,19 @@ usage() {
     echo "Example:"
     echo "  $0 50"
     echo "  $0 100 path/to/bytecode.hex"
-    exit 1
+    exit "$status"
 }
 
 # Check arguments
 if [ $# -lt 1 ]; then
-    usage
+    usage 1
 fi
+
+case "$1" in
+    -h|--help|help|usage)
+        usage 0
+        ;;
+esac
 
 NUM_ITERATIONS="$1"
 INPUT_PATH="${2:-$DEFAULT_BYTECODE}"
@@ -52,7 +59,7 @@ fi
 # Validate number of iterations
 if ! [[ "$NUM_ITERATIONS" =~ ^[0-9]+$ ]] || [ "$NUM_ITERATIONS" -lt 1 ]; then
     echo "Error: num_iterations must be a positive integer"
-    exit 1
+    usage 1
 fi
 
 # Validate bytecode file exists
@@ -76,7 +83,6 @@ trap "rm -rf $WORK_DIR" EXIT
 echo "Working directory: $WORK_DIR"
 echo ""
 
-# Restrict transforms to shuffle plus default dispatcher
 TRANSFORM_PASSES="shuffle"
 TRANSFORM_LABEL="function_dispatcher (default) + shuffle"
 
