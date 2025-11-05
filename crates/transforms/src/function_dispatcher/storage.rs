@@ -20,6 +20,7 @@ impl Default for StorageRoutingConfig {
 
 impl StorageRoutingConfig {
     /// Returns the tier associated with the provided storage snapshot.
+    #[allow(dead_code)]
     pub fn resolve_tier(&self, storage: &HashMap<u64, u128>) -> usize {
         for decision in &self.decisions {
             if let Some(value) = storage.get(&decision.slot) {
