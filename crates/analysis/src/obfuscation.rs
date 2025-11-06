@@ -372,11 +372,6 @@ pub async fn analyze_obfuscation(
 
             match obfuscate_bytecode(config.original_bytecode, obfuscation_config).await {
                 Ok(result) => {
-                    if result.unknown_opcodes_count > 0 {
-                        return Err(AnalysisError::UnknownOpcodes {
-                            count: result.unknown_opcodes_count,
-                        });
-                    }
                     let transforms_applied = result.metadata.transforms_applied.clone();
                     let obfuscated_bytes = hex_to_bytes(&result.obfuscated_bytecode)?;
                     let sequence = longest_common_substring(&original_bytes, &obfuscated_bytes);
