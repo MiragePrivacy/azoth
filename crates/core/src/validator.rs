@@ -28,13 +28,12 @@ pub async fn validate_jump_targets(bytecode: &[u8]) -> Result<()> {
         .filter_map(|instr| matches!(instr.op, Opcode::JUMPDEST).then_some(instr.pc))
         .collect();
 
-    eprintln!("\nValidator Found {} JUMPDESTs", jumpdests.len());
+    tracing::debug!("Validator found {} JUMPDESTs", jumpdests.len());
     let mut jumpdest_list: Vec<_> = jumpdests.iter().copied().collect();
     jumpdest_list.sort();
     for (i, pc) in jumpdest_list.iter().enumerate() {
-        eprintln!("  [{}] PC 0x{:x}", i + 1, pc);
+        tracing::debug!("  [{}] PC 0x{:x}", i + 1, pc);
     }
-    eprintln!();
 
     let mut invalid_jumps = Vec::new();
 
@@ -50,8 +49,8 @@ pub async fn validate_jump_targets(bytecode: &[u8]) -> Result<()> {
 
         let is_valid = target < bytecode.len() && jumpdests.contains(&target);
         if !is_valid {
-            eprintln!(
-                "  DEBUG: JUMP at PC 0x{:x} targets 0x{:x} - valid={}, in_bounds={}, has_jumpdest={}",
+            tracing::debug!(
+                "JUMP at PC 0x{:x} targets 0x{:x} - valid={}, in_bounds={}, has_jumpdest={}",
                 instr.pc,
                 target,
                 is_valid,
@@ -63,11 +62,10 @@ pub async fn validate_jump_targets(bytecode: &[u8]) -> Result<()> {
     }
 
     if !invalid_jumps.is_empty() {
-        eprintln!("Found {} Invalid Jump(s)", invalid_jumps.len());
+        tracing::error!("Found {} invalid jump target(s)", invalid_jumps.len());
         for (i, (pc, target)) in invalid_jumps.iter().enumerate() {
-            eprintln!("  [{}] PC 0x{:x} -> 0x{:x}", i + 1, pc, target);
+            tracing::error!("  [{}] PC 0x{:x} -> 0x{:x}", i + 1, pc, target);
         }
-        eprintln!();
 
         return Err(Error::InvalidJumpTarget(invalid_jumps.len()));
     }
