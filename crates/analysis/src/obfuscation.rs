@@ -432,10 +432,10 @@ pub async fn analyze_obfuscation(
 }
 
 fn write_report(path: &Path, contents: &str) -> Result<(), AnalysisError> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, contents)?;
     Ok(())
@@ -513,7 +513,7 @@ fn compute_summary_stats(lengths: &[usize], original_len: usize) -> SummaryStats
     let sum: usize = lengths.iter().sum();
     let mean = sum as f64 / len as f64;
     stats.average_length = mean;
-    stats.median_length = if len % 2 == 0 {
+    stats.median_length = if len.is_multiple_of(2) {
         (sorted[len / 2 - 1] as f64 + sorted[len / 2] as f64) / 2.0
     } else {
         sorted[len / 2] as f64

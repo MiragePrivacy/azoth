@@ -102,10 +102,9 @@ impl super::Command for AnalyzeArgs {
 fn map_analysis_error(err: AnalysisError) -> Box<dyn Error> {
     match err {
         AnalysisError::Decode(err) => Box::new(err),
-        AnalysisError::UnknownOpcodes { count } => Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("analysis aborted due to {count} unknown opcode(s)"),
-        )),
+        AnalysisError::UnknownOpcodes { count } => Box::new(std::io::Error::other(format!(
+            "analysis aborted due to {count} unknown opcode(s)"
+        ))),
         AnalysisError::InvalidPass(name) => Box::new(ObfuscateError::InvalidPass(name)),
         AnalysisError::ObfuscationFailure { source, .. } => source,
         AnalysisError::Io(err) => Box::new(err),
