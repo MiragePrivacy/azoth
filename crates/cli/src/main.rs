@@ -18,7 +18,14 @@ struct Cli {
 /// Runs the Azoth CLI with the provided arguments.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let cli = Cli::parse();
+
+    let default_level = match &cli.command {
+        Cmd::Analyze(_) => "error",
+        _ => "warn",
+    };
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -26,6 +33,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .without_time()
         .init();
 
-    let cli = Cli::parse();
     cli.command.execute().await
 }
