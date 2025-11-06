@@ -1,5 +1,5 @@
-use crate::Transform;
 use crate::Result;
+use crate::Transform;
 use azoth_core::cfg_ir::{Block, CfgIrBundle};
 use rand::{rngs::StdRng, seq::SliceRandom};
 use tracing::debug;
@@ -47,7 +47,10 @@ impl Transform for Shuffle {
         for (i, (_, node_idx)) in block_indices.iter().enumerate() {
             if let Some(Block::Body(body)) = ir.cfg.node_weight_mut(*node_idx) {
                 let temp_pc = i * 1000000;
-                debug!("  Block at position {} → temp PC 0x{:x} ({})", i, temp_pc, temp_pc);
+                debug!(
+                    "  Block at position {} → temp PC 0x{:x} ({})",
+                    i, temp_pc, temp_pc
+                );
                 body.start_pc = temp_pc;
             }
         }

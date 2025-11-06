@@ -75,5 +75,9 @@ async fn test_shuffle_storage_bytecode() {
     println!("Shuffle changed: {}", changed);
 
     // Verify block count didn't change
-    assert_eq!(before_pcs.len(), after_pcs.len(), "Block count should remain the same");
+    assert_eq!(
+        before_pcs.len(),
+        after_pcs.len(),
+        "Block count should remain the same"
+    );
 }
