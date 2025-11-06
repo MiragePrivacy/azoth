@@ -9,6 +9,7 @@ use super::{
     ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, MOCK_TOKEN_ADDR,
 };
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
+use azoth_transform::shuffle::Shuffle;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use revm::bytecode::Bytecode;
@@ -29,7 +30,8 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         .try_init();
 
     // obfuscate contract
-    let config = ObfuscationConfig::default();
+    let mut config = ObfuscationConfig::default();
+    config.transforms.push(Box::new(Shuffle));
 
     let obfuscation_result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
         .await
