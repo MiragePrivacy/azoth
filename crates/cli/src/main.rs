@@ -1,5 +1,6 @@
 use azoth_cli::commands::{Cmd, Command};
 use clap::Parser;
+use tracing_subscriber::EnvFilter;
 
 /// Azoth CLI
 ///
@@ -17,8 +18,10 @@ struct Cli {
 /// Runs the Azoth CLI with the provided arguments.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_env_filter(env_filter)
         .with_ansi(false)
         .without_time()
         .init();
