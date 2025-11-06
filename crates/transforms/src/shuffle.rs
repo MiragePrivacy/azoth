@@ -61,7 +61,9 @@ impl Transform for Shuffle {
 
         self.rewrite_jump_immediates(&mut new_instrs, &original_pcs, &program_counter_mapping)?;
 
-        ir.replace_body(new_instrs, &[])
+        // Preserve section information when replacing the body to maintain runtime bounds
+        let sections = ir.sections.clone();
+        ir.replace_body(new_instrs, &sections)
             .map_err(|e| Error::CoreError(e.to_string()))?;
         Ok(true)
     }
