@@ -320,8 +320,20 @@ fn detect_deployment_fallback(
         return Some((init_end, runtime_start));
     }
 
+    // Check if there's any CODECOPY instruction at all - if not, this is likely
+    // runtime-only bytecode and we should not try the CALLDATASIZE heuristic
+    let has_codecopy = instructions.iter().any(|i| i.op == Opcode::CODECOPY);
+
+    if !has_codecopy {
+        tracing::debug!(
+            "No CODECOPY found - skipping CALLDATASIZE heuristic (likely runtime-only bytecode)"
+        );
+        return None;
+    }
+
     // Heuristic detection based on common runtime start patterns
     // Look for CALLDATASIZE as a runtime code marker
+    // Only apply this if we found CODECOPY evidence above
     for (idx, instruction) in instructions.iter().enumerate() {
         if matches!(instruction.op, Opcode::CALLDATASIZE) {
             let calldatasize_pc = instruction.pc;
@@ -334,7 +346,7 @@ fn detect_deployment_fallback(
 
             if runtime_start > 100 && runtime_start < aux_offset {
                 tracing::debug!(
-                    "Heuristic runtime start detected at PC {} {}",
+                    "Heuristic runtime start detected at PC {} {} (CODECOPY present)",
                     runtime_start,
                     if prologue_start.is_some() {
                         "(including Solidity prologue)"
