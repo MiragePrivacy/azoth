@@ -1,21 +1,12 @@
 use std::collections::HashMap;
 
 /// Declarative routing based on storage slot values.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StorageRoutingConfig {
     /// Ordered list of slot-based routing decisions.
     pub decisions: Vec<RoutingDecision>,
     /// Tier used when no decision matches.
     pub default_tier: usize,
-}
-
-impl Default for StorageRoutingConfig {
-    fn default() -> Self {
-        Self {
-            decisions: Vec::new(),
-            default_tier: 0,
-        }
-    }
 }
 
 impl StorageRoutingConfig {
