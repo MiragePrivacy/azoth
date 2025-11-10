@@ -336,11 +336,13 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     // Increment nonce after successful transaction
     deployer_nonce += 1;
 
-    if let ExecutionResult::Success { output, .. } = funded_result.result {
-        if let Output::Call(data) = output {
-            let is_funded = caller.parse_bool(&data);
-            println!("  Contract funded state: {}", is_funded);
-        }
+    if let ExecutionResult::Success {
+        output: Output::Call(data),
+        ..
+    } = funded_result.result
+    {
+        let is_funded = caller.parse_bool(&data);
+        println!("  Contract funded state: {}", is_funded);
     }
 
     let bond_amount = U256::from(2500);

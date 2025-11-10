@@ -353,7 +353,7 @@ mod tests {
         seq.iter()
             .map(|(pc, op, imm)| Instruction {
                 pc: *pc,
-                op: op.clone(),
+                op: *op,
                 imm: imm.map(|s| s.into()),
             })
             .collect()

@@ -14,7 +14,7 @@ use revm::bytecode::Bytecode;
 use revm::context::result::{ExecutionResult, Output};
 use revm::context::TxEnv;
 use revm::database::InMemoryDB;
-use revm::primitives::{Address, Bytes, TxKind, U256};
+use revm::primitives::{Address, TxKind, U256};
 use revm::state::AccountInfo;
 use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
 
@@ -49,7 +49,7 @@ fn deploy_and_verify_contract_revm(bytecode_hex: &str, name: &str) -> Result<(Ad
         caller: deployer,
         gas_limit: 30_000_000,
         kind: TxKind::Create,
-        data: Bytes::from(bytecode_bytes),
+        data: bytecode_bytes,
         value: U256::ZERO,
         ..Default::default()
     };
