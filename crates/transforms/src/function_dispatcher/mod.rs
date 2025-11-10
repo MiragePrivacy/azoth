@@ -2,6 +2,7 @@
 
 mod patterns;
 mod storage;
+pub(crate) mod token;
 
 use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle};
@@ -12,9 +13,6 @@ use petgraph::graph::NodeIndex;
 use rand::rngs::StdRng;
 use std::collections::HashMap;
 use tracing::debug;
-
-pub(super) const SELECTOR_TOKEN_LEN: usize = 4;
-pub(super) const MAX_BYTE_TOKEN_SELECTORS: usize = 256;
 
 #[derive(Default)]
 pub struct FunctionDispatcher {
@@ -71,7 +69,7 @@ impl FunctionDispatcher {
         }
     }
 
-    fn apply_instruction_replacements(
+    pub(crate) fn apply_instruction_replacements(
         &self,
         ir: &mut CfgIrBundle,
         edits: Vec<(NodeIndex, usize, Opcode, Option<String>)>,
@@ -181,7 +179,7 @@ impl FunctionDispatcher {
         }
     }
 
-    fn apply_dispatcher_patches(
+    pub(crate) fn apply_dispatcher_patches(
         &self,
         ir: &mut CfgIrBundle,
         runtime: &[Instruction],
@@ -261,7 +259,7 @@ impl Transform for FunctionDispatcher {
             return Ok(false);
         }
 
-        let blueprint = self.build_blueprint(&dispatcher_info);
+        let blueprint = self.build_blueprint(&dispatcher_info, rng);
         let original_selector_count = blueprint.dispatcher.selectors.len();
         let selector_assignment_count = blueprint.selectors.len();
         let tier_count = blueprint
@@ -292,7 +290,7 @@ impl Transform for FunctionDispatcher {
 
         let calls_modified = self.update_internal_calls(ir, &plan.mapping)?;
 
-        if plan.extraction_modified || plan.dispatcher_modified || calls_modified {
+        if plan.dispatcher_modified || calls_modified {
             ir.selector_mapping = Some(plan.mapping);
             debug!("Function dispatcher obfuscated via multi-tier layout");
             Ok(true)
