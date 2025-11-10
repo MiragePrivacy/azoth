@@ -26,6 +26,7 @@ struct TierNodes {
     stub_pc: usize,
     #[allow(dead_code)]
     decoy_pc: usize,
+    invalid_pc: usize,
 }
 
 /// Result produced when a dispatch layout has been synthesised.
@@ -94,18 +95,16 @@ pub fn apply_layout_plan(
     let mut selector_entry_pcs = HashMap::new();
     for assignment in &blueprint.selectors {
         let target_pc = assignment.selector.target_address as usize;
-        let fallback_pc = target_pc;
-        let stub_pc = tier_nodes
-            .get(&assignment.tier_index)
-            .map(|nodes| nodes.stub_pc)
-            .unwrap_or(target_pc);
+        let tier_meta = tier_nodes.get(&assignment.tier_index);
+        let stub_pc = tier_meta.map(|nodes| nodes.stub_pc).unwrap_or(target_pc);
+        let invalid_pc = tier_meta.map(|nodes| nodes.invalid_pc).unwrap_or(target_pc);
 
         let pattern_config = blueprint.controller_patterns.get(&assignment.tier_index);
         let (controller_pc, updated_pc) = create_selector_controller(
             ir,
             next_pc,
             stub_pc,
-            fallback_pc,
+            invalid_pc,
             pattern_config,
             assignment.selector.selector,
         )?;
@@ -344,6 +343,7 @@ fn create_tier_nodes(
         TierNodes {
             stub_pc: stub_start,
             decoy_pc: decoy_start,
+            invalid_pc: invalid_start,
         },
         next_pc,
     ))
@@ -353,7 +353,7 @@ fn create_selector_controller(
     ir: &mut CfgIrBundle,
     mut next_pc: usize,
     stub_pc: usize,
-    fallback_pc: usize,
+    invalid_pc: usize,
     pattern_config: Option<&ControllerPatternConfig>,
     selector: u32,
 ) -> crate::Result<(usize, usize)> {
@@ -382,7 +382,7 @@ fn create_selector_controller(
             //
             // We need to calculate match_width, but it depends on byte_match_pc which we're calculating.
             // Use iterative approach: start with PUSH1, check if sufficient, adjust if needed.
-            let byte_fail_pc = fallback_pc;
+            let byte_fail_pc = invalid_pc;
             let fallback_width = minimal_push_width(byte_fail_pc);
             let mut match_width = 1u8;
             let byte_match_pc;
@@ -436,8 +436,8 @@ fn create_selector_controller(
             let (storage_instrs, updated_pc) = generate_storage_check_instructions(
                 next_pc,
                 config.storage_slot,
-                stub_pc,     // If storage is zero (default), go to stub (real path)
-                fallback_pc, // If storage is non-zero, go to fallback
+                stub_pc,    // If storage is zero (default), go to stub (real path)
+                invalid_pc, // If storage is non-zero, trap at invalid
             );
 
             for instr in storage_instrs {
@@ -447,13 +447,13 @@ fn create_selector_controller(
         }
     }
 
-    let fallback_width = minimal_push_width(fallback_pc);
+    let stub_width = minimal_push_width(stub_pc);
     instructions.push(Instruction {
         pc: next_pc,
-        op: Opcode::PUSH(fallback_width),
-        imm: Some(format_immediate(fallback_pc as u128, fallback_width)),
+        op: Opcode::PUSH(stub_width),
+        imm: Some(format_immediate(stub_pc as u128, stub_width)),
     });
-    next_pc += 1 + fallback_width as usize;
+    next_pc += 1 + stub_width as usize;
 
     instructions.push(Instruction {
         pc: next_pc,
