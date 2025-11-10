@@ -374,9 +374,31 @@ fn create_selector_controller(
             let selector_bytes = selector.to_be_bytes();
             let expected_byte = selector_bytes[config.byte_index as usize];
 
-            // Create intermediate nodes for byte extraction routing
-            let byte_match_pc = next_pc + 50; // Placeholder, will be after byte extraction block
-            let byte_fail_pc = fallback_pc; // If byte check fails, go to fallback
+            // Calculate where the JUMPDEST will be after the byte extraction block
+            // The block consists of:
+            // - PUSH1 0x00 + CALLDATALOAD + PUSH1 index + BYTE + PUSH1 expected + EQ (9 bytes fixed)
+            // - PUSH(match_width) + imm + JUMPI (variable: 1 + match_width + 1)
+            // - PUSH(fallback_width) + imm + JUMP (variable: 1 + fallback_width + 1)
+            //
+            // We need to calculate match_width, but it depends on byte_match_pc which we're calculating.
+            // Use iterative approach: start with PUSH1, check if sufficient, adjust if needed.
+            let byte_fail_pc = fallback_pc;
+            let fallback_width = minimal_push_width(byte_fail_pc);
+            let mut match_width = 1u8;
+            let byte_match_pc;
+
+            loop {
+                let byte_block_size =
+                    9 + (1 + match_width as usize + 1) + (1 + fallback_width as usize + 1);
+                let candidate_pc = next_pc + byte_block_size;
+                let required_width = minimal_push_width(candidate_pc);
+
+                if required_width <= match_width {
+                    byte_match_pc = candidate_pc;
+                    break;
+                }
+                match_width = required_width;
+            }
 
             let (byte_instrs, updated_pc) = generate_byte_extraction_instructions(
                 next_pc,
@@ -393,12 +415,20 @@ fn create_selector_controller(
             next_pc = updated_pc;
 
             // Add a JUMPDEST after byte extraction for the match path
+            // This should now be at the correct address that the instructions expect
             instructions.push(Instruction {
                 pc: next_pc,
                 op: Opcode::JUMPDEST,
                 imm: None,
             });
             next_pc += 1;
+
+            // Verify our calculation was correct
+            debug_assert_eq!(
+                next_pc - 1,
+                byte_match_pc,
+                "byte extraction JUMPDEST mismatch"
+            );
         }
 
         // Optionally add storage check pattern
