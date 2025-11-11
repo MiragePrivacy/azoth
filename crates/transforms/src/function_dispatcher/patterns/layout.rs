@@ -270,7 +270,12 @@ fn create_tier_nodes(
     ir: &mut CfgIrBundle,
     mut next_pc: usize,
     target_pc: usize,
-) -> crate::Result<(TierNodes, usize, Option<StubPatchInfo>, Option<DecoyPatchInfo>)> {
+) -> crate::Result<(
+    TierNodes,
+    usize,
+    Option<StubPatchInfo>,
+    Option<DecoyPatchInfo>,
+)> {
     let invalid_start = next_pc;
     let invalid_rel = runtime_relative(ir, invalid_start);
     let invalid_block = BlockBody {
@@ -613,7 +618,13 @@ fn create_selector_controller(
         start_pc = format_args!("0x{:04x}", start_pc),
         end_pc = format_args!("0x{:04x}", next_pc),
         instruction_count = instructions.len(),
-        opcodes = format_args!("{:?}", instructions.iter().map(|i| format!("{:?}", i.op)).collect::<Vec<_>>()),
+        opcodes = format_args!(
+            "{:?}",
+            instructions
+                .iter()
+                .map(|i| format!("{:?}", i.op))
+                .collect::<Vec<_>>()
+        ),
         "Controller created"
     );
 
