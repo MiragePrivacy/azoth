@@ -283,7 +283,7 @@ pub async fn obfuscate_bytecode(
     cfg_ir.patch_jump_immediates(&pc_mapping, old_runtime_bounds)?;
     tracing::debug!("  Patched jump immediates after PC reindexing");
 
-    // Re-apply dispatcher jump target patches with remapped controller PCs
+    // Re-apply dispatcher jump target patches with OLD controller PCs (before updating)
     // NOTE: These patches update the PUSH2 instructions (jump targets), not the PUSH4 token instructions
     if let (Some(controller_pcs), Some(dispatcher_patches)) = (
         cfg_ir.dispatcher_controller_pcs.clone(),
@@ -301,6 +301,20 @@ pub async fn obfuscate_bytecode(
             &pc_mapping,
         )?;
         tracing::debug!("  Dispatcher jump target patches re-applied successfully");
+
+        // Now update dispatcher_controller_pcs with remapped PCs
+        let mut updated_controller_pcs = HashMap::new();
+        for (selector, old_pc) in controller_pcs {
+            let new_pc = pc_mapping.get(&old_pc).copied().unwrap_or(old_pc);
+            updated_controller_pcs.insert(selector, new_pc);
+            tracing::debug!(
+                "  Updated controller PC for 0x{:08x}: 0x{:04x} -> 0x{:04x}",
+                selector,
+                old_pc,
+                new_pc
+            );
+        }
+        cfg_ir.dispatcher_controller_pcs = Some(updated_controller_pcs);
     }
 
     // Re-apply stub patches with remapped decoy PCs if FunctionDispatcher was used
@@ -394,6 +408,63 @@ pub async fn obfuscate_bytecode(
             }
         }
         tracing::debug!("  Stub patches re-applied successfully");
+    }
+
+    // Re-apply decoy patches with remapped target PCs if FunctionDispatcher was used
+    if let Some(decoy_patches) = cfg_ir.decoy_patches.clone() {
+        tracing::debug!(
+            "  Re-applying {} decoy patches with remapped target PCs",
+            decoy_patches.len()
+        );
+        let dispatcher = FunctionDispatcher::new();
+
+        // Build edits for decoy patches
+        let mut edits = Vec::new();
+        for (decoy_node, old_pc, push_width, old_target_pc) in decoy_patches {
+            // Map the target PC using the PC mapping
+            let new_target_pc = pc_mapping.get(&old_target_pc).copied().unwrap_or(old_target_pc);
+
+            // Map the decoy instruction's PC
+            let new_pc = pc_mapping.get(&old_pc).copied().unwrap_or(old_pc);
+
+            // Calculate the new relative address
+            let target_rel = if let Some((start, _)) = cfg_ir.runtime_bounds {
+                new_target_pc.saturating_sub(start)
+            } else {
+                new_target_pc
+            };
+
+            let formatted = format!("{:0width$x}", target_rel, width = push_width as usize * 2);
+
+            tracing::debug!(
+                "  Reapplying decoy patch: decoy_node={:?}, push_width={}, old_target_pc=0x{:04x}, new_target_pc=0x{:04x}, old_pc=0x{:04x}, new_pc=0x{:04x}, target_rel=0x{:04x}",
+                decoy_node,
+                push_width,
+                old_target_pc,
+                new_target_pc,
+                old_pc,
+                new_pc,
+                target_rel
+            );
+
+            edits.push((decoy_node, new_pc, Opcode::PUSH(push_width), Some(formatted)));
+        }
+
+        if !edits.is_empty() {
+            dispatcher.apply_instruction_replacements(&mut cfg_ir, edits)?;
+        }
+        tracing::debug!("  Decoy patches re-applied successfully");
+    }
+
+    // Re-apply controller patches with remapped jump targets if FunctionDispatcher was used
+    if let Some(controller_patches) = cfg_ir.controller_patches.clone() {
+        tracing::debug!(
+            "  Re-applying {} controller patches with remapped jump targets",
+            controller_patches.len()
+        );
+        let dispatcher = FunctionDispatcher::new();
+        dispatcher.reapply_controller_patches(&mut cfg_ir, &controller_patches, &pc_mapping)?;
+        tracing::debug!("  Controller patches re-applied successfully");
     }
 
     // Step 6: Extract and encode instructions
@@ -588,6 +659,25 @@ fn extract_instructions_from_cfg(cfg_ir: &cfg_ir::CfgIrBundle) -> Vec<decoder::I
     // Without this, blocks added at high PCs could end up out of order,
     // causing them to be embedded in PUSH instruction immediates.
     all_instructions.sort_by_key(|instr| instr.pc);
+
+    // Debug: Check what instructions are at controller PCs
+    if let Some(controller_pcs) = &cfg_ir.dispatcher_controller_pcs {
+        for (selector, &pc) in controller_pcs.iter() {
+            let controller_instrs: Vec<_> = all_instructions
+                .iter()
+                .filter(|i| i.pc >= pc && i.pc < pc + 50)
+                .take(5)
+                .map(|i| format!("0x{:04x}:{:?}", i.pc, i.op))
+                .collect();
+
+            tracing::debug!(
+                "  Extract: Controller 0x{:08x} at PC 0x{:04x}: {:?}",
+                selector,
+                pc,
+                controller_instrs
+            );
+        }
+    }
 
     all_instructions
 }

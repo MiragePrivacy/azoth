@@ -54,13 +54,18 @@ pub fn build_blueprint<R: Rng>(dispatcher: &DispatcherInfo, rng: &mut R) -> Disp
         // Generate random storage slot for this tier (avoid low slots used by common contracts)
         let random_slot = rng.random_range(0x1000..0xFFFF);
 
+        // Vary the byte index to reduce collision probability
+        // Use modulo to cycle through all 4 byte positions (0, 1, 2, 3)
+        // This distributes the constraints more evenly across the selector space
+        let byte_index = (tier_index % 4) as u8;
+
         // Configure controller patterns for this tier
         // Use byte extraction for even-numbered tiers, storage checks for odd, opaque predicates for tiers divisible by 3
         controller_patterns.insert(
             tier_index,
             ControllerPatternConfig {
                 use_byte_extraction: tier_index % 2 == 0,
-                byte_index: 3, // Extract the high byte of the selector
+                byte_index,
                 use_storage_checks: tier_index % 2 == 1,
                 storage_slot: random_slot,
                 use_opaque_predicates: tier_index % 3 == 0,

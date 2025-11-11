@@ -164,6 +164,62 @@ impl FunctionDispatcher {
         }
     }
 
+    /// Re-applies controller patches after PC reindexing with remapped jump targets.
+    ///
+    /// This method updates the controller's PUSH instructions (for stub/invalid jumps) to point
+    /// to the correct addresses after PC reindexing has shifted all PCs. It takes the original
+    /// target PCs, looks them up in the PC mapping, and updates the controller instructions
+    /// with the new relative addresses.
+    pub fn reapply_controller_patches(
+        &self,
+        ir: &mut CfgIrBundle,
+        controller_patches: &[(NodeIndex, usize, u8, usize)],
+        pc_mapping: &HashMap<usize, usize>,
+    ) -> Result<bool> {
+        let mut edits = Vec::new();
+
+        for &(node, old_push_pc, push_width, old_target_pc) in controller_patches {
+            // Look up the new target PC after reindexing
+            let new_target_pc = pc_mapping
+                .get(&old_target_pc)
+                .copied()
+                .unwrap_or(old_target_pc);
+
+            // Also need to map the PUSH instruction's PC
+            let new_push_pc = pc_mapping.get(&old_push_pc).copied().unwrap_or(old_push_pc);
+
+            // Calculate the new relative address
+            let target_rel = if let Some((start, _)) = ir.runtime_bounds {
+                new_target_pc.saturating_sub(start)
+            } else {
+                new_target_pc
+            };
+
+            let formatted = format!(
+                "{:0width$x}",
+                target_rel,
+                width = push_width as usize * 2
+            );
+
+            debug!(
+                old_target_pc = format_args!("0x{:04x}", old_target_pc),
+                new_target_pc = format_args!("0x{:04x}", new_target_pc),
+                old_push_pc = format_args!("0x{:04x}", old_push_pc),
+                new_push_pc = format_args!("0x{:04x}", new_push_pc),
+                target_rel = format_args!("0x{:04x}", target_rel),
+                "reapply_controller_patches: updating controller PUSH instruction"
+            );
+
+            edits.push((node, new_push_pc, Opcode::PUSH(push_width), Some(formatted)));
+        }
+
+        if !edits.is_empty() {
+            self.apply_instruction_replacements(ir, edits)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Syncs internal CALL sites with dispatcher tokens so remapped selectors still fire.
     fn update_internal_calls(
         &self,
@@ -361,6 +417,8 @@ impl Transform for FunctionDispatcher {
             ir.dispatcher_controller_pcs = Some(plan.controller_pcs);
             ir.dispatcher_patches = Some(plan.dispatcher_patches);
             ir.stub_patches = Some(plan.stub_patches);
+            ir.decoy_patches = Some(plan.decoy_patches);
+            ir.controller_patches = Some(plan.controller_patches);
             debug!("Function dispatcher obfuscated via multi-tier layout");
             Ok(true)
         } else {

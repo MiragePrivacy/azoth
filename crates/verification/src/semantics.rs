@@ -1210,6 +1210,8 @@ pub mod tests {
             dispatcher_controller_pcs: None,
             dispatcher_patches: None,
             stub_patches: None,
+            decoy_patches: None,
+            controller_patches: None,
         };
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
 
@@ -1259,6 +1261,8 @@ pub mod tests {
             dispatcher_controller_pcs: None,
             dispatcher_patches: None,
             stub_patches: None,
+            decoy_patches: None,
+            controller_patches: None,
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
@@ -1282,6 +1286,8 @@ pub mod tests {
             dispatcher_controller_pcs: None,
             dispatcher_patches: None,
             stub_patches: None,
+            decoy_patches: None,
+            controller_patches: None,
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);

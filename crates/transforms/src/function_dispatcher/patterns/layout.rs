@@ -31,6 +31,12 @@ struct TierNodes {
 /// Stub patch information: (stub_node, stub_push_pc, push_width, decoy_node)
 type StubPatchInfo = (NodeIndex, usize, u8, NodeIndex);
 
+/// Decoy patch information: (decoy_node, push_pc, push_width, target_pc)
+type DecoyPatchInfo = (NodeIndex, usize, u8, usize);
+
+/// Controller patch information: (controller_node, push_pc, push_width, target_pc)
+type ControllerPatchInfo = Vec<(NodeIndex, usize, u8, usize)>;
+
 /// Result produced when a dispatch layout has been synthesised.
 pub struct LayoutPlan {
     pub mapping: HashMap<u32, Vec<u8>>,
@@ -41,6 +47,10 @@ pub struct LayoutPlan {
     pub dispatcher_patches: Vec<(NodeIndex, usize, u8, u32)>,
     /// Stub patch locations: (stub_node, stub_push_pc, push_width, decoy_node)
     pub stub_patches: Vec<(NodeIndex, usize, u8, NodeIndex)>,
+    /// Decoy patch locations: (decoy_node, push_pc, push_width, target_pc)
+    pub decoy_patches: Vec<(NodeIndex, usize, u8, usize)>,
+    /// Controller patch locations: (controller_node, push_pc, push_width, target_pc)
+    pub controller_patches: Vec<(NodeIndex, usize, u8, usize)>,
 }
 
 pub fn apply_layout_plan(
@@ -71,6 +81,10 @@ pub fn apply_layout_plan(
     let mut tier_nodes: HashMap<usize, TierNodes> = HashMap::new();
     // Track stub → decoy jumps for post-reindex patching: (stub_node, stub_push_pc, push_width, decoy_node)
     let mut stub_patches = Vec::new();
+    // Track decoy → target jumps for post-reindex patching: (decoy_node, push_pc, push_width, target_pc)
+    let mut decoy_patches = Vec::new();
+    // Track controller jump targets for post-reindex patching: (controller_node, push_pc, push_width, target_pc)
+    let mut controller_patches = Vec::new();
 
     for (tier_index, assignments) in tiers.iter() {
         if *tier_index == 0 {
@@ -83,11 +97,15 @@ pub fn apply_layout_plan(
 
         let target_rel = primary.selector.target_address as usize;
         let target_pc = runtime_absolute(ir, target_rel);
-        let (nodes, updated_pc, stub_patch_info) = create_tier_nodes(ir, next_pc, target_pc)?;
+        let (nodes, updated_pc, stub_patch_info, decoy_patch_info) =
+            create_tier_nodes(ir, next_pc, target_pc)?;
         next_pc = updated_pc;
         tier_nodes.insert(*tier_index, nodes);
         if let Some((stub_node, stub_push_pc, push_width, decoy_node)) = stub_patch_info {
             stub_patches.push((stub_node, stub_push_pc, push_width, decoy_node));
+        }
+        if let Some((decoy_node, decoy_push_pc, push_width, target_pc)) = decoy_patch_info {
+            decoy_patches.push((decoy_node, decoy_push_pc, push_width, target_pc));
         }
     }
 
@@ -97,8 +115,19 @@ pub fn apply_layout_plan(
         }
     }
 
-    // Generate 4-byte token mapping for selectors (preserves original extraction pattern)
-    let mapping = generate_selector_token_mapping(&dispatcher_info.selectors, rng)?;
+    // Build preserve_bytes map from blueprint controller patterns
+    let mut preserve_bytes = HashMap::new();
+    for assignment in &blueprint.selectors {
+        if let Some(pattern) = blueprint.controller_patterns.get(&assignment.tier_index) {
+            if pattern.use_byte_extraction {
+                preserve_bytes.insert(assignment.selector.selector, pattern.byte_index);
+            }
+        }
+    }
+
+    // Generate 4-byte token mapping for selectors (preserving bytes as needed for extraction patterns)
+    let mapping =
+        generate_selector_token_mapping(&dispatcher_info.selectors, rng, &preserve_bytes)?;
 
     // Apply dispatcher patches: replace original selectors with derived tokens
     let mut dispatcher_modified =
@@ -115,7 +144,7 @@ pub fn apply_layout_plan(
             .unwrap_or(target_abs);
 
         let pattern_config = blueprint.controller_patterns.get(&assignment.tier_index);
-        let (controller_pc, updated_pc) = create_selector_controller(
+        let (controller_pc, updated_pc, ctrl_patches) = create_selector_controller(
             ir,
             next_pc,
             stub_pc,
@@ -125,6 +154,8 @@ pub fn apply_layout_plan(
         )?;
         next_pc = updated_pc;
         selector_entry_pcs.insert(assignment.selector.selector, controller_pc);
+        // Collect controller patches for post-reindex patching
+        controller_patches.extend(ctrl_patches);
     }
 
     // Update runtime bounds to include all newly created blocks
@@ -182,6 +213,8 @@ pub fn apply_layout_plan(
         controller_pcs: selector_entry_pcs,
         dispatcher_patches,
         stub_patches,
+        decoy_patches,
+        controller_patches,
     }))
 }
 
@@ -237,7 +270,7 @@ fn create_tier_nodes(
     ir: &mut CfgIrBundle,
     mut next_pc: usize,
     target_pc: usize,
-) -> crate::Result<(TierNodes, usize, Option<StubPatchInfo>)> {
+) -> crate::Result<(TierNodes, usize, Option<StubPatchInfo>, Option<DecoyPatchInfo>)> {
     let invalid_start = next_pc;
     let invalid_rel = runtime_relative(ir, invalid_start);
     let invalid_block = BlockBody {
@@ -311,6 +344,8 @@ fn create_tier_nodes(
     });
     pc += 1;
 
+    // Track the decoy→target PUSH instruction for post-reindex patching
+    let decoy_push_pc = pc;
     decoy_instructions.push(Instruction {
         pc,
         op: Opcode::PUSH(target_width),
@@ -384,6 +419,10 @@ fn create_tier_nodes(
     let stub_push_pc = stub_start + 1;
     let stub_patch_info = Some((stub_node, stub_push_pc, stub_width, decoy_node));
 
+    // Track decoy→target jump for post-reindex patching
+    // Store the target_pc so we can remap it after reindexing
+    let decoy_patch_info = Some((decoy_node, decoy_push_pc, target_width, target_pc));
+
     Ok((
         TierNodes {
             stub_pc: stub_start,
@@ -392,6 +431,7 @@ fn create_tier_nodes(
         },
         next_pc,
         stub_patch_info,
+        decoy_patch_info,
     ))
 }
 
@@ -402,11 +442,21 @@ fn create_selector_controller(
     invalid_pc: usize,
     pattern_config: Option<&ControllerPatternConfig>,
     selector: u32,
-) -> crate::Result<(usize, usize)> {
+) -> crate::Result<(usize, usize, ControllerPatchInfo)> {
     let start_pc = next_pc;
     let mut instructions = Vec::new();
+    let mut patches = Vec::new(); // Track (push_pc, push_width, target_pc) for all jump targets
     let stub_rel = runtime_relative(ir, stub_pc);
     let invalid_rel = runtime_relative(ir, invalid_pc);
+
+    debug!(
+        selector = format_args!("0x{:08x}", selector),
+        start_pc = format_args!("0x{:04x}", start_pc),
+        stub_pc = format_args!("0x{:04x}", stub_pc),
+        invalid_pc = format_args!("0x{:04x}", invalid_pc),
+        has_pattern = pattern_config.is_some(),
+        "Creating selector controller"
+    );
 
     instructions.push(Instruction {
         pc: next_pc,
@@ -457,6 +507,24 @@ fn create_selector_controller(
                 byte_fail_rel,
             );
 
+            // Track PUSH instructions for jump targets in byte extraction pattern
+            // Pattern: ..., PUSH <match_target>, JUMPI, PUSH <fallback_target>, JUMP
+            for i in 0..byte_instrs.len().saturating_sub(1) {
+                if let Opcode::PUSH(width) = byte_instrs[i].op {
+                    let next_op = &byte_instrs[i + 1].op;
+                    if matches!(next_op, Opcode::JUMPI | Opcode::JUMP) {
+                        // This PUSH is a jump target that needs patching
+                        let push_pc = byte_instrs[i].pc;
+                        let target_pc = if matches!(next_op, Opcode::JUMPI) {
+                            byte_match_pc // JUMPI target (match path)
+                        } else {
+                            invalid_pc // JUMP target (fallback to invalid)
+                        };
+                        patches.push((push_pc, width, target_pc));
+                    }
+                }
+            }
+
             // Add byte extraction instructions
             for instr in byte_instrs {
                 instructions.push(instr);
@@ -489,6 +557,24 @@ fn create_selector_controller(
                 invalid_rel, // If storage is non-zero, trap at invalid
             );
 
+            // Track PUSH instructions for jump targets in storage check pattern
+            // Pattern: ..., PUSH <match_target>, JUMPI, PUSH <fallback_target>, JUMP
+            for i in 0..storage_instrs.len().saturating_sub(1) {
+                if let Opcode::PUSH(width) = storage_instrs[i].op {
+                    let next_op = &storage_instrs[i + 1].op;
+                    if matches!(next_op, Opcode::JUMPI | Opcode::JUMP) {
+                        // This PUSH is a jump target that needs patching
+                        let push_pc = storage_instrs[i].pc;
+                        let target_pc = if matches!(next_op, Opcode::JUMPI) {
+                            stub_pc // JUMPI target (match path - jump to stub)
+                        } else {
+                            invalid_pc // JUMP target (fallback to invalid)
+                        };
+                        patches.push((push_pc, width, target_pc));
+                    }
+                }
+            }
+
             for instr in storage_instrs {
                 instructions.push(instr);
             }
@@ -497,6 +583,7 @@ fn create_selector_controller(
     }
 
     let stub_width = minimal_push_width(stub_rel);
+    let final_push_pc = next_pc;
     instructions.push(Instruction {
         pc: next_pc,
         op: Opcode::PUSH(stub_width),
@@ -511,6 +598,9 @@ fn create_selector_controller(
     });
     next_pc += 1;
 
+    // Track the final PUSH for stub jump
+    patches.push((final_push_pc, stub_width, stub_pc));
+
     let block = BlockBody {
         start_pc,
         instructions: instructions.clone(),
@@ -518,12 +608,27 @@ fn create_selector_controller(
         control: BlockControl::Unknown,
     };
 
+    debug!(
+        selector = format_args!("0x{:08x}", selector),
+        start_pc = format_args!("0x{:04x}", start_pc),
+        end_pc = format_args!("0x{:04x}", next_pc),
+        instruction_count = instructions.len(),
+        opcodes = format_args!("{:?}", instructions.iter().map(|i| format!("{:?}", i.op)).collect::<Vec<_>>()),
+        "Controller created"
+    );
+
     let node = ir.cfg.add_node(Block::Body(block));
     ir.pc_to_block.insert(start_pc, node);
     ir.rebuild_edges_for_block(node)
         .map_err(|err| Error::CoreError(err.to_string()))?;
 
-    Ok((start_pc, next_pc))
+    // Convert patches to include node index: (node, push_pc, push_width, target_pc)
+    let controller_patches: ControllerPatchInfo = patches
+        .into_iter()
+        .map(|(push_pc, push_width, target_pc)| (node, push_pc, push_width, target_pc))
+        .collect();
+
+    Ok((start_pc, next_pc, controller_patches))
 }
 
 fn locate_target_push(runtime: &[Instruction], selector: &FunctionSelector) -> Option<usize> {
