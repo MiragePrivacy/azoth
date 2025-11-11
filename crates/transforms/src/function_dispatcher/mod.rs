@@ -99,6 +99,72 @@ impl FunctionDispatcher {
         Ok(modified)
     }
 
+    /// Re-applies dispatcher patches after PC reindexing with remapped controller PCs.
+    ///
+    /// This method updates the dispatcher's PUSH instructions to jump to the correct
+    /// controller addresses after PC reindexing has shifted all PCs. It takes the
+    /// original controller PCs, looks them up in the PC mapping, and updates the
+    /// dispatcher instructions with the new relative addresses.
+    pub fn reapply_dispatcher_patches(
+        &self,
+        ir: &mut CfgIrBundle,
+        controller_pcs: &HashMap<u32, usize>,
+        dispatcher_patches: &[(NodeIndex, usize, u8, u32)],
+        pc_mapping: &HashMap<usize, usize>,
+    ) -> Result<bool> {
+        let mut edits = Vec::new();
+
+        for &(node, old_pc, push_width, selector) in dispatcher_patches {
+            let Some(&old_controller_pc) = controller_pcs.get(&selector) else {
+                debug!(
+                    selector = format_args!("0x{:08x}", selector),
+                    "reapply_dispatcher_patches: missing controller PC for selector"
+                );
+                continue;
+            };
+
+            // Look up the new controller PC after reindexing
+            let new_controller_pc = pc_mapping
+                .get(&old_controller_pc)
+                .copied()
+                .unwrap_or(old_controller_pc);
+
+            // Also need to map the dispatcher instruction's PC
+            let new_pc = pc_mapping.get(&old_pc).copied().unwrap_or(old_pc);
+
+            // Calculate the new relative address
+            let controller_rel = if let Some((start, _)) = ir.runtime_bounds {
+                new_controller_pc.saturating_sub(start)
+            } else {
+                new_controller_pc
+            };
+
+            let formatted = format!(
+                "{:0width$x}",
+                controller_rel,
+                width = push_width as usize * 2
+            );
+
+            debug!(
+                selector = format_args!("0x{:08x}", selector),
+                old_controller_pc = format_args!("0x{:04x}", old_controller_pc),
+                new_controller_pc = format_args!("0x{:04x}", new_controller_pc),
+                old_pc = format_args!("0x{:04x}", old_pc),
+                new_pc = format_args!("0x{:04x}", new_pc),
+                controller_rel = format_args!("0x{:04x}", controller_rel),
+                "reapply_dispatcher_patches: updating dispatcher PUSH instruction"
+            );
+
+            edits.push((node, new_pc, Opcode::PUSH(push_width), Some(formatted)));
+        }
+
+        if !edits.is_empty() {
+            self.apply_instruction_replacements(ir, edits)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Syncs internal CALL sites with dispatcher tokens so remapped selectors still fire.
     fn update_internal_calls(
         &self,
@@ -292,6 +358,10 @@ impl Transform for FunctionDispatcher {
 
         if plan.dispatcher_modified || calls_modified {
             ir.selector_mapping = Some(plan.mapping);
+            // Store dispatcher patch info for post-reindex patching
+            ir.dispatcher_controller_pcs = Some(plan.controller_pcs);
+            ir.dispatcher_patches = Some(plan.dispatcher_patches);
+            ir.stub_patches = Some(plan.stub_patches);
             debug!("Function dispatcher obfuscated via multi-tier layout");
             Ok(true)
         } else {

@@ -1206,6 +1206,9 @@ pub mod tests {
             original_bytecode: vec![],
             runtime_bounds: None,
             trace: Vec::new(),
+            dispatcher_controller_pcs: None,
+            dispatcher_patches: None,
+            stub_patches: None,
         };
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
 
@@ -1252,6 +1255,9 @@ pub mod tests {
             original_bytecode: vec![],
             runtime_bounds: None,
             trace: Vec::new(),
+            dispatcher_controller_pcs: None,
+            dispatcher_patches: None,
+            stub_patches: None,
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
@@ -1272,6 +1278,9 @@ pub mod tests {
             original_bytecode: vec![],
             runtime_bounds: None,
             trace: Vec::new(),
+            dispatcher_controller_pcs: None,
+            dispatcher_patches: None,
+            stub_patches: None,
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);

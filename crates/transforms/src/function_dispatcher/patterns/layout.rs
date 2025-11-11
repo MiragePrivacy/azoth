@@ -35,6 +35,12 @@ pub struct LayoutPlan {
     pub dispatcher_modified: bool,
     #[allow(dead_code)]
     pub routing: StorageRoutingConfig,
+    /// Maps each selector to its controller entry PC for post-reindex patching
+    pub controller_pcs: HashMap<u32, usize>,
+    /// Dispatcher patch locations: (node, pc, push_width, selector)
+    pub dispatcher_patches: Vec<(NodeIndex, usize, u8, u32)>,
+    /// Stub patch locations: (stub_node, stub_push_pc, push_width, decoy_node)
+    pub stub_patches: Vec<(NodeIndex, usize, u8, NodeIndex)>,
 }
 
 pub fn apply_layout_plan(
@@ -46,7 +52,13 @@ pub fn apply_layout_plan(
     rng: &mut StdRng,
     blueprint: &DispatcherBlueprint,
 ) -> crate::Result<Option<LayoutPlan>> {
-    let mut next_pc = highest_pc(ir).saturating_add(1);
+    // `highest_pc` already returns the next free instruction PC (last instruction's pc + byte_size),
+    // so we use it directly as the starting point for newly synthesized blocks.
+    let mut next_pc = highest_pc(ir);
+    debug!(
+        "multi-tier: highest existing pc end=0x{:04x}, runtime_bounds={:?}",
+        next_pc, ir.runtime_bounds
+    );
 
     let mut tiers: HashMap<usize, Vec<&TierAssignment>> = HashMap::new();
     for assignment in &blueprint.selectors {
@@ -57,6 +69,9 @@ pub fn apply_layout_plan(
     }
 
     let mut tier_nodes: HashMap<usize, TierNodes> = HashMap::new();
+    // Track stub → decoy jumps for post-reindex patching: (stub_node, stub_push_pc, push_width, decoy_node)
+    let mut stub_patches = Vec::new();
+
     for (tier_index, assignments) in tiers.iter() {
         if *tier_index == 0 {
             continue;
@@ -66,17 +81,14 @@ pub fn apply_layout_plan(
             continue;
         };
 
-        let target_pc = primary.selector.target_address as usize;
-        let (target_node, _) = index_by_pc.get(&target_pc).ok_or_else(|| {
-            Error::Generic(format!(
-                "multi-tier: missing target pc 0x{target_pc:04x} in CFG mapping"
-            ))
-        })?;
-
-        let target_node = *target_node;
-        let (nodes, updated_pc) = create_tier_nodes(ir, next_pc, target_node)?;
+        let target_rel = primary.selector.target_address as usize;
+        let target_pc = runtime_absolute(ir, target_rel);
+        let (nodes, updated_pc, stub_patch_info) = create_tier_nodes(ir, next_pc, target_pc)?;
         next_pc = updated_pc;
         tier_nodes.insert(*tier_index, nodes);
+        if let Some((stub_node, stub_push_pc, push_width, decoy_node)) = stub_patch_info {
+            stub_patches.push((stub_node, stub_push_pc, push_width, decoy_node));
+        }
     }
 
     if let Some((start, end)) = ir.runtime_bounds {
@@ -94,10 +106,13 @@ pub fn apply_layout_plan(
 
     let mut selector_entry_pcs = HashMap::new();
     for assignment in &blueprint.selectors {
-        let target_pc = assignment.selector.target_address as usize;
+        let target_rel = assignment.selector.target_address as usize;
+        let target_abs = runtime_absolute(ir, target_rel);
         let tier_meta = tier_nodes.get(&assignment.tier_index);
-        let stub_pc = tier_meta.map(|nodes| nodes.stub_pc).unwrap_or(target_pc);
-        let invalid_pc = tier_meta.map(|nodes| nodes.invalid_pc).unwrap_or(target_pc);
+        let stub_pc = tier_meta.map(|nodes| nodes.stub_pc).unwrap_or(target_abs);
+        let invalid_pc = tier_meta
+            .map(|nodes| nodes.invalid_pc)
+            .unwrap_or(target_abs);
 
         let pattern_config = blueprint.controller_patterns.get(&assignment.tier_index);
         let (controller_pc, updated_pc) = create_selector_controller(
@@ -120,6 +135,7 @@ pub fn apply_layout_plan(
     }
 
     let mut edits = Vec::new();
+    let mut dispatcher_patches = Vec::new();
     for assignment in &blueprint.selectors {
         let Some(&controller_pc) = selector_entry_pcs.get(&assignment.selector.selector) else {
             continue;
@@ -138,12 +154,16 @@ pub fn apply_layout_plan(
                 Opcode::PUSH(width) => width,
                 _ => continue,
             };
+            let controller_rel = runtime_relative(ir, controller_pc);
             let formatted = format!(
                 "{:0width$x}",
-                controller_pc,
+                controller_rel,
                 width = push_width as usize * 2
             );
             edits.push((*node, pc, instr.op, Some(formatted)));
+
+            // Store patch info for post-reindex update
+            dispatcher_patches.push((*node, pc, push_width, assignment.selector.selector));
         } else {
             debug!(
                 selector = format_args!("0x{:08x}", assignment.selector.selector),
@@ -160,6 +180,9 @@ pub fn apply_layout_plan(
         mapping,
         dispatcher_modified,
         routing: blueprint.routing.clone(),
+        controller_pcs: selector_entry_pcs,
+        dispatcher_patches,
+        stub_patches,
     }))
 }
 
@@ -195,21 +218,29 @@ fn format_immediate(value: u128, width: u8) -> String {
     format!("{:0width$x}", value, width = width as usize * 2)
 }
 
+fn runtime_relative(ir: &CfgIrBundle, pc: usize) -> usize {
+    if let Some((start, _)) = ir.runtime_bounds {
+        pc.saturating_sub(start)
+    } else {
+        pc
+    }
+}
+
+fn runtime_absolute(ir: &CfgIrBundle, pc: usize) -> usize {
+    if let Some((start, _)) = ir.runtime_bounds {
+        start.saturating_add(pc)
+    } else {
+        pc
+    }
+}
+
 fn create_tier_nodes(
     ir: &mut CfgIrBundle,
     mut next_pc: usize,
-    target_node: NodeIndex,
-) -> crate::Result<(TierNodes, usize)> {
-    let target_pc = match &ir.cfg[target_node] {
-        Block::Body(body) => body.start_pc,
-        _ => {
-            return Err(Error::Generic(
-                "multi-tier: target node is not a body block".into(),
-            ))
-        }
-    };
-
+    target_pc: usize,
+) -> crate::Result<(TierNodes, usize, Option<(NodeIndex, usize, u8, NodeIndex)>)> {
     let invalid_start = next_pc;
+    let invalid_rel = runtime_relative(ir, invalid_start);
     let invalid_block = BlockBody {
         start_pc: invalid_start,
         instructions: vec![
@@ -221,7 +252,7 @@ fn create_tier_nodes(
             Instruction {
                 pc: invalid_start + 1,
                 op: Opcode::INVALID,
-                imm: None,
+                imm: Some("fe".to_string()), // Ensure it encodes as 0xfe, not a random byte
             },
         ],
         max_stack: 0,
@@ -235,8 +266,9 @@ fn create_tier_nodes(
 
     let mut pc = next_pc;
     let decoy_start = pc;
-    let invalid_width = minimal_push_width(invalid_start);
-    let target_width = minimal_push_width(target_pc);
+    let invalid_width = minimal_push_width(invalid_rel);
+    let target_rel = runtime_relative(ir, target_pc);
+    let target_width = minimal_push_width(target_rel);
     let mut decoy_instructions = Vec::new();
     decoy_instructions.push(Instruction {
         pc,
@@ -269,7 +301,7 @@ fn create_tier_nodes(
     decoy_instructions.push(Instruction {
         pc,
         op: Opcode::PUSH(invalid_width),
-        imm: Some(format_immediate(invalid_start as u128, invalid_width)),
+        imm: Some(format_immediate(invalid_rel as u128, invalid_width)),
     });
     pc += 1 + invalid_width as usize;
 
@@ -283,7 +315,7 @@ fn create_tier_nodes(
     decoy_instructions.push(Instruction {
         pc,
         op: Opcode::PUSH(target_width),
-        imm: Some(format_immediate(target_pc as u128, target_width)),
+        imm: Some(format_immediate(target_rel as u128, target_width)),
     });
     pc += 1 + target_width as usize;
 
@@ -308,7 +340,16 @@ fn create_tier_nodes(
     next_pc = pc;
 
     let stub_start = next_pc;
-    let stub_width = minimal_push_width(decoy_start);
+    let stub_target_rel = runtime_relative(ir, decoy_start);
+    let stub_width = minimal_push_width(stub_target_rel);
+    debug!(
+        stub_start = format_args!("0x{:04x}", stub_start),
+        decoy_start = format_args!("0x{:04x}", decoy_start),
+        stub_target_rel = format_args!("0x{:x}", stub_target_rel),
+        stub_width,
+        "Creating stub block"
+    );
+
     let stub_instructions = vec![
         Instruction {
             pc: stub_start,
@@ -318,7 +359,7 @@ fn create_tier_nodes(
         Instruction {
             pc: stub_start + 1,
             op: Opcode::PUSH(stub_width),
-            imm: Some(format_immediate(decoy_start as u128, stub_width)),
+            imm: Some(format_immediate(stub_target_rel as u128, stub_width)),
         },
         Instruction {
             pc: stub_start + 1 + 1 + stub_width as usize,
@@ -339,6 +380,11 @@ fn create_tier_nodes(
 
     next_pc = stub_start + stub_width as usize + 3;
 
+    // Track stub→decoy jump for post-reindex patching
+    // Store the decoy_node so we can look up its start_pc after reindexing
+    let stub_push_pc = stub_start + 1;
+    let stub_patch_info = Some((stub_node, stub_push_pc, stub_width, decoy_node));
+
     Ok((
         TierNodes {
             stub_pc: stub_start,
@@ -346,6 +392,7 @@ fn create_tier_nodes(
             invalid_pc: invalid_start,
         },
         next_pc,
+        stub_patch_info,
     ))
 }
 
@@ -359,6 +406,8 @@ fn create_selector_controller(
 ) -> crate::Result<(usize, usize)> {
     let start_pc = next_pc;
     let mut instructions = Vec::new();
+    let stub_rel = runtime_relative(ir, stub_pc);
+    let invalid_rel = runtime_relative(ir, invalid_pc);
 
     instructions.push(Instruction {
         pc: next_pc,
@@ -382,8 +431,8 @@ fn create_selector_controller(
             //
             // We need to calculate match_width, but it depends on byte_match_pc which we're calculating.
             // Use iterative approach: start with PUSH1, check if sufficient, adjust if needed.
-            let byte_fail_pc = invalid_pc;
-            let fallback_width = minimal_push_width(byte_fail_pc);
+            let byte_fail_rel = invalid_rel;
+            let fallback_width = minimal_push_width(byte_fail_rel);
             let mut match_width = 1u8;
             let byte_match_pc;
 
@@ -391,7 +440,8 @@ fn create_selector_controller(
                 let byte_block_size =
                     9 + (1 + match_width as usize + 1) + (1 + fallback_width as usize + 1);
                 let candidate_pc = next_pc + byte_block_size;
-                let required_width = minimal_push_width(candidate_pc);
+                let candidate_rel = runtime_relative(ir, candidate_pc);
+                let required_width = minimal_push_width(candidate_rel);
 
                 if required_width <= match_width {
                     byte_match_pc = candidate_pc;
@@ -404,8 +454,8 @@ fn create_selector_controller(
                 next_pc,
                 config.byte_index,
                 expected_byte,
-                byte_match_pc,
-                byte_fail_pc,
+                runtime_relative(ir, byte_match_pc),
+                byte_fail_rel,
             );
 
             // Add byte extraction instructions
@@ -436,8 +486,8 @@ fn create_selector_controller(
             let (storage_instrs, updated_pc) = generate_storage_check_instructions(
                 next_pc,
                 config.storage_slot,
-                stub_pc,    // If storage is zero (default), go to stub (real path)
-                invalid_pc, // If storage is non-zero, trap at invalid
+                stub_rel,    // If storage is zero (default), go to stub (real path)
+                invalid_rel, // If storage is non-zero, trap at invalid
             );
 
             for instr in storage_instrs {
@@ -447,11 +497,11 @@ fn create_selector_controller(
         }
     }
 
-    let stub_width = minimal_push_width(stub_pc);
+    let stub_width = minimal_push_width(stub_rel);
     instructions.push(Instruction {
         pc: next_pc,
         op: Opcode::PUSH(stub_width),
-        imm: Some(format_immediate(stub_pc as u128, stub_width)),
+        imm: Some(format_immediate(stub_rel as u128, stub_width)),
     });
     next_pc += 1 + stub_width as usize;
 
