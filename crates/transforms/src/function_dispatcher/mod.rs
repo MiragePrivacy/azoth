@@ -195,11 +195,7 @@ impl FunctionDispatcher {
                 new_target_pc
             };
 
-            let formatted = format!(
-                "{:0width$x}",
-                target_rel,
-                width = push_width as usize * 2
-            );
+            let formatted = format!("{:0width$x}", target_rel, width = push_width as usize * 2);
 
             debug!(
                 old_target_pc = format_args!("0x{:04x}", old_target_pc),

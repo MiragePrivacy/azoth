@@ -422,7 +422,10 @@ pub async fn obfuscate_bytecode(
         let mut edits = Vec::new();
         for (decoy_node, old_pc, push_width, old_target_pc) in decoy_patches {
             // Map the target PC using the PC mapping
-            let new_target_pc = pc_mapping.get(&old_target_pc).copied().unwrap_or(old_target_pc);
+            let new_target_pc = pc_mapping
+                .get(&old_target_pc)
+                .copied()
+                .unwrap_or(old_target_pc);
 
             // Map the decoy instruction's PC
             let new_pc = pc_mapping.get(&old_pc).copied().unwrap_or(old_pc);
@@ -447,7 +450,12 @@ pub async fn obfuscate_bytecode(
                 target_rel
             );
 
-            edits.push((decoy_node, new_pc, Opcode::PUSH(push_width), Some(formatted)));
+            edits.push((
+                decoy_node,
+                new_pc,
+                Opcode::PUSH(push_width),
+                Some(formatted),
+            ));
         }
 
         if !edits.is_empty() {

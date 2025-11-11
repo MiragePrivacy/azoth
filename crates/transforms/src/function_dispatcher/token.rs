@@ -178,7 +178,12 @@ fn derive_unique_selector_token(
 
     // If we exhausted attempts, provide detailed error information
     let preserve_info = preserve_byte_index
-        .map(|idx| format!(" (preserving byte[{}]=0x{:02x})", idx, selector_bytes[idx as usize]))
+        .map(|idx| {
+            format!(
+                " (preserving byte[{}]=0x{:02x})",
+                idx, selector_bytes[idx as usize]
+            )
+        })
         .unwrap_or_default();
 
     Err(Error::Generic(format!(
@@ -293,11 +298,9 @@ mod tests {
             let selector_bytes = selector.to_be_bytes();
             let byte_index = 3;
             assert_eq!(
-                token_bytes[byte_index],
-                selector_bytes[byte_index],
+                token_bytes[byte_index], selector_bytes[byte_index],
                 "Token for selector 0x{:08x} didn't preserve byte[{}]",
-                selector,
-                byte_index
+                selector, byte_index
             );
         }
 
@@ -424,12 +427,12 @@ mod tests {
 
         let result = generate_selector_token_mapping(&selectors, &mut rng, &preserve_bytes);
 
+        assert!(result.is_err(), "Should fail with invalid byte index");
         assert!(
-            result.is_err(),
-            "Should fail with invalid byte index"
-        );
-        assert!(
-            result.unwrap_err().to_string().contains("invalid byte_index"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid byte_index"),
             "Error message should mention invalid byte_index"
         );
     }
@@ -484,13 +487,9 @@ mod tests {
 
             // Verify the byte at the specified index matches
             assert_eq!(
-                selector_bytes[*byte_index as usize],
-                token_bytes_arr[*byte_index as usize],
+                selector_bytes[*byte_index as usize], token_bytes_arr[*byte_index as usize],
                 "Token 0x{:08x} for selector 0x{:08x} must preserve byte[{}]=0x{:02x}",
-                token,
-                selector,
-                byte_index,
-                selector_bytes[*byte_index as usize]
+                token, selector, byte_index, selector_bytes[*byte_index as usize]
             );
 
             // Simulate the EVM BYTE opcode behavior:
