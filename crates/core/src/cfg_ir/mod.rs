@@ -146,6 +146,9 @@ pub struct CfgIrBundle {
     pub original_bytecode: Vec<u8>,
     pub runtime_bounds: Option<(usize, usize)>,
     pub trace: Vec<TraceEvent>,
+    pub dispatcher_controller_pcs: Option<HashMap<u32, usize>>, // Dispatcher controller PC mappings for post-reindex patching
+    pub dispatcher_patches: Option<Vec<(NodeIndex, usize, u8, u32)>>, // Dispatcher patch locations for post-reindex patching: (node, pc, push_width, selector)
+    pub stub_patches: Option<Vec<(NodeIndex, usize, u8, NodeIndex)>>, // Stub patch locations for post-reindex patching: (stub_node, stub_push_pc, push_width, decoy_node)
 }
 
 impl CfgIrBundle {
@@ -1050,6 +1053,9 @@ pub fn build_cfg_ir(
         original_bytecode: original_bytecode.to_vec(),
         runtime_bounds,
         trace: Vec::new(),
+        dispatcher_controller_pcs: None,
+        dispatcher_patches: None,
+        stub_patches: None,
     };
     let body_blocks = bundle
         .cfg

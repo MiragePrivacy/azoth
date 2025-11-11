@@ -2,7 +2,7 @@ use crate::function_dispatcher::FunctionDispatcher;
 use crate::Transform;
 use azoth_core::seed::Seed;
 use azoth_core::{
-    cfg_ir::{self, snapshot_bundle, CfgIrDiff, OperationKind, TraceEvent},
+    cfg_ir::{self, snapshot_bundle, Block, CfgIrDiff, OperationKind, TraceEvent},
     decoder, detection, encoder, process_bytecode_to_cfg, validator, Opcode,
 };
 use serde::{Deserialize, Serialize};
@@ -283,6 +283,119 @@ pub async fn obfuscate_bytecode(
     cfg_ir.patch_jump_immediates(&pc_mapping, old_runtime_bounds)?;
     tracing::debug!("  Patched jump immediates after PC reindexing");
 
+    // Re-apply dispatcher jump target patches with remapped controller PCs
+    // NOTE: These patches update the PUSH2 instructions (jump targets), not the PUSH4 token instructions
+    if let (Some(controller_pcs), Some(dispatcher_patches)) = (
+        cfg_ir.dispatcher_controller_pcs.clone(),
+        cfg_ir.dispatcher_patches.clone(),
+    ) {
+        tracing::debug!(
+            "  Re-applying {} dispatcher jump target patches with remapped controller PCs",
+            dispatcher_patches.len()
+        );
+        let dispatcher = FunctionDispatcher::new();
+        dispatcher.reapply_dispatcher_patches(
+            &mut cfg_ir,
+            &controller_pcs,
+            &dispatcher_patches,
+            &pc_mapping,
+        )?;
+        tracing::debug!("  Dispatcher jump target patches re-applied successfully");
+    }
+
+    // Re-apply stub patches with remapped decoy PCs if FunctionDispatcher was used
+    if let Some(stub_patches) = cfg_ir.stub_patches.clone() {
+        tracing::debug!(
+            "  Re-applying {} stub patches with remapped decoy PCs",
+            stub_patches.len()
+        );
+        let dispatcher = FunctionDispatcher::new();
+
+        // Build edits for stub patches
+        let mut edits = Vec::new();
+        for (stub_node, old_pc, push_width, decoy_node) in stub_patches {
+            // Look up the decoy block's first instruction PC (which should be the JUMPDEST)
+            let new_decoy_pc = match &cfg_ir.cfg[decoy_node] {
+                Block::Body(body) => {
+                    let first_instr_pc = body
+                        .instructions
+                        .first()
+                        .map(|instr| instr.pc)
+                        .unwrap_or(body.start_pc);
+                    tracing::debug!(
+                        "  Decoy block {:?}: start_pc=0x{:04x}, first_instr_pc=0x{:04x}, instruction_count={}",
+                        decoy_node,
+                        body.start_pc,
+                        first_instr_pc,
+                        body.instructions.len()
+                    );
+                    // Use the first instruction's PC, not the block's start_pc
+                    first_instr_pc
+                }
+                _ => {
+                    tracing::warn!("  Decoy node is not a Body block, skipping stub patch");
+                    continue;
+                }
+            };
+
+            // Map the stub instruction's PC
+            let new_pc = pc_mapping.get(&old_pc).copied().unwrap_or(old_pc);
+
+            // Calculate the new relative address
+            let decoy_rel = if let Some((start, _)) = cfg_ir.runtime_bounds {
+                new_decoy_pc.saturating_sub(start)
+            } else {
+                new_decoy_pc
+            };
+
+            let formatted = format!("{:0width$x}", decoy_rel, width = push_width as usize * 2);
+
+            tracing::debug!(
+                "  Reapplying stub patch: decoy_node={:?}, push_width={}, new_decoy_pc=0x{:04x}, old_pc=0x{:04x}, new_pc=0x{:04x}, decoy_rel=0x{:04x}",
+                decoy_node,
+                push_width,
+                new_decoy_pc,
+                old_pc,
+                new_pc,
+                decoy_rel
+            );
+
+            edits.push((stub_node, new_pc, Opcode::PUSH(push_width), Some(formatted)));
+        }
+
+        if !edits.is_empty() {
+            dispatcher.apply_instruction_replacements(&mut cfg_ir, edits)?;
+        }
+        // Debug: show resulting stub PUSH widths
+        if let Some(stub_patches) = cfg_ir.stub_patches.clone() {
+            for (stub_node, _, _, decoy_node) in stub_patches {
+                if let Some(Block::Body(body)) = cfg_ir.cfg.node_weight(stub_node) {
+                    for instr in &body.instructions {
+                        tracing::debug!(
+                            "    Stub node {:?} instr pc=0x{:04x} op={:?} imm={:?}",
+                            stub_node,
+                            instr.pc,
+                            instr.op,
+                            instr.imm
+                        );
+                    }
+                }
+                if let Some(Block::Body(body)) = cfg_ir.cfg.node_weight(decoy_node) {
+                    for instr in &body.instructions {
+                        tracing::debug!(
+                            "    Decoy node {:?} instr pc=0x{:04x} op={:?} imm={:?}",
+                            decoy_node,
+                            instr.pc,
+                            instr.op,
+                            instr.imm
+                        );
+                    }
+                }
+            }
+        }
+        tracing::debug!("  Stub patches re-applied successfully");
+    }
+
     // Step 6: Extract and encode instructions
     let all_instructions = extract_instructions_from_cfg(&cfg_ir);
     tracing::debug!(
@@ -470,6 +583,11 @@ fn extract_instructions_from_cfg(cfg_ir: &cfg_ir::CfgIrBundle) -> Vec<decoder::I
             all_instructions.extend(body.instructions.clone());
         }
     }
+
+    // CRITICAL: Sort instructions by PC before encoding!
+    // Without this, blocks added at high PCs could end up out of order,
+    // causing them to be embedded in PUSH instruction immediates.
+    all_instructions.sort_by_key(|instr| instr.pc);
 
     all_instructions
 }
