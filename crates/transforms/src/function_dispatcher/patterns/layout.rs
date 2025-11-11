@@ -9,7 +9,6 @@ use super::blueprint::{ControllerPatternConfig, DispatcherBlueprint, TierAssignm
 use super::controller::{
     generate_byte_extraction_instructions, generate_storage_check_instructions,
 };
-use crate::function_dispatcher::storage::StorageRoutingConfig;
 use crate::function_dispatcher::token::generate_selector_token_mapping;
 use crate::function_dispatcher::FunctionDispatcher;
 use crate::Error;
@@ -29,12 +28,13 @@ struct TierNodes {
     invalid_pc: usize,
 }
 
+/// Stub patch information: (stub_node, stub_push_pc, push_width, decoy_node)
+type StubPatchInfo = (NodeIndex, usize, u8, NodeIndex);
+
 /// Result produced when a dispatch layout has been synthesised.
 pub struct LayoutPlan {
     pub mapping: HashMap<u32, Vec<u8>>,
     pub dispatcher_modified: bool,
-    #[allow(dead_code)]
-    pub routing: StorageRoutingConfig,
     /// Maps each selector to its controller entry PC for post-reindex patching
     pub controller_pcs: HashMap<u32, usize>,
     /// Dispatcher patch locations: (node, pc, push_width, selector)
@@ -179,7 +179,6 @@ pub fn apply_layout_plan(
     Ok(Some(LayoutPlan {
         mapping,
         dispatcher_modified,
-        routing: blueprint.routing.clone(),
         controller_pcs: selector_entry_pcs,
         dispatcher_patches,
         stub_patches,
@@ -238,7 +237,7 @@ fn create_tier_nodes(
     ir: &mut CfgIrBundle,
     mut next_pc: usize,
     target_pc: usize,
-) -> crate::Result<(TierNodes, usize, Option<(NodeIndex, usize, u8, NodeIndex)>)> {
+) -> crate::Result<(TierNodes, usize, Option<StubPatchInfo>)> {
     let invalid_start = next_pc;
     let invalid_rel = runtime_relative(ir, invalid_start);
     let invalid_block = BlockBody {

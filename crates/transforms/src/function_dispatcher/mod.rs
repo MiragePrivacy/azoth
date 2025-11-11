@@ -1,7 +1,6 @@
 //! Function dispatcher transform.
 
 mod patterns;
-mod storage;
 pub(crate) mod token;
 
 use crate::{Error, Result, Transform};
