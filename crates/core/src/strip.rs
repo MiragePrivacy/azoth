@@ -144,7 +144,35 @@ impl CleanReport {
     /// RETURN
     /// ```
     fn update_init_code_size(&mut self, new_runtime_len: usize) -> Result<(), String> {
+        tracing::debug!(
+            "update_init_code_size called: new_runtime_len={}, clean_len={}",
+            new_runtime_len,
+            self.clean_len
+        );
+
         // Find Init section in removed
+        let new_runtime_offset = self
+            .runtime_layout
+            .iter()
+            .map(|span| span.offset)
+            .min()
+            .ok_or("No runtime layout found")?;
+
+        let runtime_offset = new_runtime_offset;
+        let post_runtime_len: usize = self
+            .removed
+            .iter()
+            .filter(|removed| removed.offset >= runtime_offset)
+            .map(|removed| removed.data.len())
+            .sum();
+        let runtime_tail_len = new_runtime_len + post_runtime_len;
+        let original_runtime_tail_len = self.clean_len + post_runtime_len;
+
+        tracing::debug!(
+            "Calculated values: runtime_offset={}, post_runtime_len={}, runtime_tail_len={}, original_runtime_tail_len={}",
+            runtime_offset, post_runtime_len, runtime_tail_len, original_runtime_tail_len
+        );
+
         let init_section = self
             .removed
             .iter_mut()
@@ -153,30 +181,25 @@ impl CleanReport {
 
         let mut init_bytes = init_section.data.clone().to_vec();
 
-        // Get the runtime offset from runtime_layout
-        let new_runtime_offset = self
-            .runtime_layout
-            .iter()
-            .map(|span| span.offset)
-            .min()
-            .ok_or("No runtime layout found")?;
-
         tracing::debug!(
             "Init code size: {} bytes, runtime offset: {}",
             init_bytes.len(),
             new_runtime_offset
         );
 
-        // Find CODECOPY (0x39)
+        // Find the CODECOPY (0x39) that copies the runtime. Some constructors contain multiple
+        // CODECOPY instructions (for example, to unpack constructor arguments). The last
+        // CODECOPY inside the init section is the one that copies the final runtime blob, so we
+        // target that for patching.
         let codecopy_pos = init_bytes
             .iter()
-            .position(|&b| b == 0x39)
+            .rposition(|&b| b == 0x39)
             .ok_or("CODECOPY not found in init code")?;
 
-        // Find RETURN (0xf3)
+        // Likewise, select the last RETURN which emits the runtime.
         let return_pos = init_bytes
             .iter()
-            .position(|&b| b == 0xf3)
+            .rposition(|&b| b == 0xf3)
             .ok_or("RETURN not found in init code")?;
 
         tracing::debug!(
@@ -203,28 +226,40 @@ impl CleanReport {
             if (0x60..=0x7f).contains(&opcode) {
                 let push_size = (opcode - 0x60 + 1) as usize;
                 if i + push_size < codecopy_pos && i + 1 + push_size <= init_bytes.len() {
+                    // Skip PUSHes that feed an immediate jump target – we only want values that
+                    // participate in the CODECOPY arguments, not control-flow patch points.
+                    if let Some(&next_opcode) = init_bytes.get(i + 1 + push_size) {
+                        if next_opcode == 0x56 || next_opcode == 0x57 {
+                            continue;
+                        }
+                    }
+
                     // Read the current value
                     let current_value = init_bytes[i + 1..i + 1 + push_size]
                         .iter()
                         .fold(0usize, |acc, &b| (acc << 8) | b as usize);
 
-                    // Look for a PUSH with a large value (likely the runtime length)
-                    // Runtime code is typically > 100 bytes
-                    if current_value > 100 && current_value < 100000 {
+                    // Skip the runtime offset PUSH (we patch it separately in the next pass).
+                    if current_value == runtime_offset {
+                        continue;
+                    }
+
+                    // Look for a PUSH that equals the original runtime tail length
+                    if current_value == original_runtime_tail_len {
                         // Check if new value fits
-                        if new_runtime_len < (1 << (push_size * 8)) {
+                        if runtime_tail_len < (1 << (push_size * 8)) {
                             let mut new_bytes = vec![0u8; push_size];
                             for j in 0..push_size {
                                 new_bytes[push_size - 1 - j] =
-                                    ((new_runtime_len >> (j * 8)) & 0xFF) as u8;
+                                    ((runtime_tail_len >> (j * 8)) & 0xFF) as u8;
                             }
                             init_bytes[i + 1..i + 1 + push_size].copy_from_slice(&new_bytes);
                             tracing::debug!(
-                                "Updated PUSH{} at offset {} from {} to 0x{:x} (runtime length)",
+                                "Updated PUSH{} at offset {} from {} to 0x{:x} (runtime tail length)",
                                 push_size,
                                 i,
                                 current_value,
-                                new_runtime_len
+                                runtime_tail_len
                             );
                             length_push_updated = true;
                             break;
@@ -239,7 +274,7 @@ impl CleanReport {
         }
 
         // Update offset PUSH before CODECOPY
-        // Look for a PUSH with a small value, which is the runtime offset
+        // Look for the PUSH that matches the runtime offset
         tracing::debug!(
             "Scanning for offset PUSH from {} to {}",
             codecopy_pos.saturating_sub(20),
@@ -251,13 +286,19 @@ impl CleanReport {
             if (0x60..=0x7f).contains(&opcode) {
                 let push_size = (opcode - 0x60 + 1) as usize;
                 if i + push_size < codecopy_pos && i + 1 + push_size <= init_bytes.len() {
+                    if let Some(&next_opcode) = init_bytes.get(i + 1 + push_size) {
+                        if next_opcode == 0x56 || next_opcode == 0x57 {
+                            continue;
+                        }
+                    }
+
                     // Read the current value
                     let current_value = init_bytes[i + 1..i + 1 + push_size]
                         .iter()
                         .fold(0usize, |acc, &b| (acc << 8) | b as usize);
 
-                    // Look for a PUSH with a small value (likely the offset)
-                    if current_value > 0 && current_value < 100 {
+                    // Look for a PUSH that equals the runtime offset.
+                    if current_value == runtime_offset {
                         // Check if new value fits
                         if new_runtime_offset < (1 << (push_size * 8)) {
                             let mut new_bytes = vec![0u8; push_size];
@@ -305,6 +346,12 @@ impl CleanReport {
         // Check if runtime length changed and update init code if needed
         let original_runtime_len = self.clean_len;
         let new_runtime_len = clean.len();
+
+        tracing::debug!(
+            "reassemble: original_runtime_len={}, new_runtime_len={}",
+            original_runtime_len,
+            new_runtime_len
+        );
 
         if new_runtime_len != original_runtime_len {
             tracing::debug!(
@@ -576,14 +623,16 @@ mod tests {
             &rebuilt[expected_prefix.len() + new_runtime.len()..],
             expected_suffix.as_slice()
         );
+        // The init code should have PUSH1 0x40 (64 bytes = new runtime 11 + auxdata 53)
+        // Original was PUSH1 0x3e (62 bytes = old runtime 9 + auxdata 53)
         assert!(
             report
                 .removed
                 .iter()
                 .find(|r| r.offset == 0)
-                .and_then(|r| r.data.windows(2).find(|w| w == &[0x60, 0x0b]))
+                .and_then(|r| r.data.windows(2).find(|w| w == &[0x60, 0x40]))
                 .is_some(),
-            "init code should be updated to push new runtime length"
+            "init code should be updated to push new runtime tail length (runtime + auxdata)"
         );
     }
 }
