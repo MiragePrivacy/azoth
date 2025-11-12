@@ -82,7 +82,7 @@ Options:
 - `--output <path>` - Where to write the markdown report (default: ./obfuscation_analysis_report.md)
 - `--max-attempts <n>` - Retry budget per iteration when a seed fails (default: 5)
 
-The analysis always runs with the dispatcher (when detected) plus the shuffle transform, matching the shell script behaviour. The summary printed to stdout mirrors the generated report and includes average/percentile longest preserved block sizes plus n-gram diversity metrics.
+The analysis runs with the dispatcher when detected and otherwise mirrors the obfuscator's default transform selection (no extra passes are forced). The summary printed to stdout mirrors the generated report and includes average/percentile longest preserved block sizes plus n-gram diversity metrics.
 
 ## Input Formats
 
