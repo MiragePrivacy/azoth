@@ -633,10 +633,10 @@ fn patch_push_value(
                         bytes[idx + 1 + width - 1 - j] = byte;
                     }
                     replaced += 1;
-                    if let Some(limit) = max_replacements {
-                        if replaced >= limit {
-                            break;
-                        }
+                    if let Some(limit) = max_replacements
+                        && replaced >= limit
+                    {
+                        break;
                     }
                 }
             }
