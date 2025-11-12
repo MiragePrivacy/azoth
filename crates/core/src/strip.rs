@@ -779,10 +779,7 @@ mod tests {
         {
             patched_prefix[idx + 1] = new_tail_len as u8;
         }
-        assert_eq!(
-            &rebuilt[..patched_prefix.len()],
-            patched_prefix.as_slice()
-        );
+        assert_eq!(&rebuilt[..patched_prefix.len()], patched_prefix.as_slice());
         assert_eq!(
             &rebuilt[expected_prefix.len()..expected_prefix.len() + new_runtime.len()],
             new_runtime.as_slice()
