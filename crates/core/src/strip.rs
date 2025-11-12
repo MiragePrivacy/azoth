@@ -419,8 +419,8 @@ impl CleanReport {
             );
 
             if let Err(e) = self.update_init_code_size(new_runtime_len) {
-                tracing::error!("Failed to update init code CODECOPY parameters: {}", e);
-                tracing::error!("Deployment will be broken - runtime will be truncated!");
+                tracing::warn!("Targeted init code patching failed: {}", e);
+                tracing::warn!("Will attempt fallback patching during reassembly");
             }
         }
         // Check if runtime size changed - if so, use simple sequential assembly
