@@ -3,6 +3,7 @@
 mod patterns;
 pub(crate) mod token;
 
+use crate::function_dispatcher::token::generate_selector_token_mapping;
 use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle};
 use azoth_core::decoder::Instruction;
@@ -374,6 +375,40 @@ impl Transform for FunctionDispatcher {
         if dispatcher_info.selectors.is_empty() {
             debug!("Dispatcher detection produced no selectors; skipping transform");
             return Ok(false);
+        }
+
+        let runtime_len = if let Some((start, end)) = ir.runtime_bounds {
+            end.saturating_sub(start)
+        } else {
+            runtime_instructions
+                .last()
+                .map(|instr| instr.pc + instr.byte_size())
+                .unwrap_or(0)
+        };
+        let selector_count = dispatcher_info.selectors.len();
+        let lightweight_dispatcher = selector_count <= 2 || runtime_len <= 96;
+
+        if lightweight_dispatcher {
+            debug!(
+                runtime_len,
+                selectors = selector_count,
+                "Using lightweight dispatcher obfuscation path"
+            );
+            let preserve_bytes = HashMap::new();
+            let mapping =
+                generate_selector_token_mapping(&dispatcher_info.selectors, rng, &preserve_bytes)?;
+            if self.apply_dispatcher_patches(
+                ir,
+                &runtime_instructions,
+                &index_by_pc,
+                &dispatcher_info,
+                &mapping,
+            )? {
+                ir.selector_mapping = Some(mapping);
+                return Ok(true);
+            } else {
+                return Ok(false);
+            }
         }
 
         let blueprint = self.build_blueprint(&dispatcher_info, rng);
