@@ -92,15 +92,23 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
         // Handle immediate data for PUSH opcodes
         if let Opcode::PUSH(n) = opcode {
             if let Some(immediate) = &ins.imm {
-                let imm_bytes = hex::decode(immediate).inspect_err(|&e| {
-                    tracing::error!(
-                        "Failed to decode immediate '{}' for {} at pc={}: {:?}",
-                        immediate,
-                        opcode,
-                        ins.pc,
-                        e
-                    );
-                })?;
+                let imm_bytes = match hex::decode(immediate) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to decode immediate '{}' (len {}) for {} at pc={}: {:?}",
+                            immediate,
+                            immediate.len(),
+                            opcode,
+                            ins.pc,
+                            e
+                        );
+                        return Err(Error::InvalidImmediate(format!(
+                            "invalid hex immediate '{}' for {} at pc={}: {:?}",
+                            immediate, opcode, ins.pc, e
+                        )));
+                    }
+                };
                 if imm_bytes.len() != n as usize {
                     tracing::error!(
                         "Invalid immediate length for {}: expected {} bytes, got {} bytes",
