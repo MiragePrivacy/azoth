@@ -15,9 +15,6 @@ use std::collections::HashMap;
 const COUNTER_DEPLOYMENT_BYTECODE: &str =
     include_str!("../../bytecode/counter/counter_deployment.hex");
 
-#[allow(dead_code)]
-const COUNTER_RUNTIME_BYTECODE: &str = include_str!("../../bytecode/counter/counter_runtime.hex");
-
 const SELECTOR_SET_NUMBER: u32 = 0x3fb5c1cb;
 const SELECTOR_NUMBER: u32 = 0x8381f58a;
 const SELECTOR_INCREMENT: u32 = 0xd09de08a;
