@@ -459,13 +459,13 @@ mod tests {
             .find(|idx| matches!(bundle.cfg[*idx], Block::Body(_)))
             .expect("body block exists");
         let before = snapshot_block_body(&bundle, node);
-        if let Some(Block::Body(body)) = bundle.cfg.node_weight_mut(node) {
-            if let BlockControl::Jump { target } = &mut body.control {
-                *target = JumpTarget::Raw {
-                    value: 10,
-                    encoding: JumpEncoding::Absolute,
-                };
-            }
+        if let Some(Block::Body(body)) = bundle.cfg.node_weight_mut(node)
+            && let BlockControl::Jump { target } = &mut body.control
+        {
+            *target = JumpTarget::Raw {
+                value: 10,
+                encoding: JumpEncoding::Absolute,
+            };
         }
         let after = snapshot_block_body(&bundle, node);
         let change = block_modification(node, before, after).expect("change should be detected");

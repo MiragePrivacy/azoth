@@ -75,7 +75,7 @@ async fn test_storage_cfg_graph_shape() {
     assert_eq!(body_block_count, expected_body_blocks);
     assert_eq!(cfg_ir.sections.len(), expected_section_count);
     assert!(
-        cfg_ir.trace.iter().skip(1).next().is_none(),
+        cfg_ir.trace.get(1).is_none(),
         "build should be the only recorded operation"
     );
 
@@ -100,7 +100,7 @@ async fn test_storage_cfg_graph_shape() {
         .map(|(idx, _)| idx)
         .expect("CFG must contain a body block");
     assert!(
-        entry_targets.iter().any(|target| *target == first_body),
+        entry_targets.contains(&first_body),
         "entry should connect to the first body block"
     );
 }
@@ -110,7 +110,7 @@ async fn test_storage_cfg_trace_progression() {
     let mut cfg_ir = build_storage_cfg().await;
     let initial_len = cfg_ir.trace.len();
     assert!(
-        cfg_ir.trace.first().is_some(),
+        !cfg_ir.trace.is_empty(),
         "build should seed at least one trace entry"
     );
     let initial_build_events = cfg_ir
