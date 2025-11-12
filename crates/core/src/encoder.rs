@@ -133,9 +133,6 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
             "Encoded {} unknown opcodes as raw bytes. The resulting bytecode preserves the original bytes but these may represent invalid EVM instructions.",
             unknown_count
         );
-        tracing::warn!(
-            "If the original contract works, the obfuscated version should too. If not, the obfuscated bytecode may be corrupted."
-        );
     }
 
     tracing::debug!(

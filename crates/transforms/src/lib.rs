@@ -8,7 +8,6 @@ use azoth_core::cfg_ir::CfgIrBundle;
 use azoth_core::Opcode;
 use rand::rngs::StdRng;
 
-use azoth_analysis::Error as MetricsError;
 use thiserror::Error;
 
 /// Transform error type encompassing all transform module errors.
@@ -26,9 +25,6 @@ pub enum Error {
     /// Invalid jump target.
     #[error("invalid jump target: {0}")]
     InvalidJumpTarget(usize),
-    /// Metrics computation failed.
-    #[error("metrics computation failed: {0}")]
-    Metrics(#[from] MetricsError),
     /// Bytecode size exceeds maximum allowed delta.
     #[error("bytecode size exceeds maximum allowed delta")]
     SizeLimitExceeded,

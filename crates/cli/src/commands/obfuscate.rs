@@ -26,7 +26,7 @@ pub struct ObfuscateArgs {
     seed: Option<String>,
     /// Comma-separated list of OPTIONAL transforms (default: shuffle,jump_transform,opaque_pred).
     /// Note: function_dispatcher is ALWAYS applied and doesn't need to be specified.
-    #[arg(long, default_value = "shuffle,jump_transform,opaque_pred")]
+    #[arg(long, default_value = "shuffle")]
     passes: String,
     /// Path to emit gas/size report as JSON (optional).
     #[arg(long)]
@@ -101,7 +101,7 @@ impl super::Command for ObfuscateArgs {
 }
 
 /// Reads input from hex string, .hex file, or binary file
-fn read_input(input: &str) -> Result<String, Box<dyn Error>> {
+pub(crate) fn read_input(input: &str) -> Result<String, Box<dyn Error>> {
     if input.trim_start().starts_with("0x") {
         // Direct hex string input
         Ok(input.to_string())
@@ -118,7 +118,7 @@ fn read_input(input: &str) -> Result<String, Box<dyn Error>> {
 }
 
 /// Normalizes a hex string by removing prefixes and underscores.
-fn normalise_hex(s: &str) -> Result<String, ObfuscateError> {
+pub(crate) fn normalise_hex(s: &str) -> Result<String, ObfuscateError> {
     let stripped = s.trim().trim_start_matches("0x").replace('_', "");
     if !stripped.len().is_multiple_of(2) {
         return Err(ObfuscateError::OddLength(stripped.len()));
@@ -127,7 +127,7 @@ fn normalise_hex(s: &str) -> Result<String, ObfuscateError> {
 }
 
 /// Builds a list of transform passes from a comma-separated string.
-fn build_passes(list: &str) -> Result<Vec<Box<dyn Transform>>, Box<dyn Error>> {
+pub(crate) fn build_passes(list: &str) -> Result<Vec<Box<dyn Transform>>, Box<dyn Error>> {
     list.split(',')
         .filter(|s| !s.is_empty())
         .map(|name| match name.trim() {

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 azoth-core.workspace = true
+azoth-transform.workspace = true
 petgraph.workspace = true
 serde.workspace = true
 tokio.workspace = true
@@ -12,3 +13,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 hex.workspace = true
 thiserror.workspace = true
+chrono.workspace = true

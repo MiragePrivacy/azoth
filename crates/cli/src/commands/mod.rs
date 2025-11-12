@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use clap::Subcommand;
 use std::error::Error;
 
+pub mod analyze;
 pub mod cfg;
 pub mod decode;
 pub mod obfuscate;
@@ -43,6 +44,8 @@ pub enum Cmd {
     Cfg(cfg::CfgArgs),
     /// Obfuscate bytecode with specified transforms
     Obfuscate(obfuscate::ObfuscateArgs),
+    /// Run obfuscation analysis across multiple seeds
+    Analyze(analyze::AnalyzeArgs),
 }
 
 /// Trait for executing CLI subcommands.
@@ -66,6 +69,7 @@ impl Command for Cmd {
             Cmd::Strip(args) => args.execute().await,
             Cmd::Cfg(args) => args.execute().await,
             Cmd::Obfuscate(args) => args.execute().await,
+            Cmd::Analyze(args) => args.execute().await,
         }
     }
 }

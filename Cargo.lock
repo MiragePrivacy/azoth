@@ -1290,6 +1290,8 @@ name = "azoth-analysis"
 version = "0.1.0"
 dependencies = [
  "azoth-core",
+ "azoth-transform",
+ "chrono",
  "hex",
  "petgraph",
  "serde",
@@ -1304,6 +1306,7 @@ name = "azoth-cli"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "azoth-analysis",
  "azoth-core",
  "azoth-transform",
  "clap",
@@ -1372,7 +1375,6 @@ dependencies = [
 name = "azoth-transform"
 version = "0.1.0"
 dependencies = [
- "azoth-analysis",
  "azoth-core",
  "hex",
  "petgraph",

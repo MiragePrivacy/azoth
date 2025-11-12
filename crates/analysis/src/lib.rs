@@ -1,11 +1,17 @@
-//! The analysis module implements a minimal set of metrics quantified by bytecode size, control flow complexity,
-//! stack usage, and dominator overlap to assess transform potency (analyst effort) and gas
-//! efficiency. The module provides functions to collect metrics from a `CfgIrBundle` and
-//! `CleanReport`, compare pre- and post-obfuscation states, and compute
-//! dominator/post-dominator pairs for control flow analysis.
+//! Analytical utilities for assessing Azoth obfuscation results. The crate exposes:
+//! - Core metrics for bytecode size, control-flow structure, stack usage, and dominator overlap to
+//!   estimate transform potency and gas impact.
+//! - Comparison helpers that derive before/after deltas directly from a `CfgIrBundle` and
+//!   `CleanReport`.
+//! - An obfuscation study that repeatedly obfuscates bytecode with randomized seeds,
+//!   aggregates longest preserved byte sequences, emits percentile summaries, tracks top repeated
+//!   motifs, and measures n-gram diversity for multiple n values before producing a Markdown
+//!   report.
 
 pub mod metrics;
 pub use metrics::{Metrics, collect_metrics, compare};
+
+pub mod obfuscation;
 
 use thiserror::Error;
 

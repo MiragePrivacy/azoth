@@ -10,6 +10,7 @@ The analysis crate focuses on quantifying bytecode complexity through:
 2. **Stack Usage** - Maximum stack height measurements  
 3. **Dominator Analysis** - Control flow critical points using dominator/post-dominator overlap
 4. **Size Metrics** - Bytecode length tracking
+5. **Obfuscation Persistence** - Longest preserved byte sequences and n-gram diversity across randomized obfuscations
 
 ## Key Components
 
@@ -47,8 +48,20 @@ pub struct Metrics {
 ```
 
 The potency score uses the formula:
-```
+``` 
 potency = 5.0 * log₂(nodes) + edges + 30.0 * (1.0 - overlap)
 ```
 
 This balances control flow complexity against dominator overlap, with higher scores indicating greater obfuscation potential.
+
+### Obfuscation Experiment (`obfuscation.rs`)
+
+Runs multiple obfuscation attempts with randomized seeds and aggregates:
+
+- Longest common preserved byte sequences per iteration  
+- Summary statistics (average, median, percentiles, range, standard deviation)  
+- Histogram distribution of preserved lengths  
+- Top ten most frequent preserved sequences  
+- N-gram diversity (n = 2, 4, 8) across obfuscated outputs
+
+Use `AnalysisConfig` to configure iterations, transform passes, and output path, then call `analyze_obfuscation(config)` to produce a markdown report. The CLI subcommand `azoth analyze` builds on this module.

@@ -69,6 +69,21 @@ Available transforms: `shuffle`, `jump_transform`, `opaque_pred`
 
 Note: `function_dispatcher` is always applied automatically.
 
+### `azoth analyze`
+Generates multiple obfuscated variants and reports how much of the original bytecode survives unchanged.
+
+```bash
+azoth analyze <ITERATIONS>
+azoth analyze 50 examples/escrow-bytecode/artifacts/runtime_bytecode.hex
+azoth analyze 25 0x608060405234801561001057600080fd5b50 --output reports/analysis.md
+```
+
+Options:
+- `--output <path>` - Where to write the markdown report (default: ./obfuscation_analysis_report.md)
+- `--max-attempts <n>` - Retry budget per iteration when a seed fails (default: 5)
+
+The analysis always runs with the dispatcher (when detected) plus the shuffle transform, matching the shell script behaviour. The summary printed to stdout mirrors the generated report and includes average/percentile longest preserved block sizes plus n-gram diversity metrics.
+
 ## Input Formats
 
 The CLI supports:
