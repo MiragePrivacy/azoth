@@ -52,7 +52,7 @@ azoth-verification = { version = "0.1.0", path = "crates/verification" }
 # Ethereum
 eot = { version = "0.1.5", features = ["serde", "unified-opcodes"] }
 heimdall = { git = "https://github.com/Jon-Becker/heimdall-rs", package = "heimdall-disassembler", tag = "0.9.0" }
-revm = { version = "29", features = ["std", "serde"] }
+revm = { version = "29", features = ["std", "serde", "tracer"] }
 
 # Async runtime
 tokio = { version = "1.45", features = ["full"] }
