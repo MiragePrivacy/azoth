@@ -170,7 +170,10 @@ impl CleanReport {
 
         tracing::debug!(
             "Calculated values: runtime_offset={}, post_runtime_len={}, runtime_tail_len={}, original_runtime_tail_len={}",
-            runtime_offset, post_runtime_len, runtime_tail_len, original_runtime_tail_len
+            runtime_offset,
+            post_runtime_len,
+            runtime_tail_len,
+            original_runtime_tail_len
         );
 
         let init_section = self
