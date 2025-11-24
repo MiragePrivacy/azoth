@@ -94,7 +94,8 @@ pub struct ObfuscationMetadata {
 
 /// Main obfuscation pipeline
 pub async fn obfuscate_bytecode(
-    input_bytecode: &str,
+    deployment_bytecode: &str,
+    runtime_bytecode: &str,
     config: ObfuscationConfig,
 ) -> Result<ObfuscationResult, Box<dyn std::error::Error + Send + Sync>> {
     tracing::debug!("Starting obfuscation pipeline:");
@@ -102,7 +103,7 @@ pub async fn obfuscate_bytecode(
 
     // Step 1: Process bytecode to CFG-IR
     let (mut cfg_ir, instructions, sections, bytes) =
-        process_bytecode_to_cfg(input_bytecode, false).await?;
+        process_bytecode_to_cfg(deployment_bytecode, false, runtime_bytecode, false).await?;
     let original_size = bytes.len();
 
     tracing::debug!("  Input size: {} bytes", original_size);

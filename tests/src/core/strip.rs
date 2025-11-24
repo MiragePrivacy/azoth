@@ -18,7 +18,7 @@ async fn test_round_trip() {
     let (instructions, _, _, bytecode) = decode_bytecode(COUNTER_DEPLOYMENT_BYTECODE, false)
         .await
         .unwrap();
-    let sections = detection::locate_sections(&bytecode, &instructions).unwrap();
+    let sections = detection::locate_sections(&bytecode, &instructions, &[]).unwrap();
 
     let (clean_runtime, mut report) = strip_bytecode(&bytecode, &sections).unwrap();
     let rebuilt = report.reassemble(&clean_runtime);
@@ -42,7 +42,7 @@ async fn test_runtime_only() {
     let (instructions, _, _, bytecode) = decode_bytecode(COUNTER_RUNTIME_BYTECODE, false)
         .await
         .unwrap();
-    let sections = detection::locate_sections(&bytecode, &instructions).unwrap();
+    let sections = detection::locate_sections(&bytecode, &instructions, &[]).unwrap();
 
     let (clean_runtime, mut report) = strip_bytecode(&bytecode, &sections).unwrap();
     let rebuilt = report.reassemble(&clean_runtime);

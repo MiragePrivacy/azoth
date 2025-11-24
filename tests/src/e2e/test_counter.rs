@@ -58,10 +58,13 @@ async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
         .without_time()
         .try_init();
 
-    let obfuscation_result =
-        obfuscate_bytecode(COUNTER_DEPLOYMENT_BYTECODE, ObfuscationConfig::default())
-            .await
-            .map_err(|e| eyre!("Bytecode transformation failed: {}", e))?;
+    let obfuscation_result = obfuscate_bytecode(
+        COUNTER_DEPLOYMENT_BYTECODE,
+        COUNTER_RUNTIME_BYTECODE,
+        ObfuscationConfig::default(),
+    )
+    .await
+    .map_err(|e| eyre!("Bytecode transformation failed: {}", e))?;
 
     assert!(
         obfuscation_result

@@ -41,10 +41,14 @@ impl Section {
     }
 }
 
-/// Locates all non-overlapping, offset-ordered sections in the bytecode.
-pub fn locate_sections(bytes: &[u8], instructions: &[Instruction]) -> Result<Vec<Section>, Error> {
+/// Locates all non-overlapping, offset-ordered sections in the deployment bytecode.
+pub fn locate_sections(
+    deployment_bytes: &[u8],
+    instructions: &[Instruction],
+    runtime_bytes: &[u8],
+) -> Result<Vec<Section>, Error> {
     let mut sections = Vec::new();
-    let total_len = bytes.len();
+    let total_len = deployment_bytes.len();
 
     tracing::debug!(
         "Processing bytecode: {} bytes, {} instructions",
@@ -53,7 +57,7 @@ pub fn locate_sections(bytes: &[u8], instructions: &[Instruction]) -> Result<Vec
     );
 
     // Pass A: Detect Auxdata (CBOR) from the end
-    let auxdata = detect_auxdata(bytes);
+    let auxdata = detect_auxdata(deployment_bytes);
     let aux_offset = auxdata.map(|(offset, _)| offset).unwrap_or(total_len);
     tracing::debug!("Auxdata offset: {}", aux_offset);
 
@@ -75,7 +79,7 @@ pub fn locate_sections(bytes: &[u8], instructions: &[Instruction]) -> Result<Vec
 
     // Pass C: Detect Init -> Runtime split using dispatcher pattern
     let (mut init_end, mut runtime_start, mut runtime_len) =
-        detect_init_runtime_split(instructions).unwrap_or((0, 0, aux_offset));
+        detect_init_runtime_split(deployment_bytes, runtime_bytes).unwrap_or((0, 0, aux_offset));
 
     tracing::debug!(
         "Initial detection: init_end={}, runtime_start={}, runtime_len={}",
@@ -489,128 +493,43 @@ fn detect_padding(instructions: &[Instruction], aux_offset: usize) -> Option<(us
     })
 }
 
-/// Detects the Init to Runtime split using the dispatcher pattern.
+/// Detects the Init to Runtime split by finding runtime bytecode within deployment bytecode.
+///
+/// Uses a simple sliding window search to find where the runtime bytecode appears within
+/// the deployment bytecode. This is more reliable than heuristic-based pattern matching.
 ///
 /// # Arguments
-/// * `instructions` - Decoded instructions.
+/// * `deployment_bytes` - The full deployment bytecode.
+/// * `runtime_bytes` - The runtime bytecode to locate within deployment.
 ///
 /// # Returns
-/// Optional tuple of (init_end, runtime_start, runtime_len) if pattern is found, None otherwise.
-fn detect_init_runtime_split(instructions: &[Instruction]) -> Option<(usize, usize, usize)> {
-    // Try the strict pattern first (for backwards compatibility)
-    if let Some(result) = detect_strict_deployment_pattern(instructions) {
-        return Some(result);
+/// Optional tuple of (init_end, runtime_start, runtime_len) if found, None otherwise.
+fn detect_init_runtime_split(
+    deployment_bytes: &[u8],
+    runtime_bytes: &[u8],
+) -> Option<(usize, usize, usize)> {
+    if runtime_bytes.len() < 20 {
+        return None;
     }
 
-    // Fallback: Look for any CODECOPY + RETURN pattern
-    if let Some(result) = detect_codecopy_return_pattern(instructions) {
-        return Some(result);
+    let needle = &runtime_bytes[..20];
+    let runtime_offset = deployment_bytes
+        .windows(needle.len())
+        .position(|window| window == needle)?;
+
+    let remaining_runtime = &runtime_bytes[20..];
+    let remaining_deployment = &deployment_bytes[runtime_offset + 20..];
+
+    if remaining_deployment.starts_with(remaining_runtime) {
+        // if runtime starts at offset 0, we treat it as runtime-only bytecode with no init.
+        if runtime_offset == 0 {
+            return Some((0, 0, runtime_bytes.len()));
+        }
+
+        return Some((runtime_offset - 1, runtime_offset, runtime_bytes.len()));
     }
 
     None
-}
-
-/// Detects the strict deployment pattern (original heuristic)
-fn detect_strict_deployment_pattern(instructions: &[Instruction]) -> Option<(usize, usize, usize)> {
-    for i in 0..instructions.len().saturating_sub(6) {
-        if matches!(instructions[i].op, Opcode::PUSH(_) | Opcode::PUSH0)
-            && matches!(instructions[i + 1].op, Opcode::PUSH(_) | Opcode::PUSH0)
-            && matches!(instructions[i + 2].op, Opcode::PUSH0 | Opcode::PUSH(1))
-            && instructions[i + 2].imm.as_deref() == Some("00")
-            && instructions[i + 3].op == Opcode::CODECOPY
-            && matches!(instructions[i + 4].op, Opcode::PUSH(_) | Opcode::PUSH0)
-            && instructions[i + 5].op == Opcode::RETURN
-        {
-            let runtime_len = instructions[i]
-                .imm
-                .as_ref()
-                .and_then(|s| usize::from_str_radix(s, 16).ok())?;
-            let runtime_ofs = instructions[i + 1]
-                .imm
-                .as_ref()
-                .and_then(|s| usize::from_str_radix(s, 16).ok())?;
-            let init_end = instructions[i + 5].pc + 1;
-
-            tracing::debug!(
-                "Found strict deployment pattern at {}: init_end={}, runtime_start={}, runtime_len={}",
-                i,
-                init_end,
-                runtime_ofs,
-                runtime_len
-            );
-
-            return Some((init_end, runtime_ofs, runtime_len));
-        }
-    }
-    None
-}
-
-/// Fallback: Look for CODECOPY + RETURN pattern with more flexibility
-fn detect_codecopy_return_pattern(instructions: &[Instruction]) -> Option<(usize, usize, usize)> {
-    // Find CODECOPY instruction
-    let codecopy_idx = instructions
-        .iter()
-        .position(|instruction| instruction.op == Opcode::CODECOPY)?;
-
-    // Look for RETURN after CODECOPY (within reasonable distance)
-    let return_idx = instructions[codecopy_idx + 1..]
-        .iter()
-        .take(10) // Look within next 10 instructions
-        .position(|instruction| instruction.op == Opcode::RETURN)
-        .map(|pos| codecopy_idx + 1 + pos)?;
-
-    // Try to extract runtime parameters from PUSH instructions before CODECOPY
-    let mut runtime_len = None;
-    let mut runtime_start = None;
-
-    // Look backwards from CODECOPY for PUSH instructions
-    // CODECOPY stack layout: [destOffset, offset, size] where offset is where runtime starts,
-    // and size is how many bytes to copy. Scanning backwards, we encounter them in reverse order.
-    for instruction in (0..codecopy_idx).rev().take(10) {
-        if matches!(
-            instructions[instruction].op,
-            Opcode::PUSH(_) | Opcode::PUSH0
-        ) && let Some(immediate) = &instructions[instruction].imm
-            && let Ok(value) = usize::from_str_radix(immediate, 16)
-        {
-            if runtime_start.is_none() && value > 0 && value < 100000 {
-                // First reasonable value (scanning backwards) is the offset where runtime starts
-                runtime_start = Some(value);
-            } else if runtime_len.is_none() && value > 0 && value < 100000 {
-                // Second reasonable value is the size of the runtime code
-                runtime_len = Some(value);
-            }
-
-            if runtime_len.is_some() && runtime_start.is_some() {
-                break;
-            }
-        }
-    }
-
-    // If we found CODECOPY + RETURN but can't extract parameters,
-    // make reasonable assumptions
-    let runtime_len = runtime_len.unwrap_or_else(|| {
-        // Estimate runtime length from instruction count after return
-        instructions.len().saturating_sub(return_idx + 1) * 2 // rough estimate
-    });
-
-    let runtime_start = runtime_start.unwrap_or_else(|| {
-        // Assume runtime starts right after the RETURN instruction
-        instructions[return_idx].pc + 1
-    });
-
-    let init_end = instructions[return_idx].pc + 1;
-
-    tracing::debug!(
-        "Found fallback deployment pattern: CODECOPY at {}, RETURN at {}, init_end={}, runtime_start={}, runtime_len={}",
-        codecopy_idx,
-        return_idx,
-        init_end,
-        runtime_start,
-        runtime_len
-    );
-
-    Some((init_end, runtime_start, runtime_len))
 }
 
 /// Detects ConstructorArgs section between Init end and Runtime start.
@@ -658,7 +577,7 @@ mod tests {
 
     use super::*;
 
-    const STORAGE_BYTECODE: &str = "6080604052348015600e575f5ffd5b50603e80601a5f395ff3fe60806040525f5ffdfea2646970667358221220e8c66682f723c073c8c5ec2c0de0795c9b8b64e310482b13bc56a554d057842b64736f6c634300081e0033";
+    const STORAGE_BYTECODE: &str = include_str!("../../../../tests/bytecode/storage.hex");
 
     #[test]
     fn detect_auxdata_works() {

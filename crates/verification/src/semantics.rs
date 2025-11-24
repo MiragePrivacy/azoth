@@ -277,6 +277,7 @@ pub fn extract_semantics(cfg_bundle: &CfgIrBundle) -> VerificationResult<Contrac
 /// Extract semantic information from bytecode
 pub async fn extract_semantics_from_bytecode(
     bytecode: &[u8],
+    runtime_bytes: &[u8],
 ) -> VerificationResult<ContractSemantics> {
     tracing::debug!(
         "Extracting semantics from bytecode ({} bytes)",
@@ -288,7 +289,7 @@ pub async fn extract_semantics_from_bytecode(
             .await
             .map_err(|e| Error::BytecodeAnalysis(format!("Failed to decode bytecode: {e}")))?;
 
-    let sections = detection::locate_sections(bytecode, &instructions)
+    let sections = detection::locate_sections(bytecode, &instructions, runtime_bytes)
         .map_err(|e| Error::BytecodeAnalysis(format!("Failed to detect sections: {e}")))?;
 
     let (_clean_runtime, clean_report) = strip::strip_bytecode(bytecode, &sections)

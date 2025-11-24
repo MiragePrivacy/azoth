@@ -19,7 +19,7 @@ async fn test_full_deploy_payload_properties() {
     tracing::debug!("Instructions: {:?}", instructions);
     tracing::debug!("DecodeInfo: {:?}", info);
 
-    let sections = locate_sections(&bytes, &instructions).unwrap();
+    let sections = locate_sections(&bytes, &instructions, &[]).unwrap();
 
     tracing::debug!("Detected sections: {:?}", sections);
     for (i, section) in sections.iter().enumerate() {

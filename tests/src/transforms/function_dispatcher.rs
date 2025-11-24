@@ -62,8 +62,12 @@ async fn test_dispatcher_transformation_and_determinism() {
     let config1 = ObfuscationConfig::with_seed(seed.clone());
     let config2 = ObfuscationConfig::with_seed(seed.clone());
 
-    let result1 = obfuscate_bytecode(SIMPLE_BYTECODE, config1).await.unwrap();
-    let result2 = obfuscate_bytecode(SIMPLE_BYTECODE, config2).await.unwrap();
+    let result1 = obfuscate_bytecode(SIMPLE_BYTECODE, SIMPLE_BYTECODE, config1)
+        .await
+        .unwrap();
+    let result2 = obfuscate_bytecode(SIMPLE_BYTECODE, SIMPLE_BYTECODE, config2)
+        .await
+        .unwrap();
 
     println!("\nTransformation result:");
     println!("  Original: {} bytes", result1.original_size);
@@ -164,9 +168,10 @@ async fn test_counter_dispatcher_detection() {
         .without_time()
         .try_init();
 
-    let (_, instructions, sections, _) = process_bytecode_to_cfg(COUNTER_BYTECODE, false)
-        .await
-        .unwrap();
+    let (_, instructions, sections, _) =
+        process_bytecode_to_cfg(COUNTER_BYTECODE, false, COUNTER_BYTECODE, false)
+            .await
+            .unwrap();
 
     let runtime_section = sections
         .iter()
@@ -190,9 +195,13 @@ async fn test_counter_dispatcher_detection() {
         "Expected four selectors in Counter dispatcher"
     );
 
-    let result = obfuscate_bytecode(COUNTER_BYTECODE, ObfuscationConfig::default())
-        .await
-        .expect("obfuscator should succeed");
+    let result = obfuscate_bytecode(
+        COUNTER_BYTECODE,
+        COUNTER_BYTECODE,
+        ObfuscationConfig::default(),
+    )
+    .await
+    .expect("obfuscator should succeed");
 
     assert!(
         result

@@ -6,7 +6,7 @@
 
 use super::{
     mock_token_bytecode, prepare_bytecode, EscrowMappings, ObfuscatedCaller,
-    ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, MOCK_TOKEN_ADDR,
+    ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, ESCROW_CONTRACT_RUNTIME_BYTECODE, MOCK_TOKEN_ADDR,
 };
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use azoth_transform::shuffle::Shuffle;
@@ -33,9 +33,13 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     let mut config = ObfuscationConfig::default();
     config.transforms.push(Box::new(Shuffle));
 
-    let obfuscation_result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
-        .await
-        .map_err(|e| eyre!("Failed to obfuscate bytecode: {:?}", e))?;
+    let obfuscation_result = obfuscate_bytecode(
+        ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+        ESCROW_CONTRACT_RUNTIME_BYTECODE,
+        config,
+    )
+    .await
+    .map_err(|e| eyre!("Failed to obfuscate bytecode: {:?}", e))?;
 
     println!(
         "✓ Contract obfuscated ({} -> {} bytes, {:+.1}%)",
