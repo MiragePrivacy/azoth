@@ -10,7 +10,7 @@ async fn build_storage_cfg() -> CfgIrBundle {
     let (instructions, _info, _asm, bytes) = decoder::decode_bytecode(STORAGE_BYTECODE, false)
         .await
         .expect("failed to decode storage bytecode");
-    let sections = detection::locate_sections(&bytes, &instructions)
+    let sections = detection::locate_sections(&bytes, &instructions, &[])
         .expect("failed to locate sections for storage bytecode");
     let (_clean_runtime, report) =
         strip::strip_bytecode(&bytes, &sections).expect("failed to strip storage bytecode");

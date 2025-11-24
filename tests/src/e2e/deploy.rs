@@ -1,5 +1,6 @@
 use super::{
-    mock_token_bytecode, prepare_bytecode, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, MOCK_TOKEN_ADDR,
+    mock_token_bytecode, prepare_bytecode, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+    ESCROW_CONTRACT_RUNTIME_BYTECODE, MOCK_TOKEN_ADDR,
 };
 use azoth_core::seed::Seed;
 use azoth_transform::jump_address_transformer::JumpAddressTransformer;
@@ -109,9 +110,13 @@ async fn test_function_dispatch_only() -> Result<()> {
     println!("Testing FunctionDispatcher only (no additional transforms)");
 
     let config = create_config_with_transforms(vec![], seed);
-    let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
-        .await
-        .map_err(|e| eyre!("Failed to obfuscate with function dispatcher: {}", e))?;
+    let result = obfuscate_bytecode(
+        ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+        ESCROW_CONTRACT_RUNTIME_BYTECODE,
+        config,
+    )
+    .await
+    .map_err(|e| eyre!("Failed to obfuscate with function dispatcher: {}", e))?;
 
     assert!(result
         .metadata
@@ -137,9 +142,13 @@ async fn test_shuffle_transform() -> Result<()> {
 
     let transforms: Vec<Box<dyn Transform>> = vec![Box::new(Shuffle)];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
-        .await
-        .map_err(|e| eyre!("Failed to obfuscate with shuffle: {}", e))?;
+    let result = obfuscate_bytecode(
+        ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+        ESCROW_CONTRACT_RUNTIME_BYTECODE,
+        config,
+    )
+    .await
+    .map_err(|e| eyre!("Failed to obfuscate with shuffle: {}", e))?;
 
     assert!(result
         .metadata
@@ -170,9 +179,13 @@ async fn test_jump_address_transform() -> Result<()> {
 
     let transforms: Vec<Box<dyn Transform>> = vec![Box::new(JumpAddressTransformer::new())];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
-        .await
-        .map_err(|e| eyre!("Failed to obfuscate with jump address transformer: {}", e))?;
+    let result = obfuscate_bytecode(
+        ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+        ESCROW_CONTRACT_RUNTIME_BYTECODE,
+        config,
+    )
+    .await
+    .map_err(|e| eyre!("Failed to obfuscate with jump address transformer: {}", e))?;
 
     assert!(result
         .metadata
@@ -199,9 +212,13 @@ async fn test_opaque_predicate_transform() -> Result<()> {
 
     let transforms: Vec<Box<dyn Transform>> = vec![Box::new(OpaquePredicate::new())];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
-        .await
-        .map_err(|e| eyre!("Failed to obfuscate with opaque predicate: {}", e))?;
+    let result = obfuscate_bytecode(
+        ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+        ESCROW_CONTRACT_RUNTIME_BYTECODE,
+        config,
+    )
+    .await
+    .map_err(|e| eyre!("Failed to obfuscate with opaque predicate: {}", e))?;
 
     assert!(result
         .metadata
@@ -224,9 +241,13 @@ async fn test_shuffle_and_jump_address() -> Result<()> {
     let transforms: Vec<Box<dyn Transform>> =
         vec![Box::new(Shuffle), Box::new(JumpAddressTransformer::new())];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
-        .await
-        .map_err(|e| eyre!("Failed to obfuscate with shuffle + jump address: {}", e))?;
+    let result = obfuscate_bytecode(
+        ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+        ESCROW_CONTRACT_RUNTIME_BYTECODE,
+        config,
+    )
+    .await
+    .map_err(|e| eyre!("Failed to obfuscate with shuffle + jump address: {}", e))?;
 
     assert!(result
         .metadata
@@ -255,9 +276,13 @@ async fn test_shuffle_and_opaque_predicate() -> Result<()> {
     let transforms: Vec<Box<dyn Transform>> =
         vec![Box::new(Shuffle), Box::new(OpaquePredicate::new())];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
-        .await
-        .map_err(|e| eyre!("Failed to obfuscate with shuffle + opaque predicate: {}", e))?;
+    let result = obfuscate_bytecode(
+        ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+        ESCROW_CONTRACT_RUNTIME_BYTECODE,
+        config,
+    )
+    .await
+    .map_err(|e| eyre!("Failed to obfuscate with shuffle + opaque predicate: {}", e))?;
 
     assert!(result
         .metadata
@@ -289,14 +314,18 @@ async fn test_jump_address_and_opaque_predicate() -> Result<()> {
         Box::new(OpaquePredicate::new()),
     ];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
-        .await
-        .map_err(|e| {
-            eyre!(
-                "Failed to obfuscate with jump address + opaque predicate: {}",
-                e
-            )
-        })?;
+    let result = obfuscate_bytecode(
+        ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+        ESCROW_CONTRACT_RUNTIME_BYTECODE,
+        config,
+    )
+    .await
+    .map_err(|e| {
+        eyre!(
+            "Failed to obfuscate with jump address + opaque predicate: {}",
+            e
+        )
+    })?;
 
     assert!(result
         .metadata
@@ -331,9 +360,13 @@ async fn test_all_transforms_enabled() -> Result<()> {
         Box::new(OpaquePredicate::new()),
     ];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
-        .await
-        .map_err(|e| eyre!("Failed to obfuscate with all transforms: {}", e))?;
+    let result = obfuscate_bytecode(
+        ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+        ESCROW_CONTRACT_RUNTIME_BYTECODE,
+        config,
+    )
+    .await
+    .map_err(|e| eyre!("Failed to obfuscate with all transforms: {}", e))?;
 
     // Verify all transforms were applied
     assert!(result
@@ -379,9 +412,13 @@ async fn test_gas_consumption_analysis() -> Result<()> {
 
     let transforms: Vec<Box<dyn Transform>> = vec![Box::new(Shuffle)];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, config)
-        .await
-        .map_err(|e| eyre!("Failed to obfuscate: {}", e))?;
+    let result = obfuscate_bytecode(
+        ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+        ESCROW_CONTRACT_RUNTIME_BYTECODE,
+        config,
+    )
+    .await
+    .map_err(|e| eyre!("Failed to obfuscate: {}", e))?;
 
     let (_, obfuscated_gas) =
         deploy_and_verify_contract_revm(&result.obfuscated_bytecode, "Obfuscated")?;

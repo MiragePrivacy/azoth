@@ -13,7 +13,9 @@ async fn test_jump_address_transformer() {
 
     // Simple bytecode with a conditional jump
     let bytecode = "0x60085760015b00"; // PUSH1 0x08, JUMPI, PUSH1 0x01, JUMPDEST, STOP
-    let (mut cfg_ir, _, _, _) = process_bytecode_to_cfg(bytecode, false).await.unwrap();
+    let (mut cfg_ir, _, _, _) = process_bytecode_to_cfg(bytecode, false, bytecode, false)
+        .await
+        .unwrap();
 
     // Count instructions before transformation
     let mut instruction_count_before = 0;

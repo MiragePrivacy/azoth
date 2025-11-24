@@ -12,7 +12,9 @@ async fn test_shuffle_reorders_blocks() {
         .without_time()
         .init();
     let bytecode = "0x6004565b60016000555b60026000555b6003600055";
-    let (mut cfg_ir, _, _, _) = process_bytecode_to_cfg(bytecode, false).await.unwrap();
+    let (mut cfg_ir, _, _, _) = process_bytecode_to_cfg(bytecode, false, bytecode, false)
+        .await
+        .unwrap();
 
     let before = collect_metrics(&cfg_ir, &cfg_ir.clean_report).unwrap();
     let seed = Seed::generate();
@@ -36,7 +38,9 @@ async fn test_shuffle_storage_bytecode() {
         .try_init();
 
     let bytecode = include_str!("../../bytecode/storage.hex").trim();
-    let (mut cfg_ir, _, _, _) = process_bytecode_to_cfg(bytecode, false).await.unwrap();
+    let (mut cfg_ir, _, _, _) = process_bytecode_to_cfg(bytecode, false, bytecode, false)
+        .await
+        .unwrap();
 
     // Collect block start PCs before shuffle
     let before_pcs: Vec<usize> = cfg_ir

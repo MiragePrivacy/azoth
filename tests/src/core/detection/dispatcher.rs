@@ -20,7 +20,7 @@ async fn test_dispatcher_detection() {
     tracing::debug!("DecodeInfo: {:?}", info);
 
     // Step 1: Locate sections to find runtime
-    let sections = locate_sections(&bytes, &instructions).unwrap();
+    let sections = locate_sections(&bytes, &instructions, &[]).unwrap();
     tracing::debug!("Detected sections: {:?}", sections);
 
     // Step 2: Extract runtime instructions

@@ -12,7 +12,9 @@ async fn test_opaque_predicate_adds_blocks() {
         .without_time()
         .init();
     let bytecode = "0x6001600260016003"; // PUSH1 0x01, PUSH1 0x02, PUSH1 0x01, PUSH1 0x03
-    let (mut cfg_ir, _, _, _) = process_bytecode_to_cfg(bytecode, false).await.unwrap();
+    let (mut cfg_ir, _, _, _) = process_bytecode_to_cfg(bytecode, false, bytecode, false)
+        .await
+        .unwrap();
 
     let before = collect_metrics(&cfg_ir, &cfg_ir.clean_report).unwrap();
     let seed = Seed::from_hex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
