@@ -26,6 +26,8 @@ pub struct AnalysisConfig<'a> {
     pub iterations: usize,
     /// Original bytecode (hex string with or without `0x` prefix).
     pub original_bytecode: &'a str,
+    /// Runtime bytecode (hex string with or without `0x` prefix).
+    pub runtime_bytecode: &'a str,
     /// Path to write the markdown report.
     pub report_path: PathBuf,
     /// Maximum attempts per iteration before giving up on a seed.
@@ -34,10 +36,11 @@ pub struct AnalysisConfig<'a> {
 
 impl<'a> AnalysisConfig<'a> {
     /// Create config with sensible defaults.
-    pub fn new(original_bytecode: &'a str, iterations: usize) -> Self {
+    pub fn new(original_bytecode: &'a str, runtime_bytecode: &'a str, iterations: usize) -> Self {
         Self {
             iterations,
             original_bytecode,
+            runtime_bytecode,
             report_path: PathBuf::from("obfuscation_analysis_report.md"),
             max_attempts: 5,
         }
@@ -370,7 +373,13 @@ pub async fn analyze_obfuscation(
             obfuscation_config.preserve_unknown_opcodes = true;
             obfuscation_config.transforms = passes.iter().map(|p| p.build()).collect();
 
-            match obfuscate_bytecode(config.original_bytecode, obfuscation_config).await {
+            match obfuscate_bytecode(
+                config.original_bytecode,
+                config.runtime_bytecode,
+                obfuscation_config,
+            )
+            .await
+            {
                 Ok(result) => {
                     let transforms_applied = result.metadata.transforms_applied.clone();
                     let obfuscated_bytes = hex_to_bytes(&result.obfuscated_bytecode)?;

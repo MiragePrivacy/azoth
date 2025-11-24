@@ -37,7 +37,9 @@ impl FormalVerifier {
     pub async fn prove_equivalence(
         &mut self,
         original_bytecode: &[u8],
+        original_runtime: &[u8],
         obfuscated_bytecode: &[u8],
+        obfuscated_runtime: &[u8],
         security_properties: &[SecurityProperty],
     ) -> VerificationResult<FormalProof> {
         let start_time = Instant::now();
@@ -46,9 +48,10 @@ impl FormalVerifier {
 
         // Parse both contracts into semantic representations
         let original_semantics =
-            semantics::extract_semantics_from_bytecode(original_bytecode).await?;
+            semantics::extract_semantics_from_bytecode(original_bytecode, original_runtime).await?;
         let obfuscated_semantics =
-            semantics::extract_semantics_from_bytecode(obfuscated_bytecode).await?;
+            semantics::extract_semantics_from_bytecode(obfuscated_bytecode, obfuscated_runtime)
+                .await?;
 
         tracing::debug!("Extracted semantics for both contracts");
 

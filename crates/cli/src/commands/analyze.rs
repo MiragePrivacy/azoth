@@ -3,16 +3,20 @@ use async_trait::async_trait;
 use azoth_analysis::obfuscation::{analyze_obfuscation, AnalysisConfig, AnalysisError};
 use clap::Args;
 use std::{error::Error, path::PathBuf};
-const DEFAULT_BYTECODE_PATH: &str = "examples/escrow-bytecode/artifacts/deployment_bytecode.hex";
+const DEFAULT_DEPLOYMENT_PATH: &str = "examples/escrow-bytecode/artifacts/deployment_bytecode.hex";
+const DEFAULT_RUNTIME_PATH: &str = "examples/escrow-bytecode/artifacts/runtime_bytecode.hex";
 
 /// Analyze how much bytecode survives obfuscation across multiple seeds.
 #[derive(Args)]
 pub struct AnalyzeArgs {
     /// Number of obfuscated samples to generate.
     pub iterations: usize,
-    /// Input bytecode as hex, .hex file, or binary file.
-    #[arg(value_name = "BYTECODE", default_value = DEFAULT_BYTECODE_PATH)]
+    /// Input deployment bytecode as hex, .hex file, or binary file.
+    #[arg(value_name = "BYTECODE", default_value = DEFAULT_DEPLOYMENT_PATH)]
     pub input: String,
+    /// Input runtime bytecode as hex, .hex file, or binary file.
+    #[arg(long, value_name = "RUNTIME", default_value = DEFAULT_RUNTIME_PATH)]
+    pub runtime: String,
     /// Where to write the markdown report (default: ./obfuscation_analysis_report.md).
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
@@ -27,13 +31,15 @@ impl super::Command for AnalyzeArgs {
         let AnalyzeArgs {
             iterations,
             input,
+            runtime,
             output,
             max_attempts,
         } = self;
 
         let input_hex = read_input(&input)?;
+        let runtime_hex = read_input(&runtime)?;
 
-        let mut config = AnalysisConfig::new(&input_hex, iterations);
+        let mut config = AnalysisConfig::new(&input_hex, &runtime_hex, iterations);
         config.max_attempts = max_attempts;
         if let Some(path) = output {
             config.report_path = path;

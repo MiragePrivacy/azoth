@@ -19,8 +19,11 @@ use std::path::Path;
 /// Arguments for the `obfuscate` subcommand.
 #[derive(Args)]
 pub struct ObfuscateArgs {
-    /// Input bytecode as a hex string, .hex file, or binary file containing EVM bytecode.
+    /// Input deployment bytecode as a hex string, .hex file, or binary file containing EVM bytecode.
     pub input: String,
+    /// Input runtime bytecode as a hex string, .hex file, or binary file containing EVM bytecode.
+    #[arg(long)]
+    pub runtime: String,
     /// Cryptographic seed for deterministic obfuscation
     #[arg(long)]
     seed: Option<String>,
@@ -42,6 +45,7 @@ impl super::Command for ObfuscateArgs {
     async fn execute(self) -> Result<(), Box<dyn Error>> {
         let ObfuscateArgs {
             input,
+            runtime,
             seed,
             passes,
             emit,
@@ -50,6 +54,7 @@ impl super::Command for ObfuscateArgs {
 
         // Step 1: Read and normalize input
         let input_bytecode = read_input(&input)?;
+        let runtime_bytecode = read_input(&runtime)?;
 
         // Step 2: Build transforms from CLI args
         let transforms = build_passes(&passes)?;
@@ -68,7 +73,7 @@ impl super::Command for ObfuscateArgs {
         config.preserve_unknown_opcodes = true;
 
         // Step 4: Run obfuscation pipeline
-        let result = match obfuscate_bytecode(&input_bytecode, config).await {
+        let result = match obfuscate_bytecode(&input_bytecode, &runtime_bytecode, config).await {
             Ok(result) => result,
             Err(e) => return Err(format!("{e}").into()),
         };
