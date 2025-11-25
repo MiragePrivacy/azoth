@@ -17,7 +17,11 @@ use std::{
 use thiserror::Error as ThisError;
 
 /// Default passes applied to each obfuscation run.
-pub const DEFAULT_PASSES: &str = "shuffle";
+///
+/// Leaving this empty means the analysis reuses the obfuscator's native defaults
+/// (dispatcher when detected plus any user-specified transforms) instead of
+/// forcing deprecated transforms such as Shuffle.
+pub const DEFAULT_PASSES: &str = "";
 
 /// Configuration for running an obfuscation analysis experiment.
 #[derive(Debug, Clone)]
@@ -361,7 +365,6 @@ pub async fn analyze_obfuscation(
     let mut seeds = Vec::with_capacity(config.iterations);
     let mut transform_counts: BTreeMap<String, usize> = BTreeMap::new();
     transform_counts.insert("FunctionDispatcher".to_string(), 0);
-    transform_counts.insert("Shuffle".to_string(), 0);
 
     for _ in 0..config.iterations {
         let mut attempt = 0;

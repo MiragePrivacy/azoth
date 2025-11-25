@@ -146,6 +146,11 @@ pub struct CfgIrBundle {
     pub original_bytecode: Vec<u8>,
     pub runtime_bounds: Option<(usize, usize)>,
     pub trace: Vec<TraceEvent>,
+    pub dispatcher_controller_pcs: Option<HashMap<u32, usize>>,
+    pub dispatcher_patches: Option<Vec<(NodeIndex, usize, u8, u32)>>,
+    pub stub_patches: Option<Vec<(NodeIndex, usize, u8, NodeIndex)>>,
+    pub decoy_patches: Option<Vec<(NodeIndex, usize, u8, usize)>>,
+    pub controller_patches: Option<Vec<(NodeIndex, usize, u8, usize)>>,
 }
 
 impl CfgIrBundle {
@@ -572,6 +577,58 @@ impl CfgIrBundle {
             Some(pc_mapping.clone()),
         );
         Ok(())
+    }
+
+    /// Remap all stored metadata that references absolute PCs using the supplied mapping.
+    ///
+    /// This should be called any time a transform invokes `reindex_pcs` directly so that
+    /// dispatcher metadata stays aligned with the updated instruction addresses.
+    pub fn remap_metadata_pcs(&mut self, mapping: &HashMap<usize, usize>) {
+        let remap_value = |value: &mut usize, context: &str| {
+            if let Some(new_pc) = mapping.get(value) {
+                *value = *new_pc;
+            } else {
+                tracing::debug!(
+                    context = context,
+                    old_pc = format_args!("0x{:x}", *value),
+                    "remap_metadata_pcs: mapping missing for value"
+                );
+            }
+        };
+
+        if let Some(controller_pcs) = self.dispatcher_controller_pcs.as_mut() {
+            for (selector, pc) in controller_pcs.iter_mut() {
+                let ctx = format!("controller selector=0x{selector:08x}");
+                remap_value(pc, &ctx);
+            }
+        }
+
+        if let Some(dispatcher_patches) = self.dispatcher_patches.as_mut() {
+            for (_, pc, _, selector) in dispatcher_patches.iter_mut() {
+                let ctx = format!("dispatcher selector=0x{selector:08x}");
+                remap_value(pc, &ctx);
+            }
+        }
+
+        if let Some(stub_patches) = self.stub_patches.as_mut() {
+            for (_, pc, _, _) in stub_patches.iter_mut() {
+                remap_value(pc, "stub patch");
+            }
+        }
+
+        if let Some(decoy_patches) = self.decoy_patches.as_mut() {
+            for (_, push_pc, _, target_pc) in decoy_patches.iter_mut() {
+                remap_value(push_pc, "decoy push");
+                remap_value(target_pc, "decoy target");
+            }
+        }
+
+        if let Some(controller_patches) = self.controller_patches.as_mut() {
+            for (_, push_pc, _, target_pc) in controller_patches.iter_mut() {
+                remap_value(push_pc, "controller push");
+                remap_value(target_pc, "controller target");
+            }
+        }
     }
 
     fn patch_legacy_immediates_for_block(
@@ -1050,6 +1107,11 @@ pub fn build_cfg_ir(
         original_bytecode: original_bytecode.to_vec(),
         runtime_bounds,
         trace: Vec::new(),
+        dispatcher_controller_pcs: None,
+        dispatcher_patches: None,
+        stub_patches: None,
+        decoy_patches: None,
+        controller_patches: None,
     };
     let body_blocks = bundle
         .cfg

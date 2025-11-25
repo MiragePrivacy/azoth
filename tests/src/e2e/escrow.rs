@@ -9,17 +9,63 @@ use super::{
     ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, ESCROW_CONTRACT_RUNTIME_BYTECODE, MOCK_TOKEN_ADDR,
 };
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
-use azoth_transform::shuffle::Shuffle;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use revm::bytecode::Bytecode;
+use revm::context::journal::Journal;
 use revm::context::result::{ExecutionResult, Output};
-use revm::context::ContextTr;
-use revm::context::TxEnv;
+use revm::context::{BlockEnv, CfgEnv, ContextTr, TxEnv};
 use revm::database::InMemoryDB;
+use revm::inspector::Inspector;
+use revm::interpreter::interpreter_types::Jumps;
 use revm::primitives::{Address, TxKind, U256};
 use revm::state::AccountInfo;
-use revm::{Context, DatabaseCommit, ExecuteEvm, MainBuilder, MainContext};
+use revm::{Context, DatabaseCommit, ExecuteEvm, InspectEvm, MainBuilder, MainContext};
+
+#[derive(Default)]
+struct StepTracer {
+    enabled: bool,
+    max_steps: usize,
+    steps: usize,
+}
+
+impl StepTracer {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            max_steps: 2000,
+            steps: 0,
+        }
+    }
+}
+
+impl Inspector<Context<BlockEnv, TxEnv, CfgEnv, InMemoryDB, Journal<InMemoryDB>, ()>>
+    for StepTracer
+{
+    fn step(
+        &mut self,
+        interp: &mut revm::interpreter::Interpreter,
+        _context: &mut Context<BlockEnv, TxEnv, CfgEnv, InMemoryDB, Journal<InMemoryDB>, ()>,
+    ) {
+        if !self.enabled || self.steps >= self.max_steps {
+            if !self.enabled {
+                println!("StepTracer disabled");
+            } else if self.steps == self.max_steps {
+                println!("StepTracer max steps reached");
+            }
+            self.steps = self.steps.saturating_add(1);
+            return;
+        }
+
+        let pc = interp.bytecode.pc();
+        let opcode = interp.bytecode.opcode();
+        println!(
+            "TRACE step {:05} pc=0x{pc:x} opcode=0x{opcode:02x}",
+            self.steps
+        );
+        self.steps += 1;
+    }
+}
 
 #[tokio::test]
 async fn test_obfuscated_function_calls() -> Result<()> {
@@ -29,9 +75,67 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         .without_time()
         .try_init();
 
+    // TEST: First try deploying the ORIGINAL (non-obfuscated) bytecode to verify test setup
+    println!("\n=== Testing Original (Non-Obfuscated) Deployment ===");
+    let original_bytecode = prepare_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE)?;
+
+    let mut test_db = InMemoryDB::default();
+    test_db.insert_account_info(
+        MOCK_TOKEN_ADDR,
+        AccountInfo {
+            balance: U256::ZERO,
+            nonce: 1,
+            code_hash: revm::primitives::KECCAK_EMPTY,
+            code: Some(Bytecode::new_raw(mock_token_bytecode())),
+        },
+    );
+
+    let test_deployer = Address::from([0x42; 20]);
+    test_db.insert_account_info(
+        test_deployer,
+        AccountInfo {
+            balance: U256::from(1_000_000_000_000_000_000u128),
+            nonce: 0,
+            code_hash: revm::primitives::KECCAK_EMPTY,
+            code: None,
+        },
+    );
+
+    let mut test_evm = Context::mainnet().with_db(test_db).build_mainnet();
+
+    let test_deploy_tx = TxEnv {
+        caller: test_deployer,
+        gas_limit: 30_000_000,
+        kind: TxKind::Create,
+        data: original_bytecode,
+        value: U256::ZERO,
+        nonce: 0,
+        ..Default::default()
+    };
+
+    let test_result = test_evm.transact(test_deploy_tx)?;
+
+    match &test_result.result {
+        ExecutionResult::Success { .. } => {
+            println!("✓ Original deployment SUCCEEDED");
+        }
+        ExecutionResult::Revert { output, gas_used } => {
+            println!(
+                "✗ Original deployment REVERTED (gas: {}): 0x{}",
+                gas_used,
+                hex::encode(output)
+            );
+            return Err(eyre!("Original deployment failed - test setup issue!"));
+        }
+        ExecutionResult::Halt { reason, .. } => {
+            println!("✗ Original deployment HALTED: {:?}", reason);
+            return Err(eyre!("Original deployment failed - test setup issue!"));
+        }
+    }
+
     // obfuscate contract
-    let mut config = ObfuscationConfig::default();
-    config.transforms.push(Box::new(Shuffle));
+    println!("\n=== Proceeding with Obfuscated Deployment ===");
+    let config = ObfuscationConfig::default();
 
     let obfuscation_result = obfuscate_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
@@ -91,7 +195,10 @@ async fn test_obfuscated_function_calls() -> Result<()> {
 
     let obfuscated_bytecode = prepare_bytecode(&obfuscation_result.obfuscated_bytecode)?;
 
-    let mut evm = Context::mainnet().with_db(db).build_mainnet();
+    let trace_deploy = std::env::var("TRACE_DEPLOY").is_ok();
+    let mut evm = Context::mainnet()
+        .with_db(db)
+        .build_mainnet_with_inspector(StepTracer::default());
 
     // Track nonce explicitly for each transaction
     let mut deployer_nonce = 0u64;
@@ -106,9 +213,68 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         ..Default::default()
     };
 
-    let deploy_result = evm
-        .transact(deploy_tx)
-        .map_err(|e| eyre!("Deployment transaction failed: {:?}", e))?;
+    let deploy_result = if trace_deploy {
+        evm.inspect(deploy_tx, StepTracer::new(true))
+    } else {
+        evm.transact(deploy_tx)
+    }
+    .map_err(|e| eyre!("Deployment transaction failed: {:?}", e))?;
+
+    // Detailed logging of deployment result
+    println!("\n=== Deployment Result Details ===");
+    match &deploy_result.result {
+        ExecutionResult::Success { gas_used, .. } => {
+            println!("  Status: SUCCESS");
+            println!("  Gas used: {}", gas_used);
+        }
+        ExecutionResult::Revert { gas_used, output } => {
+            println!("  Status: REVERT");
+            println!("  Gas used: {}", gas_used);
+            println!("  Output length: {} bytes", output.len());
+            if !output.is_empty() {
+                println!("  Output hex: 0x{}", hex::encode(output));
+                if output.len() >= 4 {
+                    let selector = u32::from_be_bytes([output[0], output[1], output[2], output[3]]);
+                    println!("  Error selector: 0x{:08x}", selector);
+                    if selector == 0x08c379a0 {
+                        println!("  Error type: Error(string) - check Solidity error message");
+                    } else if selector == 0x4e487b71 {
+                        println!("  Error type: Panic(uint256) - Solidity panic");
+                        if output.len() >= 36 {
+                            let panic_code = u32::from_be_bytes([
+                                output[output.len() - 4],
+                                output[output.len() - 3],
+                                output[output.len() - 2],
+                                output[output.len() - 1],
+                            ]);
+                            println!("  Panic code: 0x{:02x}", panic_code);
+                        }
+                    }
+                }
+            } else {
+                println!("  Empty revert (no error message)");
+            }
+        }
+        ExecutionResult::Halt { reason, gas_used } => {
+            println!("  Status: HALT");
+            println!("  Reason: {:?}", reason);
+            println!("  Gas used: {}", gas_used);
+        }
+    }
+    println!(
+        "  State changes: {} accounts modified",
+        deploy_result.state.len()
+    );
+    for (addr, account) in &deploy_result.state {
+        println!(
+            "    touched {} -> nonce={}, balance={}, storage={}, code_len={}",
+            addr,
+            account.info.nonce,
+            account.info.balance,
+            account.storage.len(),
+            account.info.code.as_ref().map(|c| c.len()).unwrap_or(0)
+        );
+    }
 
     // Commit deployment state changes to database
     evm.db_mut().commit(deploy_result.state.clone());
@@ -121,8 +287,12 @@ async fn test_obfuscated_function_calls() -> Result<()> {
             Output::Create(_, Some(address)) => address,
             _ => return Err(eyre!("Deployment failed: no address returned")),
         },
-        ExecutionResult::Revert { output, .. } => {
-            return Err(eyre!("Deployment reverted: {:?}", output));
+        ExecutionResult::Revert { output, gas_used } => {
+            return Err(eyre!(
+                "Deployment reverted (gas: {}): 0x{}",
+                gas_used,
+                hex::encode(&output)
+            ));
         }
         ExecutionResult::Halt { reason, .. } => {
             return Err(eyre!("Deployment halted: {:?}", reason));
@@ -336,11 +506,13 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     // Increment nonce after successful transaction
     deployer_nonce += 1;
 
-    if let ExecutionResult::Success { output, .. } = funded_result.result {
-        if let Output::Call(data) = output {
-            let is_funded = caller.parse_bool(&data);
-            println!("  Contract funded state: {}", is_funded);
-        }
+    if let ExecutionResult::Success {
+        output: Output::Call(data),
+        ..
+    } = funded_result.result
+    {
+        let is_funded = caller.parse_bool(&data);
+        println!("  Contract funded state: {}", is_funded);
     }
 
     let bond_amount = U256::from(2500);

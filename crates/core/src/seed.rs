@@ -67,6 +67,11 @@ impl Seed {
     pub fn hash_hex(&self) -> String {
         format!("0x{}", hex::encode(self.hash()))
     }
+
+    /// Borrow the raw 32-byte seed.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.inner
+    }
 }
 
 #[cfg(test)]
@@ -82,7 +87,7 @@ mod tests {
     fn from_hex_accepts_prefixed_and_unprefixed() {
         let prefixed = Seed::from_hex(SAMPLE_HEX).unwrap();
         let unprefixed =
-            Seed::from_hex(&SAMPLE_HEX.trim_start_matches("0x")).expect("unprefixed seed");
+            Seed::from_hex(SAMPLE_HEX.trim_start_matches("0x")).expect("unprefixed seed");
 
         assert_eq!(prefixed.inner, unprefixed.inner);
         assert_eq!(prefixed.to_hex(), SAMPLE_HEX);

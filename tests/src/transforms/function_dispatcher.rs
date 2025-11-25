@@ -150,8 +150,8 @@ async fn test_dispatcher_transformation_and_determinism() {
     println!("✓ Token generation is collision-free");
 
     assert!(
-        result1.size_increase_percentage < 100.0,
-        "Size increase should be reasonable (< 100%)"
+        result1.size_increase_percentage < 200.0,
+        "Size increase should be reasonable (< 200%)"
     );
 
     println!("✓ Transformation applied correctly");

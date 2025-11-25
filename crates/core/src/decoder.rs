@@ -194,6 +194,24 @@ impl Instruction {
     }
 }
 
+/// Trait for computing the encoded byte size of instructions or collections of instructions.
+pub trait EncodedSize {
+    fn size(&self) -> usize;
+}
+
+impl EncodedSize for Instruction {
+    #[inline]
+    fn size(&self) -> usize {
+        self.byte_size()
+    }
+}
+
+impl<T: EncodedSize> EncodedSize for [T] {
+    fn size(&self) -> usize {
+        self.iter().map(EncodedSize::size).sum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SourceType, decode_bytecode, parse_assembly};
