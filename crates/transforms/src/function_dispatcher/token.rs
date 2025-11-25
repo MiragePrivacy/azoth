@@ -6,8 +6,7 @@
 
 use crate::{Error, Result};
 use azoth_core::detection::FunctionSelector;
-use rand::rngs::StdRng;
-use rand::RngCore;
+use azoth_core::seed::Seed;
 use sha3::{Digest, Keccak256};
 use std::collections::{HashMap, HashSet};
 
@@ -18,15 +17,17 @@ use std::collections::{HashMap, HashSet};
 /// work correctly and must be enforced for every dispatcher layout.
 pub fn generate_selector_token_mapping(
     selectors: &[FunctionSelector],
-    rng: &mut StdRng,
+    seed: &Seed,
     preserve_bytes: &HashMap<u32, u8>, // selector -> byte_index to preserve
 ) -> Result<HashMap<u32, Vec<u8>>> {
     if selectors.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let mut secret = [0u8; 32];
-    rng.fill_bytes(&mut secret);
+    let mut hasher = Keccak256::new();
+    hasher.update(b"AZOTH_DISPATCHER_TOKEN_SECRET");
+    hasher.update(seed.as_bytes());
+    let secret: [u8; 32] = hasher.finalize().into();
 
     let mut mapping = HashMap::with_capacity(selectors.len());
     let mut used_tokens = HashSet::with_capacity(selectors.len());
@@ -195,11 +196,11 @@ fn derive_unique_selector_token(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
+    use azoth_core::seed::Seed;
 
     #[test]
     fn test_generate_tokens_unique() {
-        let mut rng = StdRng::seed_from_u64(12345);
+        let seed = Seed::generate();
         let selectors = vec![
             FunctionSelector {
                 selector: 0xa9059cbb, // transfer
@@ -220,7 +221,7 @@ mod tests {
 
         let preserve_bytes = HashMap::new();
         let mapping =
-            generate_selector_token_mapping(&selectors, &mut rng, &preserve_bytes).unwrap();
+            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
 
         assert_eq!(mapping.len(), 3);
 
@@ -251,19 +252,18 @@ mod tests {
 
     #[test]
     fn test_empty_selectors() {
-        let mut rng = StdRng::seed_from_u64(12345);
         let selectors = vec![];
-
         let preserve_bytes = HashMap::new();
+        let seed = Seed::generate();
         let mapping =
-            generate_selector_token_mapping(&selectors, &mut rng, &preserve_bytes).unwrap();
+            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
 
         assert!(mapping.is_empty());
     }
 
     #[test]
     fn test_tokens_with_byte_preservation() {
-        let mut rng = StdRng::seed_from_u64(54321);
+        let seed = Seed::generate();
         let selectors = vec![
             FunctionSelector {
                 selector: 0xa9059cbb,
@@ -289,7 +289,7 @@ mod tests {
         preserve_bytes.insert(0x095ea7b3, 3);
 
         let mapping =
-            generate_selector_token_mapping(&selectors, &mut rng, &preserve_bytes).unwrap();
+            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
 
         assert_eq!(mapping.len(), 3);
 
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn test_tokens_avoid_problematic_values() {
-        let mut rng = StdRng::seed_from_u64(99999);
+        let seed = Seed::generate();
         let selectors = vec![
             FunctionSelector {
                 selector: 0x12345678,
@@ -331,7 +331,7 @@ mod tests {
 
         let preserve_bytes = HashMap::new();
         let mapping =
-            generate_selector_token_mapping(&selectors, &mut rng, &preserve_bytes).unwrap();
+            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
 
         for (selector, token_bytes) in &mapping {
             let token = u32::from_be_bytes([
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn test_tokens_with_mixed_preservation() {
-        let mut rng = StdRng::seed_from_u64(77777);
+        let seed = Seed::generate();
         let selectors = vec![
             FunctionSelector {
                 selector: 0x12345678,
@@ -392,7 +392,7 @@ mod tests {
         // Third selector has no preservation constraint
 
         let mapping =
-            generate_selector_token_mapping(&selectors, &mut rng, &preserve_bytes).unwrap();
+            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
 
         assert_eq!(mapping.len(), 3);
 
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn test_invalid_byte_index() {
-        let mut rng = StdRng::seed_from_u64(11111);
+        let seed = Seed::generate();
         let selectors = vec![FunctionSelector {
             selector: 0x12345678,
             instruction_index: 0,
@@ -425,7 +425,7 @@ mod tests {
         let mut preserve_bytes = HashMap::new();
         preserve_bytes.insert(0x12345678, 5); // Invalid index
 
-        let result = generate_selector_token_mapping(&selectors, &mut rng, &preserve_bytes);
+        let result = generate_selector_token_mapping(&selectors, &seed, &preserve_bytes);
 
         assert!(result.is_err(), "Should fail with invalid byte index");
         assert!(
@@ -441,7 +441,7 @@ mod tests {
     fn test_token_byte_extraction_compatibility() {
         // This test verifies that generated tokens will actually pass through
         // the byte extraction logic in controllers correctly
-        let mut rng = StdRng::seed_from_u64(42);
+        let seed = Seed::generate();
 
         let selectors = vec![
             FunctionSelector {
@@ -468,7 +468,7 @@ mod tests {
         preserve_bytes.insert(0x095ea7b3, 3); // Tier 3: byte[3]
 
         let mapping =
-            generate_selector_token_mapping(&selectors, &mut rng, &preserve_bytes).unwrap();
+            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
 
         // For each selector, verify the token would pass the byte extraction check
         for selector_obj in &selectors {
@@ -517,5 +517,32 @@ mod tests {
                 token, byte_index, extracted_byte, expected_byte
             );
         }
+    }
+
+    #[test]
+    fn test_deterministic_secret_from_seed() {
+        // This test verifies that using the same seed always produces the same mapping
+        let seed = Seed::generate();
+
+        let selectors = vec![
+            FunctionSelector {
+                selector: 0xa9059cbb,
+                instruction_index: 0,
+                target_address: 0x100,
+            },
+            FunctionSelector {
+                selector: 0x23b872dd,
+                instruction_index: 10,
+                target_address: 0x200,
+            },
+        ];
+        let preserve_bytes = HashMap::new();
+
+        let mapping_a =
+            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
+        let mapping_b =
+            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
+
+        assert_eq!(mapping_a, mapping_b, "Same seed should produce same mapping");
     }
 }

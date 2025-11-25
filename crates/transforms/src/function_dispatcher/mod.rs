@@ -8,6 +8,7 @@ use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle};
 use azoth_core::decoder::Instruction;
 use azoth_core::detection::{detect_function_dispatcher, DispatcherInfo};
+use azoth_core::seed::Seed;
 use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
 use rand::rngs::StdRng;
@@ -17,19 +18,29 @@ use tracing::debug;
 #[derive(Default)]
 pub struct FunctionDispatcher {
     cached_dispatcher: Option<DispatcherInfo>,
+    seed: Option<Seed>,
 }
 
 impl FunctionDispatcher {
     pub fn new() -> Self {
         Self {
             cached_dispatcher: None,
+            seed: None,
         }
     }
 
-    pub fn with_dispatcher_info(dispatcher_info: DispatcherInfo) -> Self {
+    pub fn with_dispatcher_info_and_seed(
+        dispatcher_info: DispatcherInfo,
+        seed: Seed,
+    ) -> Self {
         Self {
             cached_dispatcher: Some(dispatcher_info),
+            seed: Some(seed),
         }
+    }
+
+    pub(crate) fn seed(&self) -> Option<&Seed> {
+        self.seed.as_ref()
     }
 
     fn collect_runtime_instructions(
@@ -395,8 +406,15 @@ impl Transform for FunctionDispatcher {
                 "Using lightweight dispatcher obfuscation path"
             );
             let preserve_bytes = HashMap::new();
-            let mapping =
-                generate_selector_token_mapping(&dispatcher_info.selectors, rng, &preserve_bytes)?;
+            let seed = self
+                .seed
+                .as_ref()
+                .ok_or_else(|| Error::Generic("dispatcher: seed required for token mapping".into()))?;
+            let mapping = generate_selector_token_mapping(
+                &dispatcher_info.selectors,
+                seed,
+                &preserve_bytes,
+            )?;
             if self.apply_dispatcher_patches(
                 ir,
                 &runtime_instructions,
@@ -432,7 +450,6 @@ impl Transform for FunctionDispatcher {
             &runtime_instructions,
             &index_by_pc,
             &dispatcher_info,
-            rng,
             &blueprint,
         )?
         else {

@@ -18,7 +18,6 @@ use azoth_core::decoder::Instruction;
 use azoth_core::detection::{DispatcherInfo, FunctionSelector};
 use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
-use rand::rngs::StdRng;
 use std::collections::HashMap;
 use tracing::debug;
 
@@ -60,7 +59,6 @@ pub fn apply_layout_plan(
     runtime: &[Instruction],
     index_by_pc: &HashMap<usize, (NodeIndex, usize)>,
     dispatcher_info: &DispatcherInfo,
-    rng: &mut StdRng,
     blueprint: &DispatcherBlueprint,
 ) -> crate::Result<Option<LayoutPlan>> {
     // `highest_pc` already returns the next free instruction PC (last instruction's pc + byte_size),
@@ -127,8 +125,11 @@ pub fn apply_layout_plan(
     }
 
     // Generate 4-byte token mapping for selectors (preserving bytes as needed for extraction patterns)
+    let seed = dispatcher
+        .seed()
+        .ok_or_else(|| Error::Generic("dispatcher: seed required for token mapping".into()))?;
     let mapping =
-        generate_selector_token_mapping(&dispatcher_info.selectors, rng, &preserve_bytes)?;
+        generate_selector_token_mapping(&dispatcher_info.selectors, seed, &preserve_bytes)?;
 
     // Apply dispatcher patches: replace original selectors with derived tokens
     let mut dispatcher_modified =

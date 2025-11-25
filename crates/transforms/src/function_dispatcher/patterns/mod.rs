@@ -34,9 +34,8 @@ impl FunctionDispatcher {
         runtime: &[Instruction],
         index_by_pc: &HashMap<usize, (NodeIndex, usize)>,
         dispatcher: &DispatcherInfo,
-        rng: &mut StdRng,
         blueprint: &DispatcherBlueprint,
     ) -> crate::Result<Option<LayoutPlan>> {
-        layout::apply_layout_plan(self, ir, runtime, index_by_pc, dispatcher, rng, blueprint)
+        layout::apply_layout_plan(self, ir, runtime, index_by_pc, dispatcher, blueprint)
     }
 }

@@ -67,6 +67,11 @@ impl Seed {
     pub fn hash_hex(&self) -> String {
         format!("0x{}", hex::encode(self.hash()))
     }
+
+    /// Borrow the raw 32-byte seed.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.inner
+    }
 }
 
 #[cfg(test)]
