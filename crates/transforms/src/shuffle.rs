@@ -33,12 +33,15 @@ impl Transform for Shuffle {
         debug!("Original block order (by start_pc): {:?}", original_order);
 
         block_indices.shuffle(rng);
-        let new_order: Vec<usize> = block_indices.iter().map(|(pc, _)| *pc).collect();
+        let mut new_order: Vec<usize> = block_indices.iter().map(|(pc, _)| *pc).collect();
         debug!("Shuffled block order (by start_pc): {:?}", new_order);
 
         if original_order == new_order {
-            debug!("Shuffle produced no change (randomly picked same order)");
-            return Ok(false);
+            // Avoid no-op shuffles by rotating once; safe because len > 1
+            debug!("Shuffle produced no change; rotating order to force reordering");
+            block_indices.rotate_left(1);
+            new_order = block_indices.iter().map(|(pc, _)| *pc).collect();
+            debug!("Forced new block order (by start_pc): {:?}", new_order);
         }
 
         // let's assign temporary start_pc values to establish the new order
