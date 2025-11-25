@@ -13,6 +13,7 @@ use crate::function_dispatcher::token::generate_selector_token_mapping;
 use crate::function_dispatcher::FunctionDispatcher;
 use crate::Error;
 use azoth_core::cfg_ir::{Block, BlockBody, BlockControl, CfgIrBundle};
+use azoth_core::decoder::EncodedSize;
 use azoth_core::decoder::Instruction;
 use azoth_core::detection::{DispatcherInfo, FunctionSelector};
 use azoth_core::Opcode;
@@ -504,13 +505,14 @@ fn create_selector_controller(
                 match_width = required_width;
             }
 
-            let (byte_instrs, updated_pc) = generate_byte_extraction_instructions(
+            let byte_instrs = generate_byte_extraction_instructions(
                 next_pc,
                 config.byte_index,
                 expected_byte,
                 runtime_relative(ir, byte_match_pc),
                 byte_fail_rel,
             );
+            let byte_block_size = byte_instrs.size();
 
             // Track PUSH instructions for jump targets in byte extraction pattern
             // Pattern: ..., PUSH <match_target>, JUMPI, PUSH <fallback_target>, JUMP
@@ -534,7 +536,7 @@ fn create_selector_controller(
             for instr in byte_instrs {
                 instructions.push(instr);
             }
-            next_pc = updated_pc;
+            next_pc += byte_block_size;
 
             // Add a JUMPDEST after byte extraction for the match path
             // This should now be at the correct address that the instructions expect
@@ -555,12 +557,13 @@ fn create_selector_controller(
 
         // Optionally add storage check pattern
         if config.use_storage_checks {
-            let (storage_instrs, updated_pc) = generate_storage_check_instructions(
+            let storage_instrs = generate_storage_check_instructions(
                 next_pc,
                 config.storage_slot,
                 stub_rel,    // If storage is zero (default), go to stub (real path)
                 invalid_rel, // If storage is non-zero, trap at invalid
             );
+            let storage_block_size = storage_instrs.size();
 
             // Track PUSH instructions for jump targets in storage check pattern
             // Pattern: ..., PUSH <match_target>, JUMPI, PUSH <fallback_target>, JUMP
@@ -583,7 +586,7 @@ fn create_selector_controller(
             for instr in storage_instrs {
                 instructions.push(instr);
             }
-            next_pc = updated_pc;
+            next_pc += storage_block_size;
         }
     }
 

@@ -79,13 +79,13 @@ pub enum PredicateType {
 ///
 /// # Returns
 ///
-/// A tuple of (generated instructions, next available PC).
+/// Generated instructions for the storage check pattern.
 pub fn generate_storage_check_instructions(
     start_pc: usize,
     slot: u64,
     match_target: usize,
     fallback_target: usize,
-) -> (Vec<Instruction>, usize) {
+) -> Vec<Instruction> {
     let mut instructions = Vec::new();
     let mut pc = start_pc;
 
@@ -158,9 +158,8 @@ pub fn generate_storage_check_instructions(
         op: Opcode::JUMP,
         imm: None,
     });
-    pc += 1;
 
-    (instructions, pc)
+    instructions
 }
 
 /// Generates instructions for a byte extraction pattern.
@@ -179,14 +178,14 @@ pub fn generate_storage_check_instructions(
 ///
 /// # Returns
 ///
-/// A tuple of (generated instructions, next available PC).
+/// Generated instructions for the byte extraction pattern.
 pub fn generate_byte_extraction_instructions(
     start_pc: usize,
     byte_index: u8,
     expected_value: u8,
     match_target: usize,
     fallback_target: usize,
-) -> (Vec<Instruction>, usize) {
+) -> Vec<Instruction> {
     let mut instructions = Vec::new();
     let mut pc = start_pc;
 
@@ -278,9 +277,8 @@ pub fn generate_byte_extraction_instructions(
         op: Opcode::JUMP,
         imm: None,
     });
-    pc += 1;
 
-    (instructions, pc)
+    instructions
 }
 
 /// Generates instructions for an opaque predicate pattern.
@@ -297,14 +295,14 @@ pub fn generate_byte_extraction_instructions(
 ///
 /// # Returns
 ///
-/// A tuple of (generated instructions, next available PC).
+/// Generated instructions for the opaque predicate pattern.
 #[allow(dead_code)]
 pub fn generate_opaque_predicate_instructions(
     start_pc: usize,
     predicate_type: &PredicateType,
     true_target: usize,
     false_target: usize,
-) -> (Vec<Instruction>, usize) {
+) -> Vec<Instruction> {
     let mut instructions = Vec::new();
     let mut pc = start_pc;
 
@@ -448,9 +446,8 @@ pub fn generate_opaque_predicate_instructions(
         op: Opcode::JUMP,
         imm: None,
     });
-    pc += 1;
 
-    (instructions, pc)
+    instructions
 }
 
 fn minimal_push_width(value: usize) -> u8 {
@@ -487,15 +484,17 @@ fn minimal_push_width_u64(value: u64) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use azoth_core::decoder::EncodedSize;
 
     #[test]
     fn test_byte_extraction_instructions() {
-        let (instructions, next_pc) = generate_byte_extraction_instructions(
+        let instructions = generate_byte_extraction_instructions(
             0x1000, 3,      // byte index
             0x7f,   // expected value
             0x2000, // match target
             0x3000, // fallback target
         );
+        let next_pc = 0x1000 + instructions.size();
 
         // Verify we have all expected instructions
         assert!(!instructions.is_empty());
@@ -519,12 +518,13 @@ mod tests {
 
     #[test]
     fn test_opaque_predicate_always_false() {
-        let (instructions, next_pc) = generate_opaque_predicate_instructions(
+        let instructions = generate_opaque_predicate_instructions(
             0x1000,
             &PredicateType::AlwaysFalse,
             0x2000,
             0x3000,
         );
+        let next_pc = 0x1000 + instructions.size();
 
         assert!(!instructions.is_empty());
         assert_eq!(instructions[0].pc, 0x1000);
@@ -540,11 +540,12 @@ mod tests {
 
     #[test]
     fn test_storage_check_instructions() {
-        let (instructions, next_pc) = generate_storage_check_instructions(
+        let instructions = generate_storage_check_instructions(
             0x1000, 0x7a3c, // Random storage slot
             0x2000, // Match target (if zero)
             0x3000, // Fallback target (if non-zero)
         );
+        let next_pc = 0x1000 + instructions.size();
 
         // Verify we have all expected instructions
         assert!(!instructions.is_empty());
@@ -584,7 +585,7 @@ mod tests {
     #[test]
     fn test_storage_check_small_slot() {
         // Test with a small slot value (1-byte PUSH)
-        let (instructions, _) = generate_storage_check_instructions(
+        let instructions = generate_storage_check_instructions(
             0x1000, 0x05, // Small slot
             0x2000, 0x3000,
         );
@@ -597,7 +598,7 @@ mod tests {
     #[test]
     fn test_storage_check_large_slot() {
         // Test with a larger slot value (2-byte PUSH)
-        let (instructions, _) = generate_storage_check_instructions(
+        let instructions = generate_storage_check_instructions(
             0x1000, 0xabcd, // Larger slot requiring 2 bytes
             0x2000, 0x3000,
         );
@@ -609,7 +610,7 @@ mod tests {
 
     #[test]
     fn test_storage_check_instruction_sequence() {
-        let (instructions, _) = generate_storage_check_instructions(0x1000, 0x100, 0x2000, 0x3000);
+        let instructions = generate_storage_check_instructions(0x1000, 0x100, 0x2000, 0x3000);
 
         // Verify the sequence order
         let opcodes: Vec<_> = instructions.iter().map(|i| &i.op).collect();
