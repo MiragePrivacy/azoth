@@ -220,8 +220,7 @@ mod tests {
         ];
 
         let preserve_bytes = HashMap::new();
-        let mapping =
-            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
+        let mapping = generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
 
         assert_eq!(mapping.len(), 3);
 
@@ -255,8 +254,7 @@ mod tests {
         let selectors = vec![];
         let preserve_bytes = HashMap::new();
         let seed = Seed::generate();
-        let mapping =
-            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
+        let mapping = generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
 
         assert!(mapping.is_empty());
     }
@@ -288,8 +286,7 @@ mod tests {
         preserve_bytes.insert(0x23b872dd, 3);
         preserve_bytes.insert(0x095ea7b3, 3);
 
-        let mapping =
-            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
+        let mapping = generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
 
         assert_eq!(mapping.len(), 3);
 
@@ -330,8 +327,7 @@ mod tests {
         ];
 
         let preserve_bytes = HashMap::new();
-        let mapping =
-            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
+        let mapping = generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
 
         for (selector, token_bytes) in &mapping {
             let token = u32::from_be_bytes([
@@ -391,8 +387,7 @@ mod tests {
 
         // Third selector has no preservation constraint
 
-        let mapping =
-            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
+        let mapping = generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
 
         assert_eq!(mapping.len(), 3);
 
@@ -467,8 +462,7 @@ mod tests {
         preserve_bytes.insert(0x23b872dd, 2); // Tier 2: byte[2]
         preserve_bytes.insert(0x095ea7b3, 3); // Tier 3: byte[3]
 
-        let mapping =
-            generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
+        let mapping = generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
 
         // For each selector, verify the token would pass the byte extraction check
         for selector_obj in &selectors {
@@ -543,6 +537,9 @@ mod tests {
         let mapping_b =
             generate_selector_token_mapping(&selectors, &seed, &preserve_bytes).unwrap();
 
-        assert_eq!(mapping_a, mapping_b, "Same seed should produce same mapping");
+        assert_eq!(
+            mapping_a, mapping_b,
+            "Same seed should produce same mapping"
+        );
     }
 }

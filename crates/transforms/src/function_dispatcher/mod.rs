@@ -29,10 +29,7 @@ impl FunctionDispatcher {
         }
     }
 
-    pub fn with_dispatcher_info_and_seed(
-        dispatcher_info: DispatcherInfo,
-        seed: Seed,
-    ) -> Self {
+    pub fn with_dispatcher_info_and_seed(dispatcher_info: DispatcherInfo, seed: Seed) -> Self {
         Self {
             cached_dispatcher: Some(dispatcher_info),
             seed: Some(seed),
@@ -406,15 +403,11 @@ impl Transform for FunctionDispatcher {
                 "Using lightweight dispatcher obfuscation path"
             );
             let preserve_bytes = HashMap::new();
-            let seed = self
-                .seed
-                .as_ref()
-                .ok_or_else(|| Error::Generic("dispatcher: seed required for token mapping".into()))?;
-            let mapping = generate_selector_token_mapping(
-                &dispatcher_info.selectors,
-                seed,
-                &preserve_bytes,
-            )?;
+            let seed = self.seed.as_ref().ok_or_else(|| {
+                Error::Generic("dispatcher: seed required for token mapping".into())
+            })?;
+            let mapping =
+                generate_selector_token_mapping(&dispatcher_info.selectors, seed, &preserve_bytes)?;
             if self.apply_dispatcher_patches(
                 ir,
                 &runtime_instructions,

@@ -171,9 +171,10 @@ pub async fn obfuscate_bytecode(
             "Function dispatcher detected with {} selectors - adding FunctionDispatcher transform",
             dispatcher.selectors.len()
         );
-        all_transforms.push(Box::new(
-            FunctionDispatcher::with_dispatcher_info_and_seed(dispatcher, config.seed.clone()),
-        ));
+        all_transforms.push(Box::new(FunctionDispatcher::with_dispatcher_info_and_seed(
+            dispatcher,
+            config.seed.clone(),
+        )));
     } else {
         tracing::debug!(
             "No function dispatcher detected in runtime - skipping FunctionDispatcher transform"
