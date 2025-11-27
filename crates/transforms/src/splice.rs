@@ -4,7 +4,7 @@
 //! controller → body) into the CFG when size/gas budgets permit, expanding the
 //! code surface with realistic function chains.
 //!
-//! Assembly example (conceptual):
+//! Assembly example:
 //! ```assembly
 //! // Original dispatcher path
 //! PUSH4 0xfeedbeef

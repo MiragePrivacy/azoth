@@ -4,7 +4,7 @@
 //! clusters (dispatcher tiers, stub+decoy pairs, storage gates) to preserve
 //! logical adjacency while changing layout.
 //!
-//! Assembly sketch:
+//! Assembly example:
 //! ```assembly
 //! // Blocks before
 //! [dispatcher_tier_0][controller_real][decoy_stub][storage_gate]

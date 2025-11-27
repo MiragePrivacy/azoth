@@ -4,7 +4,7 @@
 //! dispatcher/controllers set a slot, later controllers verify it before
 //! routing, forcing stateful execution order.
 //!
-//! Assembly example (simplified):
+//! Assembly example:
 //! ```assembly
 //! // Dispatcher path for `bond` (sets gate)
 //! PUSH32 gate_slot
