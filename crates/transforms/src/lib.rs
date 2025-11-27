@@ -148,10 +148,9 @@ mod tests {
     async fn collect_protected_helpers_mark_dispatcher_metadata() {
         // let's build a small CFG and synthesize dispatcher-related metadata.
         let bytecode = STORAGE_BYTECODE.trim();
-        let (mut cfg_ir, _, _, _) =
-            process_bytecode_to_cfg(bytecode, false, bytecode, false)
-                .await
-                .unwrap();
+        let (mut cfg_ir, _, _, _) = process_bytecode_to_cfg(bytecode, false, bytecode, false)
+            .await
+            .unwrap();
 
         // two body nodes to tag; fallback to first two bodies.
         let mut bodies: Vec<_> = cfg_ir
@@ -180,7 +179,13 @@ mod tests {
 
         assert!(pcs.contains(&10), "dispatcher push pc should be protected");
         assert!(pcs.contains(&20), "controller push pc should be protected");
-        assert!(nodes.contains(&dnode), "dispatcher node should be protected");
-        assert!(nodes.contains(&cnode), "controller node should be protected");
+        assert!(
+            nodes.contains(&dnode),
+            "dispatcher node should be protected"
+        );
+        assert!(
+            nodes.contains(&cnode),
+            "controller node should be protected"
+        );
     }
 }
