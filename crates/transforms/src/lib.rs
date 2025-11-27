@@ -1,18 +1,20 @@
-pub mod function_dispatcher;
 pub mod arithmetic_chain;
 pub mod cluster_shuffle;
+pub mod function_dispatcher;
 pub mod jump_address_transformer;
 pub mod obfuscator;
 pub mod opaque_predicate;
 pub mod push_split;
-pub mod slot_shuffle;
 pub mod shuffle;
+pub mod slot_shuffle;
 pub mod splice;
 pub mod storage_gates;
 
 use azoth_core::cfg_ir::CfgIrBundle;
 use azoth_core::Opcode;
+use petgraph::graph::NodeIndex;
 use rand::rngs::StdRng;
+use std::collections::HashSet;
 
 use thiserror::Error;
 
@@ -71,4 +73,65 @@ pub fn parse_push_opcode(opcode_str: &str) -> Option<(Opcode, usize)> {
         }
     }
     None
+}
+
+/// Collect PCs tied to dispatcher/controller metadata that should not be rewritten by
+/// transforms that target generic PUSH patterns.
+pub fn collect_protected_pcs(ir: &CfgIrBundle) -> HashSet<usize> {
+    let mut set = HashSet::new();
+    if let Some(patches) = &ir.dispatcher_patches {
+        for (_, pc, _, _) in patches {
+            set.insert(*pc);
+        }
+    }
+    if let Some(patches) = &ir.stub_patches {
+        for (_, pc, _, _) in patches {
+            set.insert(*pc);
+        }
+    }
+    if let Some(patches) = &ir.decoy_patches {
+        for (_, pc, _, _) in patches {
+            set.insert(*pc);
+        }
+    }
+    if let Some(patches) = &ir.controller_patches {
+        for (_, pc, _, _) in patches {
+            set.insert(*pc);
+        }
+    }
+    set
+}
+
+/// Collect nodes associated with dispatcher/controller metadata so transforms can skip
+/// whole blocks if desired.
+pub fn collect_protected_nodes(ir: &CfgIrBundle) -> HashSet<NodeIndex> {
+    let mut nodes = HashSet::new();
+    if let Some(patches) = &ir.dispatcher_patches {
+        for (node, _, _, _) in patches {
+            nodes.insert(*node);
+        }
+    }
+    if let Some(patches) = &ir.stub_patches {
+        for (node, _, _, _) in patches {
+            nodes.insert(*node);
+        }
+    }
+    if let Some(patches) = &ir.decoy_patches {
+        for (node, _, _, _) in patches {
+            nodes.insert(*node);
+        }
+    }
+    if let Some(patches) = &ir.controller_patches {
+        for (node, _, _, _) in patches {
+            nodes.insert(*node);
+        }
+    }
+    if let Some(controller_pcs) = &ir.dispatcher_controller_pcs {
+        for pc in controller_pcs.values() {
+            if let Some(node) = ir.pc_to_block.get(pc) {
+                nodes.insert(*node);
+            }
+        }
+    }
+    nodes
 }
