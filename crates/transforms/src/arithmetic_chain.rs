@@ -48,4 +48,3 @@ impl Transform for ArithmeticChain {
         Ok(false)
     }
 }
-

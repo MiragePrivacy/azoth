@@ -27,6 +27,7 @@ use rand::rngs::StdRng;
 use tracing::debug;
 
 /// Storage mutation + gate insertion.
+#[derive(Default)]
 pub struct StorageGates;
 
 impl StorageGates {
