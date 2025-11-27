@@ -135,3 +135,52 @@ pub fn collect_protected_nodes(ir: &CfgIrBundle) -> HashSet<NodeIndex> {
     }
     nodes
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use azoth_core::cfg_ir::Block;
+    use azoth_core::process_bytecode_to_cfg;
+
+    const STORAGE_BYTECODE: &str = include_str!("../../../tests/bytecode/storage.hex");
+
+    #[tokio::test]
+    async fn collect_protected_helpers_mark_dispatcher_metadata() {
+        // let's build a small CFG and synthesize dispatcher-related metadata.
+        let bytecode = STORAGE_BYTECODE.trim();
+        let (mut cfg_ir, _, _, _) =
+            process_bytecode_to_cfg(bytecode, false, bytecode, false)
+                .await
+                .unwrap();
+
+        // two body nodes to tag; fallback to first two bodies.
+        let mut bodies: Vec<_> = cfg_ir
+            .cfg
+            .node_indices()
+            .filter(|n| matches!(cfg_ir.cfg[*n], Block::Body(_)))
+            .collect();
+        assert!(bodies.len() >= 2, "storage fixture should have body blocks");
+        bodies.sort_by_key(|n| {
+            if let Block::Body(ref b) = cfg_ir.cfg[*n] {
+                b.start_pc
+            } else {
+                0
+            }
+        });
+        let dnode = bodies[0];
+        let cnode = bodies[1];
+
+        // fake dispatcher patch and controller patch entries.
+        cfg_ir.dispatcher_patches = Some(vec![(dnode, 10, 2, 0xdeadbeef)]);
+        cfg_ir.controller_patches = Some(vec![(cnode, 20, 2, 0xcafebabe)]);
+        cfg_ir.dispatcher_controller_pcs = Some(vec![(0xdeadbeef, 10)].into_iter().collect());
+
+        let pcs = collect_protected_pcs(&cfg_ir);
+        let nodes = collect_protected_nodes(&cfg_ir);
+
+        assert!(pcs.contains(&10), "dispatcher push pc should be protected");
+        assert!(pcs.contains(&20), "controller push pc should be protected");
+        assert!(nodes.contains(&dnode), "dispatcher node should be protected");
+        assert!(nodes.contains(&cnode), "controller node should be protected");
+    }
+}
