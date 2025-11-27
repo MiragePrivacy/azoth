@@ -8,6 +8,7 @@ pub mod push_split;
 pub mod slot_shuffle;
 pub mod shuffle;
 pub mod splice;
+pub mod storage_gates;
 
 use azoth_core::cfg_ir::CfgIrBundle;
 use azoth_core::Opcode;
