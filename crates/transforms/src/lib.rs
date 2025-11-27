@@ -1,8 +1,13 @@
 pub mod function_dispatcher;
+pub mod arithmetic_chain;
+pub mod cluster_shuffle;
 pub mod jump_address_transformer;
 pub mod obfuscator;
 pub mod opaque_predicate;
+pub mod push_split;
+pub mod slot_shuffle;
 pub mod shuffle;
+pub mod splice;
 
 use azoth_core::cfg_ir::CfgIrBundle;
 use azoth_core::Opcode;
