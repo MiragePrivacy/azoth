@@ -39,7 +39,7 @@ struct TierNodes {
     decoy_pc: usize,
     invalid_pc: usize,
 }
-
+ 
 /// Stub patch information: (stub_node, stub_push_pc, push_width, decoy_node)
 type StubPatchInfo = (NodeIndex, usize, u8, NodeIndex);
 
