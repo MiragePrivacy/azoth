@@ -4,6 +4,17 @@
 //! module and synthesizing it into concrete EVM bytecode instructions that are inserted
 //! into the control flow graph. The layout process transforms the high-level obfuscation
 //! plan into actual executable code that implements the multi-tier dispatcher pattern.
+//!
+//! Stub/decoy blocks
+//! 
+//! Each tier we synthesize includes a trio of helper blocks:
+//! * `invalid`: a `JUMPDEST` + `INVALID` sink used by decoys.
+//! * `decoy`: looks like a controller but routes to `invalid` or on to the real controller
+//!   after a conditional; its jump target is patched later (`decoy_patches`).
+//! * `stub`: tiny trampoline that always jumps to the decoy; its PUSH immediate is patched later
+//!   (`stub_patches`) to keep pointing at the decoy after PC reindexing.
+//! We track these PCs so downstream transforms can mark them as protected and avoid rewriting
+//! their PUSH/JUMP patterns.
 
 use super::blueprint::{ControllerPatternConfig, DispatcherBlueprint, TierAssignment};
 use super::controller::{
@@ -27,7 +38,7 @@ struct TierNodes {
     decoy_pc: usize,
     invalid_pc: usize,
 }
-
+ 
 /// Stub patch information: (stub_node, stub_push_pc, push_width, decoy_node)
 type StubPatchInfo = (NodeIndex, usize, u8, NodeIndex);
 
