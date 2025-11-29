@@ -145,7 +145,11 @@ impl AggregatedStats {
 
     /// Returns the top N most common replacements sorted by frequency.
     pub fn top_replacements(&self, n: usize) -> Vec<(&Replacement, usize)> {
-        let mut sorted: Vec<_> = self.replacement_counts.iter().map(|(k, &v)| (k, v)).collect();
+        let mut sorted: Vec<_> = self
+            .replacement_counts
+            .iter()
+            .map(|(k, &v)| (k, v))
+            .collect();
         sorted.sort_by(|a, b| b.1.cmp(&a.1));
         sorted.truncate(n);
         sorted
@@ -314,7 +318,9 @@ pub fn compare_sources(pre_source: &str, post_source: &str) -> DiffResult {
         .to_string();
 
     let colored_printer = ColoredDiffPrinter::new(&input.interner);
-    let colored_diff = diff.unified_diff(&colored_printer, config, &input).to_string();
+    let colored_diff = diff
+        .unified_diff(&colored_printer, config, &input)
+        .to_string();
 
     // Compute statistics
     let hunks: Vec<_> = diff.hunks().collect();

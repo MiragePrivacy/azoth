@@ -80,8 +80,7 @@ impl super::Command for DecompileDiffArgs {
             join_set.spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
 
-                let transforms =
-                    build_passes(&passes).map_err(|e| format!("build_passes: {e}"))?;
+                let transforms = build_passes(&passes).map_err(|e| format!("build_passes: {e}"))?;
 
                 // Each iteration uses a fresh random seed
                 let config = ObfuscationConfig {
@@ -98,12 +97,10 @@ impl super::Command for DecompileDiffArgs {
                     hex::decode(obf_result.obfuscated_runtime.trim_start_matches("0x"))
                         .map_err(|e| format!("hex decode: {e}"))?;
 
-                let diff_result = decompile_diff::compare(
-                    pre_bytes.as_ref().clone().into(),
-                    post_bytes.into(),
-                )
-                .await
-                .map_err(|e| format!("decompile: {e}"))?;
+                let diff_result =
+                    decompile_diff::compare(pre_bytes.as_ref().clone().into(), post_bytes.into())
+                        .await
+                        .map_err(|e| format!("decompile: {e}"))?;
 
                 Ok(diff_result)
             });
