@@ -8,6 +8,7 @@
 //!   motifs, and measures n-gram diversity for multiple n values before producing a Markdown
 //!   report.
 
+pub mod decompile_diff;
 pub mod metrics;
 pub use metrics::{Metrics, collect_metrics, compare};
 
