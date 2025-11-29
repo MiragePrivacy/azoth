@@ -40,7 +40,7 @@ jobs:
           fi
 
           # Run decompile-diff and capture output
-          OUTPUT=$(./target/release/azoth decompile-diff \
+          OUTPUT=$(RUST_LOG=error ./target/release/azoth decompile-diff \
             "$DEPLOYMENT" \
             --runtime "$RUNTIME" \
             --passes "" \
