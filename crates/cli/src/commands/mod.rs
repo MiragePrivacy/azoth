@@ -5,6 +5,7 @@ use std::error::Error;
 pub mod analyze;
 pub mod cfg;
 pub mod decode;
+pub mod decompile_diff;
 pub mod obfuscate;
 pub mod strip;
 
@@ -46,6 +47,8 @@ pub enum Cmd {
     Obfuscate(obfuscate::ObfuscateArgs),
     /// Run obfuscation analysis across multiple seeds
     Analyze(analyze::AnalyzeArgs),
+    /// Compare decompiled output before and after obfuscation
+    DecompileDiff(decompile_diff::DecompileDiffArgs),
 }
 
 /// Trait for executing CLI subcommands.
@@ -70,6 +73,7 @@ impl Command for Cmd {
             Cmd::Cfg(args) => args.execute().await,
             Cmd::Obfuscate(args) => args.execute().await,
             Cmd::Analyze(args) => args.execute().await,
+            Cmd::DecompileDiff(args) => args.execute().await,
         }
     }
 }

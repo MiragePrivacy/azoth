@@ -1,0 +1,107 @@
+name: Analysis
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  decompile-diff:
+    name: Decompile Diff
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+
+      - name: Build azoth CLI
+        run: cargo build --bin azoth --release
+
+      - name: Run decompile-diff analysis
+        id: analysis
+        run: |
+          DEPLOYMENT="examples/escrow-bytecode/artifacts/deployment_bytecode.hex"
+          RUNTIME="examples/escrow-bytecode/artifacts/runtime_bytecode.hex"
+
+          if [[ ! -f "$DEPLOYMENT" ]] || [[ ! -f "$RUNTIME" ]]; then
+            echo "::error::Bytecode artifacts not found"
+            exit 1
+          fi
+
+          # Run decompile-diff, capturing statistics to stdout and diff to file
+          RUST_LOG=error ./target/release/azoth decompile-diff \
+            "$DEPLOYMENT" \
+            --runtime "$RUNTIME" \
+            --passes "" \
+            --iterations 50 \
+            --changed-only \
+            -o decompile-diff.txt \
+            > statistics.txt 2>&1 || true
+
+      - name: Create or update PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const statistics = fs.readFileSync('statistics.txt', 'utf8');
+            const diff = fs.readFileSync('decompile-diff.txt', 'utf8');
+            const sha = context.payload.pull_request.head.sha.substring(0, 7);
+
+            const commentMarker = '<!-- decompile-diff-analysis -->';
+            const body = [
+              commentMarker,
+              '## Decompile Diff Analysis',
+              '',
+              statistics,
+              '',
+              '<details>',
+              '<summary>Full Diff Output</summary>',
+              '',
+              '```diff',
+              diff,
+              '```',
+              '',
+              '</details>',
+              '',
+              `<sub>Commit ${sha}</sub>`,
+            ].join('\n');
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existingComment = comments.find(c => c.body.includes(commentMarker));
+
+            if (existingComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: body,
+              });
+              console.log(`Updated existing comment ${existingComment.id}`);
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+              console.log('Created new comment');
+            }

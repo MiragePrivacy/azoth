@@ -55,8 +55,10 @@ impl std::fmt::Debug for ObfuscationConfig {
 /// Result of the obfuscation pipeline
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObfuscationResult {
-    /// The obfuscated bytecode as hex string (with 0x prefix)
+    /// The obfuscated deployment bytecode as hex string (with 0x prefix)
     pub obfuscated_bytecode: String,
+    /// The obfuscated runtime bytecode as hex string (with 0x prefix)
+    pub obfuscated_runtime: String,
     /// Original bytecode size in bytes
     pub original_size: usize,
     /// Obfuscated bytecode size in bytes  
@@ -601,6 +603,7 @@ pub async fn obfuscate_bytecode(
 
     Ok(ObfuscationResult {
         obfuscated_bytecode: format!("0x{}", hex::encode(&final_bytecode)),
+        obfuscated_runtime: format!("0x{}", hex::encode(&obfuscated_bytes)),
         original_size,
         obfuscated_size,
         size_increase_percentage,
