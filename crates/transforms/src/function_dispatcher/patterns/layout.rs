@@ -13,6 +13,7 @@
 //!   after a conditional; its jump target is patched later (`decoy_patches`).
 //! * `stub`: tiny trampoline that always jumps to the decoy; its PUSH immediate is patched later
 //!   (`stub_patches`) to keep pointing at the decoy after PC reindexing.
+//!
 //! We track these PCs so downstream transforms can mark them as protected and avoid rewriting
 //! their PUSH/JUMP patterns.
 
