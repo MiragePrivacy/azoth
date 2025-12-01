@@ -6,7 +6,7 @@
 //! plan into actual executable code that implements the multi-tier dispatcher pattern.
 //!
 //! Stub/decoy blocks
-//! 
+//!
 //! Each tier we synthesize includes a trio of helper blocks:
 //! * `invalid`: a `JUMPDEST` + `INVALID` sink used by decoys.
 //! * `decoy`: looks like a controller but routes to `invalid` or on to the real controller
@@ -38,7 +38,7 @@ struct TierNodes {
     decoy_pc: usize,
     invalid_pc: usize,
 }
- 
+
 /// Stub patch information: (stub_node, stub_push_pc, push_width, decoy_node)
 type StubPatchInfo = (NodeIndex, usize, u8, NodeIndex);
 
