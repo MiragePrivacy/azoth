@@ -1,3 +1,4 @@
+use crate::arithmetic_chain::ArithmeticChain;
 use crate::function_dispatcher::FunctionDispatcher;
 use crate::Transform;
 use azoth_core::seed::Seed;
@@ -34,7 +35,7 @@ impl Default for ObfuscationConfig {
     fn default() -> Self {
         Self {
             seed: Seed::generate(),
-            transforms: Vec::new(),
+            transforms: vec![Box::new(ArithmeticChain::new())],
             preserve_unknown_opcodes: true,
         }
     }
@@ -498,11 +499,13 @@ pub async fn obfuscate_bytecode(
     );
 
     // Step 7: Encode back to bytecode (always with original for unknown opcode preservation)
-    let obfuscated_bytes = encoder::encode(&all_instructions, &bytes)?;
+    let mut obfuscated_bytes = encoder::encode(&all_instructions, &bytes)?;
 
     tracing::debug!("  Encoded to {} bytes", obfuscated_bytes.len());
 
-    tracing::debug!("  Validating obfuscated runtime jump targets");
+    // Validate BEFORE appending data section - data section bytes would be
+    // misinterpreted as code by the decoder, causing spurious validation failures
+    tracing::debug!("  Validating obfuscated runtime jump targets ({} bytes)", obfuscated_bytes.len());
     if let Err(e) = validator::validate_jump_targets(&obfuscated_bytes).await {
         eprintln!("\nVALIDATION FAILED");
         eprintln!("Error: {}", e);
@@ -534,7 +537,21 @@ pub async fn obfuscate_bytecode(
     }
     tracing::debug!("  Jump validation passed");
 
-    // Step 8: Reassemble final bytecode
+    // Append arithmetic chain data section to runtime bytecode AFTER validation
+    // This data is loaded via CODECOPY at runtime
+    if let Some(ref data_section) = cfg_ir.arithmetic_chain_data {
+        tracing::debug!(
+            "  Appending {} bytes of arithmetic chain data section to runtime",
+            data_section.len()
+        );
+        obfuscated_bytes.extend_from_slice(data_section);
+        tracing::debug!(
+            "  Runtime bytecode size with data section: {} bytes",
+            obfuscated_bytes.len()
+        );
+    }
+
+    // Step 8: Reassemble final bytecode (init + runtime with data section + auxdata)
     let final_bytecode = cfg_ir.clean_report.reassemble(&obfuscated_bytes);
     let obfuscated_size = final_bytecode.len();
 

@@ -155,6 +155,8 @@ pub struct CfgIrBundle {
     pub dispatcher_info: Option<crate::detection::DispatcherInfo>,
     /// Block nodes that are part of the dispatcher (either original or added by transform).
     pub dispatcher_blocks: HashSet<usize>,
+    /// Data section bytes to append to bytecode for arithmetic chain CODECOPY loads.
+    pub arithmetic_chain_data: Option<Vec<u8>>,
 }
 
 impl CfgIrBundle {
@@ -1296,6 +1298,7 @@ pub fn build_cfg_ir(
         controller_patches: None,
         dispatcher_info,
         dispatcher_blocks: HashSet::new(),
+        arithmetic_chain_data: None,
     };
     let body_blocks = bundle
         .cfg
