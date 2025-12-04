@@ -14,3 +14,8 @@ tracing-subscriber.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
+
+alloy = "1.1"
+heimdall-decompiler = { git = "https://github.com/Jon-Becker/heimdall-rs", tag = "0.9.0" }
+imara-diff = "0.2"
+owo-colors = "4"
