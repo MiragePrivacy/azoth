@@ -46,6 +46,10 @@ pub enum OperationKind {
     },
     ReindexPcs,
     PatchJumpImmediates,
+    /// Dispatcher selector tokens patched across multiple blocks.
+    PatchDispatcher {
+        blocks_modified: usize,
+    },
     ReplaceBody {
         instruction_count: usize,
     },

@@ -5,7 +5,7 @@ pub(crate) mod token;
 
 use crate::function_dispatcher::token::generate_selector_token_mapping;
 use crate::{Error, Result, Transform};
-use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle};
+use azoth_core::cfg_ir::{Block, CfgIrBundle};
 use azoth_core::decoder::Instruction;
 use azoth_core::detection::{detect_function_dispatcher, DispatcherInfo};
 use azoth_core::seed::Seed;
@@ -82,11 +82,29 @@ impl FunctionDispatcher {
         ir: &mut CfgIrBundle,
         edits: Vec<(NodeIndex, usize, Opcode, Option<String>)>,
     ) -> Result<bool> {
-        let mut modified = false;
-
+        // Group edits by node to batch modifications
+        let mut edits_by_node: HashMap<NodeIndex, Vec<(usize, Opcode, Option<String>)>> =
+            HashMap::new();
         for (node, pc, opcode, immediate) in edits {
-            let changed = self.patch_block(ir, node, |body| {
-                if let Some(instr) = body.instructions.iter_mut().find(|ins| ins.pc == pc) {
+            edits_by_node
+                .entry(node)
+                .or_default()
+                .push((pc, opcode, immediate));
+        }
+
+        // Build batch modifications
+        let mut modifications = Vec::new();
+        for (node, node_edits) in edits_by_node {
+            let original = match ir.cfg.node_weight(node) {
+                Some(Block::Body(body)) => body.clone(),
+                _ => continue,
+            };
+
+            let mut new_body = original.clone();
+            let mut changed = false;
+
+            for (pc, opcode, immediate) in node_edits {
+                if let Some(instr) = new_body.instructions.iter_mut().find(|ins| ins.pc == pc) {
                     let immediate_matches = match (&immediate, &instr.imm) {
                         (Some(expected), Some(actual)) => actual == expected,
                         (None, None) => true,
@@ -95,16 +113,25 @@ impl FunctionDispatcher {
 
                     if instr.op != opcode || !immediate_matches {
                         instr.op = opcode;
-                        instr.imm = immediate.clone();
-                        return true;
+                        instr.imm = immediate;
+                        changed = true;
                     }
                 }
-                false
-            })?;
-            modified |= changed;
+            }
+
+            if changed {
+                modifications.push((node, new_body));
+            }
         }
 
-        Ok(modified)
+        if modifications.is_empty() {
+            return Ok(false);
+        }
+
+        ir.patch_dispatcher_blocks(modifications)
+            .map_err(|e| Error::CoreError(e.to_string()))?;
+
+        Ok(true)
     }
 
     /// Re-applies dispatcher patches after PC reindexing with remapped controller PCs.
@@ -232,7 +259,7 @@ impl FunctionDispatcher {
         mapping: &HashMap<u32, Vec<u8>>,
     ) -> Result<bool> {
         let nodes: Vec<_> = ir.cfg.node_indices().collect();
-        let mut modified = false;
+        let mut modifications = Vec::new();
 
         for node in nodes {
             let original = match ir.cfg.node_weight(node) {
@@ -277,32 +304,18 @@ impl FunctionDispatcher {
             }
 
             if changed {
-                ir.overwrite_block(node, new_body)
-                    .map_err(|e| Error::CoreError(e.to_string()))?;
-                modified = true;
+                modifications.push((node, new_body));
             }
         }
 
-        Ok(modified)
-    }
-
-    fn patch_block<F>(&self, ir: &mut CfgIrBundle, node: NodeIndex, mut f: F) -> Result<bool>
-    where
-        F: FnMut(&mut BlockBody) -> bool,
-    {
-        let original = match ir.cfg.node_weight(node) {
-            Some(Block::Body(body)) => body.clone(),
-            _ => return Ok(false),
-        };
-
-        let mut new_body = original.clone();
-        if f(&mut new_body) {
-            ir.overwrite_block(node, new_body)
-                .map_err(|e| Error::CoreError(e.to_string()))?;
-            Ok(true)
-        } else {
-            Ok(false)
+        if modifications.is_empty() {
+            return Ok(false);
         }
+
+        ir.patch_dispatcher_blocks(modifications)
+            .map_err(|e| Error::CoreError(e.to_string()))?;
+
+        Ok(true)
     }
 
     pub(crate) fn apply_dispatcher_patches(
