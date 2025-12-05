@@ -14,6 +14,14 @@ use std::collections::HashMap;
 /// Operations recorded in the CFG trace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OperationKind {
+    /// Marks the beginning of a transform phase.
+    TransformStart {
+        name: String,
+    },
+    /// Marks the end of a transform phase.
+    TransformEnd {
+        name: String,
+    },
     Build {
         body_blocks: usize,
         sections: usize,
