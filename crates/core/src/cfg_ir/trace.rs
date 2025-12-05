@@ -92,6 +92,9 @@ pub struct CfgIrSnapshot {
     /// Block node indices that are part of the dispatcher (original or added by transform).
     #[serde(default)]
     pub dispatcher_blocks: Vec<usize>,
+    /// PCs that should not be modified by transforms (dispatcher/controller metadata).
+    #[serde(default)]
+    pub protected_pcs: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +237,23 @@ pub fn snapshot_bundle(bundle: &CfgIrBundle) -> CfgIrSnapshot {
 
     let sections = bundle.sections.iter().map(SectionSnapshot::from).collect();
 
+    // Collect protected PCs from all patch types
+    let mut protected_pcs = Vec::new();
+    if let Some(patches) = &bundle.dispatcher_patches {
+        protected_pcs.extend(patches.iter().map(|(_, pc, _, _)| *pc));
+    }
+    if let Some(patches) = &bundle.stub_patches {
+        protected_pcs.extend(patches.iter().map(|(_, pc, _, _)| *pc));
+    }
+    if let Some(patches) = &bundle.decoy_patches {
+        protected_pcs.extend(patches.iter().map(|(_, pc, _, _)| *pc));
+    }
+    if let Some(patches) = &bundle.controller_patches {
+        protected_pcs.extend(patches.iter().map(|(_, pc, _, _)| *pc));
+    }
+    protected_pcs.sort_unstable();
+    protected_pcs.dedup();
+
     CfgIrSnapshot {
         blocks,
         edges,
@@ -245,6 +265,7 @@ pub fn snapshot_bundle(bundle: &CfgIrBundle) -> CfgIrSnapshot {
         runtime_bounds: bundle.runtime_bounds,
         dispatcher_info: bundle.dispatcher_info.clone(),
         dispatcher_blocks: bundle.dispatcher_blocks.iter().copied().collect(),
+        protected_pcs,
     }
 }
 
