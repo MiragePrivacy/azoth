@@ -207,7 +207,7 @@ fn build_trace_groups(trace: &[TraceEvent]) -> Vec<TraceGroup> {
                     groups.push(group);
                 }
                 // Events after this transform get named after it
-                pending_name = format!("Post-{}", name);
+                pending_name = format!("Post-{name}");
             }
             OperationKind::Finalize => {
                 // Finalize gets its own group
@@ -460,13 +460,11 @@ fn render_header(f: &mut Frame<'_>, area: Rect, _app: &App) {
         Span::styled(" Quit", Style::default().fg(Color::DarkGray)),
     ]);
 
-    let shortcuts_widget = Paragraph::new(shortcuts)
-        .alignment(ratatui::layout::Alignment::Right);
+    let shortcuts_widget = Paragraph::new(shortcuts).alignment(ratatui::layout::Alignment::Right);
 
     f.render_widget(logo, chunks[0]);
     f.render_widget(shortcuts_widget, chunks[1]);
 }
-
 
 fn render_main(f: &mut Frame<'_>, area: Rect, app: &mut App) {
     let chunks = Layout::default()
@@ -520,7 +518,11 @@ fn render_list(f: &mut Frame<'_>, area: Rect, app: &mut App) {
         })
         .collect();
 
-    let title_right = format!(" {} groups, {} events ", app.groups.len(), app.debug.trace.len());
+    let title_right = format!(
+        " {} groups, {} events ",
+        app.groups.len(),
+        app.debug.trace.len()
+    );
     let list = List::new(items)
         .block(
             Block::default()
@@ -1020,13 +1022,13 @@ fn format_control_flow(control: &BlockControlSnapshot) -> String {
 /// Format a jump target snapshot
 fn format_jump_target(target: &JumpTargetSnapshot) -> String {
     let dest = match &target.kind {
-        TraceJumpTargetKind::Block { node } => format!("block {}", node),
-        TraceJumpTargetKind::Raw { value } => format!("pc {:#x}", value),
+        TraceJumpTargetKind::Block { node } => format!("block {node}"),
+        TraceJumpTargetKind::Raw { value } => format!("pc {value:#x}"),
     };
     let enc = match target.encoding {
         JumpEncoding::Absolute => "absolute",
         JumpEncoding::RuntimeRelative => "runtime-relative",
         JumpEncoding::PcRelative => "pc-relative",
     };
-    format!("{} ({})", dest, enc)
+    format!("{dest} ({enc})")
 }
