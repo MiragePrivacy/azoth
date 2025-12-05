@@ -1311,6 +1311,7 @@ dependencies = [
  "azoth-analysis",
  "azoth-core",
  "azoth-transform",
+ "azoth-tui",
  "clap",
  "hex",
  "owo-colors",
@@ -1396,7 +1397,6 @@ name = "azoth-tui"
 version = "0.1.0"
 dependencies = [
  "azoth-core",
- "clap",
  "crossterm",
  "ratatui",
  "serde",

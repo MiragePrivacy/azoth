@@ -3,13 +3,12 @@ name = "azoth-tui"
 version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "azoth-tui"
-path = "src/main.rs"
+[lib]
+name = "azoth_tui"
+path = "src/lib.rs"
 
 [dependencies]
 azoth-core = { path = "../core" }
-clap = { workspace = true, features = ["derive"] }
 crossterm = "0.28"
 ratatui = "0.29"
 serde.workspace = true
