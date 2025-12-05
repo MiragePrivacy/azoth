@@ -77,6 +77,21 @@ enum ListEntry {
         #[allow(dead_code)]
         group_idx: usize,
     },
+    /// Grouped consecutive symbolic immediate operations (collapsible)
+    SymbolicGroup {
+        trace_indices: Vec<usize>,
+        #[allow(dead_code)]
+        group_idx: usize,
+        /// First trace index used as unique key for expansion state
+        key: usize,
+        expanded: bool,
+    },
+    /// Individual symbolic operation within an expanded SymbolicGroup
+    SymbolicOperation {
+        trace_idx: usize,
+        #[allow(dead_code)]
+        group_idx: usize,
+    },
 }
 
 /// Azoth TUI - Debug trace viewer
@@ -104,6 +119,8 @@ struct App {
     groups: Vec<TraceGroup>,
     /// Expanded edge groups (keyed by first trace index)
     expanded_edge_groups: std::collections::HashSet<usize>,
+    /// Expanded symbolic groups (keyed by first trace index)
+    expanded_symbolic_groups: std::collections::HashSet<usize>,
     /// Flattened list of visible entries
     visible_entries: Vec<ListEntry>,
     /// Selected index in visible_entries
@@ -122,7 +139,9 @@ impl App {
     fn new(debug: DebugOutput) -> Self {
         let groups = build_trace_groups(&debug.trace);
         let expanded_edge_groups = std::collections::HashSet::new();
-        let visible_entries = build_visible_entries(&groups, &debug.trace, &expanded_edge_groups);
+        let expanded_symbolic_groups = std::collections::HashSet::new();
+        let visible_entries =
+            build_visible_entries(&groups, &debug.trace, &expanded_edge_groups, &expanded_symbolic_groups);
         let mut list_state = ListState::default();
         if !visible_entries.is_empty() {
             list_state.select(Some(0));
@@ -131,6 +150,7 @@ impl App {
             debug,
             groups,
             expanded_edge_groups,
+            expanded_symbolic_groups,
             visible_entries,
             selected: 0,
             list_state,
@@ -141,8 +161,12 @@ impl App {
     }
 
     fn rebuild_visible(&mut self) {
-        self.visible_entries =
-            build_visible_entries(&self.groups, &self.debug.trace, &self.expanded_edge_groups);
+        self.visible_entries = build_visible_entries(
+            &self.groups,
+            &self.debug.trace,
+            &self.expanded_edge_groups,
+            &self.expanded_symbolic_groups,
+        );
         // Clamp selection
         if self.selected >= self.visible_entries.len() {
             self.selected = self.visible_entries.len().saturating_sub(1);
@@ -157,10 +181,12 @@ impl App {
     #[allow(dead_code)]
     fn current_trace(&self) -> Option<&TraceEvent> {
         match self.current_entry()? {
-            ListEntry::Operation { trace_idx, .. } | ListEntry::EdgeOperation { trace_idx, .. } => {
-                self.debug.trace.get(*trace_idx)
-            }
-            ListEntry::GroupHeader { .. } | ListEntry::EdgeGroup { .. } => None,
+            ListEntry::Operation { trace_idx, .. }
+            | ListEntry::EdgeOperation { trace_idx, .. }
+            | ListEntry::SymbolicOperation { trace_idx, .. } => self.debug.trace.get(*trace_idx),
+            ListEntry::GroupHeader { .. }
+            | ListEntry::EdgeGroup { .. }
+            | ListEntry::SymbolicGroup { .. } => None,
         }
     }
 
@@ -193,6 +219,14 @@ impl App {
                     self.expanded_edge_groups.remove(&key);
                 } else {
                     self.expanded_edge_groups.insert(key);
+                }
+                self.rebuild_visible();
+            }
+            Some(ListEntry::SymbolicGroup { key, .. }) => {
+                if self.expanded_symbolic_groups.contains(&key) {
+                    self.expanded_symbolic_groups.remove(&key);
+                } else {
+                    self.expanded_symbolic_groups.insert(key);
                 }
                 self.rebuild_visible();
             }
@@ -310,10 +344,41 @@ const fn is_edge_operation(kind: &OperationKind) -> bool {
     )
 }
 
+/// Check if an operation kind is a symbolic immediate operation
+const fn is_symbolic_operation(kind: &OperationKind) -> bool {
+    matches!(kind, OperationKind::WriteSymbolicImmediates { .. })
+}
+
+/// Helper to collect consecutive operations matching a predicate
+fn collect_consecutive<F>(
+    group: &TraceGroup,
+    trace: &[TraceEvent],
+    start: usize,
+    predicate: F,
+) -> Vec<usize>
+where
+    F: Fn(&OperationKind) -> bool,
+{
+    let mut indices = vec![group.event_indices[start]];
+    let mut j = start + 1;
+    while j < group.event_indices.len() {
+        let next_idx = group.event_indices[j];
+        let next_event = &trace[next_idx];
+        if predicate(&next_event.kind) {
+            indices.push(next_idx);
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    indices
+}
+
 fn build_visible_entries(
     groups: &[TraceGroup],
     trace: &[TraceEvent],
     expanded_edge_groups: &std::collections::HashSet<usize>,
+    expanded_symbolic_groups: &std::collections::HashSet<usize>,
 ) -> Vec<ListEntry> {
     let mut entries = Vec::new();
     for (gi, group) in groups.iter().enumerate() {
@@ -331,23 +396,12 @@ fn build_visible_entries(
 
                 // Check if this is an edge operation
                 if is_edge_operation(&event.kind) {
-                    // Collect consecutive edge operations
-                    let mut edge_indices = vec![trace_idx];
-                    let mut j = i + 1;
-                    while j < group.event_indices.len() {
-                        let next_idx = group.event_indices[j];
-                        let next_event = &trace[next_idx];
-                        if is_edge_operation(&next_event.kind) {
-                            edge_indices.push(next_idx);
-                            j += 1;
-                        } else {
-                            break;
-                        }
-                    }
+                    let edge_indices = collect_consecutive(group, trace, i, is_edge_operation);
+                    let count = edge_indices.len();
 
                     // Only group if there are multiple consecutive edge ops
-                    if edge_indices.len() > 1 {
-                        let key = edge_indices[0]; // Use first trace index as key
+                    if count > 1 {
+                        let key = edge_indices[0];
                         let expanded = expanded_edge_groups.contains(&key);
                         entries.push(ListEntry::EdgeGroup {
                             trace_indices: edge_indices.clone(),
@@ -355,7 +409,6 @@ fn build_visible_entries(
                             key,
                             expanded,
                         });
-                        // If expanded, add individual edge operations
                         if expanded {
                             for &idx in &edge_indices {
                                 entries.push(ListEntry::EdgeOperation {
@@ -364,7 +417,38 @@ fn build_visible_entries(
                                 });
                             }
                         }
-                        i = j;
+                        i += count;
+                    } else {
+                        entries.push(ListEntry::Operation {
+                            trace_idx,
+                            group_idx: gi,
+                        });
+                        i += 1;
+                    }
+                // Check if this is a symbolic operation
+                } else if is_symbolic_operation(&event.kind) {
+                    let symbolic_indices = collect_consecutive(group, trace, i, is_symbolic_operation);
+                    let count = symbolic_indices.len();
+
+                    // Only group if there are multiple consecutive symbolic ops
+                    if count > 1 {
+                        let key = symbolic_indices[0];
+                        let expanded = expanded_symbolic_groups.contains(&key);
+                        entries.push(ListEntry::SymbolicGroup {
+                            trace_indices: symbolic_indices.clone(),
+                            group_idx: gi,
+                            key,
+                            expanded,
+                        });
+                        if expanded {
+                            for &idx in &symbolic_indices {
+                                entries.push(ListEntry::SymbolicOperation {
+                                    trace_idx: idx,
+                                    group_idx: gi,
+                                });
+                            }
+                        }
+                        i += count;
                     } else {
                         entries.push(ListEntry::Operation {
                             trace_idx,
@@ -633,7 +717,8 @@ fn render_list(f: &mut Frame<'_>, area: Rect, app: &mut App) {
                     };
                     ListItem::new(format!("  {icon} Edges ({})", trace_indices.len())).style(style)
                 }
-                ListEntry::EdgeOperation { trace_idx, .. } => {
+                ListEntry::EdgeOperation { trace_idx, .. }
+                | ListEntry::SymbolicOperation { trace_idx, .. } => {
                     let event = &app.debug.trace[*trace_idx];
                     let kind_str = format_operation_kind_short(&event.kind);
                     let diff_str = format_diff_summary(&event.diff);
@@ -643,6 +728,22 @@ fn render_list(f: &mut Frame<'_>, area: Rect, app: &mut App) {
                         Style::default().fg(Color::Gray)
                     };
                     ListItem::new(format!("    {kind_str} {diff_str}")).style(style)
+                }
+                ListEntry::SymbolicGroup {
+                    trace_indices,
+                    expanded,
+                    ..
+                } => {
+                    let icon = if *expanded { "▼" } else { "▶" };
+                    let style = if is_selected {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Yellow)
+                    };
+                    ListItem::new(format!("  {icon} Symbolic ({})", trace_indices.len()))
+                        .style(style)
                 }
             }
         })
@@ -680,7 +781,8 @@ fn render_detail(f: &mut Frame<'_>, area: Rect, app: &mut App) {
             format_group_detail_lines(name, *op_count, &app.groups, &app.debug.trace)
         }
         Some(ListEntry::Operation { trace_idx, .. })
-        | Some(ListEntry::EdgeOperation { trace_idx, .. }) => {
+        | Some(ListEntry::EdgeOperation { trace_idx, .. })
+        | Some(ListEntry::SymbolicOperation { trace_idx, .. }) => {
             if let Some(event) = app.debug.trace.get(*trace_idx) {
                 format_operation_detail_lines(event)
             } else {
@@ -689,6 +791,9 @@ fn render_detail(f: &mut Frame<'_>, area: Rect, app: &mut App) {
         }
         Some(ListEntry::EdgeGroup { trace_indices, .. }) => {
             format_edge_group_detail_lines(trace_indices, &app.debug.trace)
+        }
+        Some(ListEntry::SymbolicGroup { trace_indices, .. }) => {
+            format_symbolic_group_detail_lines(trace_indices, &app.debug.trace)
         }
         None => vec![Line::from("No selection")],
     };
@@ -879,6 +984,58 @@ fn format_edge_group_detail_lines(
                 _ => format!("  {}", format_operation_kind_short(&event.kind)),
             };
             lines.push(Line::from(desc));
+        }
+    }
+
+    lines
+}
+
+fn format_symbolic_group_detail_lines(
+    trace_indices: &[usize],
+    trace: &[TraceEvent],
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    // Header
+    lines.push(Line::from(Span::styled(
+        format!("═══ Symbolic Immediates ({}) ═══", trace_indices.len()),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    // Collect nodes
+    let mut nodes: Vec<usize> = Vec::new();
+    for &idx in trace_indices {
+        if let Some(event) = trace.get(idx) {
+            if let OperationKind::WriteSymbolicImmediates { node } = &event.kind {
+                nodes.push(*node);
+            }
+        }
+    }
+
+    lines.push(Line::from(Span::styled(
+        "Summary:",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(format!(
+        "  Blocks with symbolic writes: {}",
+        nodes.len()
+    )));
+    lines.push(Line::from(""));
+
+    // List individual operations
+    lines.push(Line::from(Span::styled(
+        "Operations:",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+
+    for &idx in trace_indices {
+        if let Some(event) = trace.get(idx) {
+            if let OperationKind::WriteSymbolicImmediates { node } = &event.kind {
+                lines.push(Line::from(format!("  Symbolic({node})")));
+            }
         }
     }
 
