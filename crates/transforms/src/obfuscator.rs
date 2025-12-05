@@ -222,6 +222,9 @@ pub async fn obfuscate_bytecode(
                 pre_instruction_count
             );
 
+            // Record transform start for trace grouping
+            cfg_ir.record_transform_start(transform_name);
+
             // Apply transform with deterministic RNG
             let transform_changed = match transform.apply(&mut cfg_ir, &mut shared_rng) {
                 Ok(changed) => {
@@ -233,6 +236,9 @@ pub async fn obfuscate_bytecode(
                     false
                 }
             };
+
+            // Record transform end for trace grouping
+            cfg_ir.record_transform_end(transform_name);
 
             let post_instruction_count = count_instructions_in_cfg(&cfg_ir);
             let post_block_count = cfg_ir.cfg.node_count();

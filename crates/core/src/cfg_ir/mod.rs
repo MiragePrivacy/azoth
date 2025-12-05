@@ -17,10 +17,10 @@ use std::collections::{HashMap, HashSet};
 mod trace;
 
 pub use trace::{
-    BlockBodySnapshot, BlockChangeSet, BlockModification, BlockPcDiff, BlockSnapshot,
-    BlockSnapshotKind, CfgIrDiff, CfgIrSnapshot, EdgeChangeSet, EdgeSnapshot, InstructionPcDiff,
-    JumpTargetKind as TraceJumpTargetKind, JumpTargetSnapshot, OperationKind, SectionSnapshot,
-    TraceEvent, block_modification, block_start_pcs, diff_from_block_changes,
+    BlockBodySnapshot, BlockChangeSet, BlockControlSnapshot, BlockModification, BlockPcDiff,
+    BlockSnapshot, BlockSnapshotKind, CfgIrDiff, CfgIrSnapshot, EdgeChangeSet, EdgeSnapshot,
+    InstructionPcDiff, JumpTargetKind as TraceJumpTargetKind, JumpTargetSnapshot, OperationKind,
+    SectionSnapshot, TraceEvent, block_modification, block_start_pcs, diff_from_block_changes,
     diff_from_edge_changes, diff_from_pc_remap, snapshot_block_body, snapshot_bundle,
     snapshot_edges,
 };
@@ -194,6 +194,28 @@ impl CfgIrBundle {
             kind,
             diff,
             remapped_pcs,
+        });
+    }
+
+    /// Records the start of a transform phase for trace grouping.
+    pub fn record_transform_start(&mut self, name: &str) {
+        self.trace.push(TraceEvent {
+            kind: OperationKind::TransformStart {
+                name: name.to_string(),
+            },
+            diff: CfgIrDiff::None,
+            remapped_pcs: None,
+        });
+    }
+
+    /// Records the end of a transform phase for trace grouping.
+    pub fn record_transform_end(&mut self, name: &str) {
+        self.trace.push(TraceEvent {
+            kind: OperationKind::TransformEnd {
+                name: name.to_string(),
+            },
+            diff: CfgIrDiff::None,
+            remapped_pcs: None,
         });
     }
 
