@@ -168,6 +168,9 @@ pub async fn obfuscate_bytecode(
 
     let has_dispatcher = dispatcher_info.is_some();
 
+    // Store dispatcher info in bundle for snapshot/TUI visualization
+    cfg_ir.dispatcher_info = dispatcher_info.clone();
+
     if let Some(dispatcher) = dispatcher_info {
         tracing::debug!(
             "Function dispatcher detected with {} selectors - adding FunctionDispatcher transform",

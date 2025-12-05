@@ -86,6 +86,12 @@ pub struct CfgIrSnapshot {
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
     pub original_bytecode: Bytes,
     pub runtime_bounds: Option<(usize, usize)>,
+    /// Detected function dispatcher info (blocks that form the selector dispatch table).
+    #[serde(default)]
+    pub dispatcher_info: Option<crate::detection::DispatcherInfo>,
+    /// Block node indices that are part of the dispatcher (original or added by transform).
+    #[serde(default)]
+    pub dispatcher_blocks: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +243,8 @@ pub fn snapshot_bundle(bundle: &CfgIrBundle) -> CfgIrSnapshot {
         selector_mapping: bundle.selector_mapping.clone(),
         original_bytecode: Bytes::from(bundle.original_bytecode.clone()),
         runtime_bounds: bundle.runtime_bounds,
+        dispatcher_info: bundle.dispatcher_info.clone(),
+        dispatcher_blocks: bundle.dispatcher_blocks.iter().copied().collect(),
     }
 }
 

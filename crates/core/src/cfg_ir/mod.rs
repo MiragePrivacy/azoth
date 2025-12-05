@@ -151,6 +151,10 @@ pub struct CfgIrBundle {
     pub stub_patches: Option<Vec<(NodeIndex, usize, u8, NodeIndex)>>,
     pub decoy_patches: Option<Vec<(NodeIndex, usize, u8, usize)>>,
     pub controller_patches: Option<Vec<(NodeIndex, usize, u8, usize)>>,
+    /// Detected function dispatcher info.
+    pub dispatcher_info: Option<crate::detection::DispatcherInfo>,
+    /// Block nodes that are part of the dispatcher (either original or added by transform).
+    pub dispatcher_blocks: HashSet<usize>,
 }
 
 impl CfgIrBundle {
@@ -1264,6 +1268,18 @@ pub fn build_cfg_ir(
 
     let pc_to_block = node_by_pc.clone();
 
+    // Detect function dispatcher for visualization
+    let dispatcher_info = if let Some((start, end)) = runtime_bounds {
+        let runtime_instructions: Vec<_> = instructions
+            .iter()
+            .filter(|i| i.pc >= start && i.pc < end)
+            .cloned()
+            .collect();
+        crate::detection::detect_function_dispatcher(&runtime_instructions)
+    } else {
+        crate::detection::detect_function_dispatcher(instructions)
+    };
+
     let mut bundle = CfgIrBundle {
         cfg,
         pc_to_block,
@@ -1278,6 +1294,8 @@ pub fn build_cfg_ir(
         stub_patches: None,
         decoy_patches: None,
         controller_patches: None,
+        dispatcher_info,
+        dispatcher_blocks: HashSet::new(),
     };
     let body_blocks = bundle
         .cfg
