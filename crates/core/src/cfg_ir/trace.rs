@@ -257,18 +257,39 @@ pub fn diff_from_block_changes(changes: Vec<BlockModification>) -> CfgIrDiff {
 }
 
 /// Creates a diff describing updated edges.
+///
+/// Edges are compared by their source, target, and kind - not by their ID,
+/// since edge IDs change when edges are removed and re-added.
 pub fn diff_from_edge_changes(
     node: NodeIndex,
     removed: Vec<EdgeSnapshot>,
     added: Vec<EdgeSnapshot>,
 ) -> CfgIrDiff {
-    if removed.is_empty() && added.is_empty() {
+    // Compare edges by their meaningful properties, ignoring ID
+    let edges_equivalent = |a: &EdgeSnapshot, b: &EdgeSnapshot| {
+        a.source == b.source && a.target == b.target && a.kind == b.kind
+    };
+
+    // Filter out edges that appear in both removed and added (unchanged edges)
+    let actually_removed: Vec<_> = removed
+        .iter()
+        .filter(|r| !added.iter().any(|a| edges_equivalent(r, a)))
+        .cloned()
+        .collect();
+
+    let actually_added: Vec<_> = added
+        .iter()
+        .filter(|a| !removed.iter().any(|r| edges_equivalent(a, r)))
+        .cloned()
+        .collect();
+
+    if actually_removed.is_empty() && actually_added.is_empty() {
         CfgIrDiff::None
     } else {
         CfgIrDiff::EdgeChanges(EdgeChangeSet {
             node: node.index(),
-            removed,
-            added,
+            removed: actually_removed,
+            added: actually_added,
         })
     }
 }
