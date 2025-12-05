@@ -57,10 +57,7 @@ enum ListEntry {
         group_idx: usize,
     },
     /// Individual operation
-    Operation {
-        trace_idx: usize,
-        group_idx: usize,
-    },
+    Operation { trace_idx: usize, group_idx: usize },
     /// Grouped consecutive edge operations (collapsible)
     EdgeGroup {
         trace_indices: Vec<usize>,
@@ -70,10 +67,7 @@ enum ListEntry {
         expanded: bool,
     },
     /// Individual edge operation within an expanded EdgeGroup
-    EdgeOperation {
-        trace_idx: usize,
-        group_idx: usize,
-    },
+    EdgeOperation { trace_idx: usize, group_idx: usize },
     /// Grouped consecutive symbolic immediate operations (collapsible)
     SymbolicGroup {
         trace_indices: Vec<usize>,
@@ -83,10 +77,7 @@ enum ListEntry {
         expanded: bool,
     },
     /// Individual symbolic operation within an expanded SymbolicGroup
-    SymbolicOperation {
-        trace_idx: usize,
-        group_idx: usize,
-    },
+    SymbolicOperation { trace_idx: usize, group_idx: usize },
 }
 
 /// Azoth TUI - Debug trace viewer
@@ -537,9 +528,9 @@ fn build_detail_cache(debug: &DebugOutput, groups: &[TraceGroup]) -> DetailCache
                 let edge_indices = collect_consecutive(group, &debug.trace, i, is_edge_operation);
                 if edge_indices.len() > 1 {
                     let key = edge_indices[0];
-                    edge_group_details
-                        .entry(key)
-                        .or_insert_with(|| format_edge_group_detail_lines(&edge_indices, &debug.trace));
+                    edge_group_details.entry(key).or_insert_with(|| {
+                        format_edge_group_detail_lines(&edge_indices, &debug.trace)
+                    });
                     i += edge_indices.len();
                 } else {
                     i += 1;
@@ -884,22 +875,20 @@ fn render_detail(f: &mut Frame<'_>, area: Rect, app: &mut App) {
 
     // Look up pre-computed detail lines from the cache
     let lines: &[Line<'static>] = match app.current_entry() {
-        Some(ListEntry::GroupHeader { group_idx, .. }) => {
-            app.detail_cache
-                .group_details
-                .get(*group_idx)
-                .map(Vec::as_slice)
-                .unwrap_or(&[])
-        }
+        Some(ListEntry::GroupHeader { group_idx, .. }) => app
+            .detail_cache
+            .group_details
+            .get(*group_idx)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
         Some(ListEntry::Operation { trace_idx, .. })
         | Some(ListEntry::EdgeOperation { trace_idx, .. })
-        | Some(ListEntry::SymbolicOperation { trace_idx, .. }) => {
-            app.detail_cache
-                .trace_details
-                .get(*trace_idx)
-                .map(Vec::as_slice)
-                .unwrap_or(&[])
-        }
+        | Some(ListEntry::SymbolicOperation { trace_idx, .. }) => app
+            .detail_cache
+            .trace_details
+            .get(*trace_idx)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
         Some(ListEntry::EdgeGroup { key, .. }) => app
             .detail_cache
             .edge_group_details
@@ -942,9 +931,7 @@ fn build_breadcrumb_title(app: &App) -> Line<'static> {
     spans.push(Span::raw(" "));
 
     match app.current_entry() {
-        Some(ListEntry::GroupHeader {
-            name, op_count, ..
-        }) => {
+        Some(ListEntry::GroupHeader { name, op_count, .. }) => {
             // Group name with count
             spans.push(Span::styled(
                 format!("{name} ({op_count})"),
@@ -1087,7 +1074,8 @@ fn build_breadcrumb_title(app: &App) -> Line<'static> {
                 spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
 
                 // Find the symbolic group this belongs to and position within it
-                let (sym_count, sym_pos) = find_symbolic_group_position(app, *group_idx, *trace_idx);
+                let (sym_count, sym_pos) =
+                    find_symbolic_group_position(app, *group_idx, *trace_idx);
                 spans.push(Span::styled(
                     format!("Symbolic ({sym_pos}/{sym_count})"),
                     Style::default().fg(Color::DarkGray),
@@ -1590,20 +1578,17 @@ fn format_operation_detail_lines(event: &TraceEvent) -> Vec<Line<'static>> {
             lines.push(Line::from(format!("  Blocks: {}", snap.blocks.len())));
             lines.push(Line::from(format!("  Edges: {}", snap.edges.len())));
             lines.push(Line::from(format!("  Sections: {}", snap.sections.len())));
+            if !snap.protected_pcs.is_empty() {
+                lines.push(Line::from(format!(
+                    "  Protected PCs: {}",
+                    snap.protected_pcs.len()
+                )));
+            }
             if let Some((start, end)) = snap.runtime_bounds {
                 lines.push(Line::from(format!(
                     "  Runtime bounds: 0x{start:x} - 0x{end:x}"
                 )));
             }
-            lines.push(Line::from(""));
-
-            // Annotated bytecode view
-            lines.push(Line::from(Span::styled(
-                "═══ Annotated Bytecode ═══",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )));
             lines.push(Line::from(""));
             lines.extend(format_annotated_bytecode(snap));
         }
@@ -1937,6 +1922,10 @@ fn format_annotated_bytecode(snap: &CfgIrSnapshot) -> Vec<Line<'static>> {
     let dispatcher_block_set: std::collections::HashSet<usize> =
         snap.dispatcher_blocks.iter().copied().collect();
 
+    // Build set of protected PCs
+    let protected_pcs: std::collections::HashSet<usize> =
+        snap.protected_pcs.iter().copied().collect();
+
     // Build selector lookups:
     // - original_selectors: set of original selector hex strings (from dispatcher_info)
     // - mapped_to_original: maps mapped token hex -> original selector value
@@ -1991,14 +1980,8 @@ fn format_annotated_bytecode(snap: &CfgIrSnapshot) -> Vec<Line<'static>> {
 
     // Header
     lines.push(Line::from(vec![
-        Span::styled(
-            "  LINE ",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::styled("│", Style::default().fg(Color::DarkGray)),
-        Span::styled("Sec", Style::default().fg(Color::LightRed)),
+        Span::raw(" "),
+        Span::styled("Sec  ", Style::default().fg(Color::LightRed)),
         Span::styled("│", Style::default().fg(Color::DarkGray)),
         Span::styled(" Block ", Style::default().fg(Color::Cyan)),
         Span::styled("│", Style::default().fg(Color::DarkGray)),
@@ -2010,7 +1993,7 @@ fn format_annotated_bytecode(snap: &CfgIrSnapshot) -> Vec<Line<'static>> {
         ),
     ]));
     lines.push(Line::from(Span::styled(
-        "───────┼───┼───────┼─────────────────────────────────────",
+        " ─────┼───────┼─────────────────────────────────────",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -2021,11 +2004,8 @@ fn format_annotated_bytecode(snap: &CfgIrSnapshot) -> Vec<Line<'static>> {
     for (line_no, (block_node, instr, block_info)) in all_instructions.iter().enumerate() {
         let mut spans = Vec::new();
 
-        // Line number (1-indexed)
-        spans.push(Span::styled(
-            format!("{:>6} ", line_no + 1),
-            Style::default().fg(Color::DarkGray),
-        ));
+        // Leading space
+        spans.push(Span::raw(" "));
 
         // Block start/end detection (needed for both section and block columns)
         let is_block_start = block_info.start_pc == instr.pc;
@@ -2058,11 +2038,11 @@ fn format_annotated_bytecode(snap: &CfgIrSnapshot) -> Vec<Line<'static>> {
         let dispatcher_str = if is_in_dispatcher {
             let color = Color::LightRed;
             let (pipe, label) = if is_dispatcher_start && is_dispatcher_end {
-                ("─", "──")
+                ("─", "────")
             } else if is_dispatcher_start {
-                ("┌", "──")
+                ("┌", "────")
             } else if is_dispatcher_end {
-                ("└", "──")
+                ("└", "────")
             } else {
                 // Show letter from "DISPATCHER" starting at offset 2
                 let label_idx = dispatcher_line_count.saturating_sub(2);
@@ -2076,13 +2056,12 @@ fn format_annotated_bytecode(snap: &CfgIrSnapshot) -> Vec<Line<'static>> {
             dispatcher_line_count += 1;
             vec![
                 Span::styled(pipe, Style::default().fg(color)),
-                Span::styled(format!("{:<2}", label), Style::default().fg(color)),
+                Span::styled(format!("{:<4}", label), Style::default().fg(color)),
             ]
         } else {
             dispatcher_line_count = 0; // Reset when not in dispatcher
-            vec![Span::styled("   ", Style::default())]
+            vec![Span::styled("     ", Style::default())]
         };
-        spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
         spans.extend(dispatcher_str);
 
         // Block indicator with block number at start
@@ -2136,10 +2115,10 @@ fn format_annotated_bytecode(snap: &CfgIrSnapshot) -> Vec<Line<'static>> {
         spans.push(Span::styled(trail_pipe, Style::default().fg(block_color)));
         spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
 
-        // PC
+        // PC (colored by block)
         spans.push(Span::styled(
             format!(" {:06x}   ", instr.pc),
-            Style::default().fg(Color::Blue),
+            Style::default().fg(block_color),
         ));
 
         // Opcode mnemonic
@@ -2183,6 +2162,11 @@ fn format_annotated_bytecode(snap: &CfgIrSnapshot) -> Vec<Line<'static>> {
                 .collect::<Vec<_>>()
                 .join(", ");
             comments.push(format!("from: {src_str}"));
+        }
+
+        // Protected PC annotation
+        if protected_pcs.contains(&instr.pc) {
+            comments.push("protected".to_string());
         }
 
         // Selector annotation for PUSH4 instructions
