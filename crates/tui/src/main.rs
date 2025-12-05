@@ -258,7 +258,7 @@ impl App {
         self.detail_scroll = 0;
     }
 
-    fn scroll_end(&mut self, content_height: u16) {
+    const fn scroll_end(&mut self, content_height: u16) {
         let visible_height = self.detail_area.height.saturating_sub(2); // Account for borders
         if content_height > visible_height {
             self.detail_scroll = content_height.saturating_sub(visible_height);
@@ -1941,7 +1941,7 @@ fn format_annotated_bytecode(snap: &CfgIrSnapshot) -> Vec<Line<'static>> {
     }
     if let Some(mapping) = &snap.selector_mapping {
         for (original, mapped) in mapping {
-            let mapped_hex: String = mapped.iter().map(|b| format!("{:02x}", b)).collect();
+            let mapped_hex: String = mapped.iter().map(|b| format!("{b:02x}")).collect();
             mapped_to_original.insert(mapped_hex, *original);
         }
     }
@@ -2056,7 +2056,7 @@ fn format_annotated_bytecode(snap: &CfgIrSnapshot) -> Vec<Line<'static>> {
             dispatcher_line_count += 1;
             vec![
                 Span::styled(pipe, Style::default().fg(color)),
-                Span::styled(format!("{:<4}", label), Style::default().fg(color)),
+                Span::styled(format!("{label:<4}"), Style::default().fg(color)),
             ]
         } else {
             dispatcher_line_count = 0; // Reset when not in dispatcher
@@ -2175,7 +2175,7 @@ fn format_annotated_bytecode(snap: &CfgIrSnapshot) -> Vec<Line<'static>> {
                 let imm_lower = imm.to_lowercase();
                 if let Some(&original) = mapped_to_original.get(&imm_lower) {
                     // This is a mapped selector - show original
-                    comments.push(format!("mapped selector (was 0x{:08x})", original));
+                    comments.push(format!("mapped selector (was 0x{original:08x})"));
                 } else if original_selectors.contains(&imm_lower) {
                     // This is an original selector
                     comments.push("selector".to_string());
