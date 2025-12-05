@@ -59,13 +59,11 @@ enum ListEntry {
     /// Individual operation
     Operation {
         trace_idx: usize,
-        #[allow(dead_code)]
         group_idx: usize,
     },
     /// Grouped consecutive edge operations (collapsible)
     EdgeGroup {
         trace_indices: Vec<usize>,
-        #[allow(dead_code)]
         group_idx: usize,
         /// First trace index used as unique key for expansion state
         key: usize,
@@ -74,13 +72,11 @@ enum ListEntry {
     /// Individual edge operation within an expanded EdgeGroup
     EdgeOperation {
         trace_idx: usize,
-        #[allow(dead_code)]
         group_idx: usize,
     },
     /// Grouped consecutive symbolic immediate operations (collapsible)
     SymbolicGroup {
         trace_indices: Vec<usize>,
-        #[allow(dead_code)]
         group_idx: usize,
         /// First trace index used as unique key for expansion state
         key: usize,
@@ -89,7 +85,6 @@ enum ListEntry {
     /// Individual symbolic operation within an expanded SymbolicGroup
     SymbolicOperation {
         trace_idx: usize,
-        #[allow(dead_code)]
         group_idx: usize,
     },
 }
@@ -111,6 +106,18 @@ struct TraceGroup {
     expanded: bool,
 }
 
+/// Pre-computed detail content for each entry type.
+struct DetailCache {
+    /// Detail lines for each trace event (indexed by trace_idx)
+    trace_details: Vec<Vec<Line<'static>>>,
+    /// Detail lines for each group header (indexed by group_idx)
+    group_details: Vec<Vec<Line<'static>>>,
+    /// Detail lines for edge groups (keyed by first trace index)
+    edge_group_details: std::collections::HashMap<usize, Vec<Line<'static>>>,
+    /// Detail lines for symbolic groups (keyed by first trace index)
+    symbolic_group_details: std::collections::HashMap<usize, Vec<Line<'static>>>,
+}
+
 /// Application state.
 struct App {
     /// The loaded debug output
@@ -123,6 +130,8 @@ struct App {
     expanded_symbolic_groups: std::collections::HashSet<usize>,
     /// Flattened list of visible entries
     visible_entries: Vec<ListEntry>,
+    /// Pre-computed detail content for all entries
+    detail_cache: DetailCache,
     /// Selected index in visible_entries
     selected: usize,
     /// List state for navigation
@@ -148,6 +157,10 @@ impl App {
             &expanded_edge_groups,
             &expanded_symbolic_groups,
         );
+
+        // Pre-compute all detail content at startup
+        let detail_cache = build_detail_cache(&debug, &groups);
+
         let mut list_state = ListState::default();
         if !visible_entries.is_empty() {
             list_state.select(Some(0));
@@ -158,6 +171,7 @@ impl App {
             expanded_edge_groups,
             expanded_symbolic_groups,
             visible_entries,
+            detail_cache,
             selected: 0,
             list_state,
             detail_scroll: 0,
@@ -488,6 +502,74 @@ fn build_visible_entries(
     entries
 }
 
+/// Build the detail cache for all entries at startup.
+///
+/// This pre-computes all detail content so that render_detail can simply
+/// look up the cached lines rather than recomputing them on every frame.
+fn build_detail_cache(debug: &DebugOutput, groups: &[TraceGroup]) -> DetailCache {
+    // Pre-compute detail lines for each trace event
+    let trace_details: Vec<Vec<Line<'static>>> = debug
+        .trace
+        .iter()
+        .map(format_operation_detail_lines)
+        .collect();
+
+    // Pre-compute detail lines for each group header
+    let group_details: Vec<Vec<Line<'static>>> = groups
+        .iter()
+        .map(|group| {
+            format_group_detail_lines(&group.name, group.event_indices.len(), groups, &debug.trace)
+        })
+        .collect();
+
+    // Pre-compute detail lines for edge groups and symbolic groups
+    // We need to identify all possible edge groups and symbolic groups
+    let mut edge_group_details = std::collections::HashMap::new();
+    let mut symbolic_group_details = std::collections::HashMap::new();
+
+    for group in groups {
+        let mut i = 0;
+        while i < group.event_indices.len() {
+            let trace_idx = group.event_indices[i];
+            let event = &debug.trace[trace_idx];
+
+            if is_edge_operation(&event.kind) {
+                let edge_indices = collect_consecutive(group, &debug.trace, i, is_edge_operation);
+                if edge_indices.len() > 1 {
+                    let key = edge_indices[0];
+                    edge_group_details
+                        .entry(key)
+                        .or_insert_with(|| format_edge_group_detail_lines(&edge_indices, &debug.trace));
+                    i += edge_indices.len();
+                } else {
+                    i += 1;
+                }
+            } else if is_symbolic_operation(&event.kind) {
+                let symbolic_indices =
+                    collect_consecutive(group, &debug.trace, i, is_symbolic_operation);
+                if symbolic_indices.len() > 1 {
+                    let key = symbolic_indices[0];
+                    symbolic_group_details.entry(key).or_insert_with(|| {
+                        format_symbolic_group_detail_lines(&symbolic_indices, &debug.trace)
+                    });
+                    i += symbolic_indices.len();
+                } else {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    DetailCache {
+        trace_details,
+        group_details,
+        edge_group_details,
+        symbolic_group_details,
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
@@ -800,35 +882,49 @@ fn render_detail(f: &mut Frame<'_>, area: Rect, app: &mut App) {
     // Store area for mouse scrolling
     app.detail_area = area;
 
-    let lines = match app.current_entry() {
-        Some(ListEntry::GroupHeader { name, op_count, .. }) => {
-            format_group_detail_lines(name, *op_count, &app.groups, &app.debug.trace)
+    // Look up pre-computed detail lines from the cache
+    let lines: &[Line<'static>] = match app.current_entry() {
+        Some(ListEntry::GroupHeader { group_idx, .. }) => {
+            app.detail_cache
+                .group_details
+                .get(*group_idx)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
         }
         Some(ListEntry::Operation { trace_idx, .. })
         | Some(ListEntry::EdgeOperation { trace_idx, .. })
         | Some(ListEntry::SymbolicOperation { trace_idx, .. }) => {
-            if let Some(event) = app.debug.trace.get(*trace_idx) {
-                format_operation_detail_lines(event)
-            } else {
-                vec![Line::from("No event found")]
-            }
+            app.detail_cache
+                .trace_details
+                .get(*trace_idx)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
         }
-        Some(ListEntry::EdgeGroup { trace_indices, .. }) => {
-            format_edge_group_detail_lines(trace_indices, &app.debug.trace)
-        }
-        Some(ListEntry::SymbolicGroup { trace_indices, .. }) => {
-            format_symbolic_group_detail_lines(trace_indices, &app.debug.trace)
-        }
-        None => vec![Line::from("No selection")],
+        Some(ListEntry::EdgeGroup { key, .. }) => app
+            .detail_cache
+            .edge_group_details
+            .get(key)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        Some(ListEntry::SymbolicGroup { key, .. }) => app
+            .detail_cache
+            .symbolic_group_details
+            .get(key)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        None => &[],
     };
 
     // Track content height for scroll bounds
     app.detail_content_height = lines.len() as u16;
 
-    let paragraph = Paragraph::new(lines)
+    // Build breadcrumb title based on current selection
+    let title = build_breadcrumb_title(app);
+
+    let paragraph = Paragraph::new(lines.to_vec())
         .block(
             Block::default()
-                .title(" Detail ")
+                .title(title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Green)),
         )
@@ -836,6 +932,238 @@ fn render_detail(f: &mut Frame<'_>, area: Rect, app: &mut App) {
         .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, area);
+}
+
+/// Build breadcrumb title for the detail panel based on current selection.
+///
+/// Format: " Group -> SubGroup (x/n) -> Operation "
+fn build_breadcrumb_title(app: &App) -> Line<'static> {
+    let mut spans = Vec::new();
+    spans.push(Span::raw(" "));
+
+    match app.current_entry() {
+        Some(ListEntry::GroupHeader {
+            name, op_count, ..
+        }) => {
+            // Group name with count
+            spans.push(Span::styled(
+                format!("{name} ({op_count})"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+        }
+        Some(ListEntry::Operation {
+            trace_idx,
+            group_idx,
+        }) => {
+            // Group (x/n) -> OperationName
+            if let Some(group) = app.groups.get(*group_idx) {
+                // Find position within group
+                let pos = group
+                    .event_indices
+                    .iter()
+                    .position(|&i| i == *trace_idx)
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                let total = group.event_indices.len();
+
+                spans.push(Span::styled(
+                    format!("{} ({pos}/{total})", group.name),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
+
+                // Get operation name from the trace event
+                let op_name = app
+                    .debug
+                    .trace
+                    .get(*trace_idx)
+                    .map(|e| format_operation_kind_full(&e.kind))
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                spans.push(Span::styled(
+                    op_name,
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+        Some(ListEntry::EdgeGroup {
+            trace_indices,
+            group_idx,
+            ..
+        }) => {
+            // Group -> Edges (n)
+            if let Some(group) = app.groups.get(*group_idx) {
+                spans.push(Span::styled(
+                    group.name.clone(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    format!("Edges ({})", trace_indices.len()),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+        Some(ListEntry::EdgeOperation {
+            trace_idx,
+            group_idx,
+        }) => {
+            // Group (x/n) -> Edges (x/n) -> OperationName
+            if let Some(group) = app.groups.get(*group_idx) {
+                // Find position within group
+                let group_pos = group
+                    .event_indices
+                    .iter()
+                    .position(|&i| i == *trace_idx)
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                let group_total = group.event_indices.len();
+
+                spans.push(Span::styled(
+                    format!("{} ({group_pos}/{group_total})", group.name),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
+
+                // Find the edge group this belongs to and position within it
+                let (edge_count, edge_pos) = find_edge_group_position(app, *group_idx, *trace_idx);
+                spans.push(Span::styled(
+                    format!("Edges ({edge_pos}/{edge_count})"),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
+
+                // Get operation name from the trace event
+                let op_name = app
+                    .debug
+                    .trace
+                    .get(*trace_idx)
+                    .map(|e| format_operation_kind_full(&e.kind))
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                spans.push(Span::styled(
+                    op_name,
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+        Some(ListEntry::SymbolicGroup {
+            trace_indices,
+            group_idx,
+            ..
+        }) => {
+            // Group -> Symbolic (n)
+            if let Some(group) = app.groups.get(*group_idx) {
+                spans.push(Span::styled(
+                    group.name.clone(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    format!("Symbolic ({})", trace_indices.len()),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+        Some(ListEntry::SymbolicOperation {
+            trace_idx,
+            group_idx,
+        }) => {
+            // Group (x/n) -> Symbolic (x/n) -> OperationName
+            if let Some(group) = app.groups.get(*group_idx) {
+                // Find position within group
+                let group_pos = group
+                    .event_indices
+                    .iter()
+                    .position(|&i| i == *trace_idx)
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                let group_total = group.event_indices.len();
+
+                spans.push(Span::styled(
+                    format!("{} ({group_pos}/{group_total})", group.name),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
+
+                // Find the symbolic group this belongs to and position within it
+                let (sym_count, sym_pos) = find_symbolic_group_position(app, *group_idx, *trace_idx);
+                spans.push(Span::styled(
+                    format!("Symbolic ({sym_pos}/{sym_count})"),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
+
+                // Get operation name from the trace event
+                let op_name = app
+                    .debug
+                    .trace
+                    .get(*trace_idx)
+                    .map(|e| format_operation_kind_full(&e.kind))
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                spans.push(Span::styled(
+                    op_name,
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+        None => {
+            spans.push(Span::styled(
+                "No selection",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+/// Find position of an edge operation within its edge group.
+fn find_edge_group_position(app: &App, group_idx: usize, trace_idx: usize) -> (usize, usize) {
+    // Look through visible entries to find the EdgeGroup containing this trace_idx
+    for entry in &app.visible_entries {
+        if let ListEntry::EdgeGroup {
+            trace_indices,
+            group_idx: g_idx,
+            ..
+        } = entry
+        {
+            if *g_idx == group_idx && trace_indices.contains(&trace_idx) {
+                let pos = trace_indices
+                    .iter()
+                    .position(|&i| i == trace_idx)
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                return (trace_indices.len(), pos);
+            }
+        }
+    }
+    (0, 0)
+}
+
+/// Find position of a symbolic operation within its symbolic group.
+fn find_symbolic_group_position(app: &App, group_idx: usize, trace_idx: usize) -> (usize, usize) {
+    // Look through visible entries to find the SymbolicGroup containing this trace_idx
+    for entry in &app.visible_entries {
+        if let ListEntry::SymbolicGroup {
+            trace_indices,
+            group_idx: g_idx,
+            ..
+        } = entry
+        {
+            if *g_idx == group_idx && trace_indices.contains(&trace_idx) {
+                let pos = trace_indices
+                    .iter()
+                    .position(|&i| i == trace_idx)
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                return (trace_indices.len(), pos);
+            }
+        }
+    }
+    (0, 0)
 }
 
 // === Formatting functions ===
@@ -881,19 +1209,11 @@ fn format_diff_summary(diff: &CfgIrDiff) -> String {
 
 fn format_group_detail_lines(
     name: &str,
-    op_count: usize,
+    _op_count: usize,
     groups: &[TraceGroup],
     trace: &[TraceEvent],
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled(
-        format!("═══ {name} ═══"),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(format!("Operations: {op_count}")));
-    lines.push(Line::from(""));
 
     // Find this group and summarize its operations
     for group in groups {
@@ -1039,15 +1359,6 @@ fn format_edge_group_detail_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
-    // Header
-    lines.push(Line::from(Span::styled(
-        format!("═══ Edge Operations ({}) ═══", trace_indices.len()),
-        Style::default()
-            .fg(Color::Magenta)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(""));
-
     // Count edge types
     let mut jump_count = 0;
     let mut branch_count = 0;
@@ -1118,15 +1429,6 @@ fn format_symbolic_group_detail_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
-    // Header
-    lines.push(Line::from(Span::styled(
-        format!("═══ Symbolic Immediates ({}) ═══", trace_indices.len()),
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(""));
-
     // Collect nodes
     let mut nodes: Vec<usize> = Vec::new();
     for &idx in trace_indices {
@@ -1166,15 +1468,6 @@ fn format_symbolic_group_detail_lines(
 
 fn format_operation_detail_lines(event: &TraceEvent) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-
-    // Operation header
-    lines.push(Line::from(Span::styled(
-        format!("═══ {} ═══", format_operation_kind_full(&event.kind)),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(""));
 
     // Diff details
     match &event.diff {
@@ -1643,7 +1936,6 @@ fn format_annotated_bytecode(snap: &CfgIrSnapshot) -> Vec<Line<'static>> {
     // Build set of dispatcher block nodes (includes blocks added by transform)
     let dispatcher_block_set: std::collections::HashSet<usize> =
         snap.dispatcher_blocks.iter().copied().collect();
-    let has_dispatcher_blocks = !dispatcher_block_set.is_empty() || dispatcher_range.is_some();
 
     // Build selector lookups:
     // - original_selectors: set of original selector hex strings (from dispatcher_info)
@@ -1696,15 +1988,6 @@ fn format_annotated_bytecode(snap: &CfgIrSnapshot) -> Vec<Line<'static>> {
         Color::Red,
         Color::Green,
     ];
-
-    // Legend at top (Dispatcher only)
-    if has_dispatcher_blocks {
-        lines.push(Line::from(vec![
-            Span::styled("■", Style::default().fg(Color::LightRed)),
-            Span::styled(" Dispatcher", Style::default().fg(Color::DarkGray)),
-        ]));
-    }
-    lines.push(Line::from(""));
 
     // Header
     lines.push(Line::from(vec![
