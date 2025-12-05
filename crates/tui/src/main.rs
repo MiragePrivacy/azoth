@@ -157,8 +157,9 @@ impl App {
     #[allow(dead_code)]
     fn current_trace(&self) -> Option<&TraceEvent> {
         match self.current_entry()? {
-            ListEntry::Operation { trace_idx, .. }
-            | ListEntry::EdgeOperation { trace_idx, .. } => self.debug.trace.get(*trace_idx),
+            ListEntry::Operation { trace_idx, .. } | ListEntry::EdgeOperation { trace_idx, .. } => {
+                self.debug.trace.get(*trace_idx)
+            }
             ListEntry::GroupHeader { .. } | ListEntry::EdgeGroup { .. } => None,
         }
     }
@@ -805,7 +806,10 @@ fn format_group_detail_lines(
     lines
 }
 
-fn format_edge_group_detail_lines(trace_indices: &[usize], trace: &[TraceEvent]) -> Vec<Line<'static>> {
+fn format_edge_group_detail_lines(
+    trace_indices: &[usize],
+    trace: &[TraceEvent],
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
     // Header
@@ -841,7 +845,9 @@ fn format_edge_group_detail_lines(trace_indices: &[usize], trace: &[TraceEvent])
         lines.push(Line::from(format!("  Unconditional jumps: {jump_count}")));
     }
     if branch_count > 0 {
-        lines.push(Line::from(format!("  Conditional branches: {branch_count}")));
+        lines.push(Line::from(format!(
+            "  Conditional branches: {branch_count}"
+        )));
     }
     if rebuild_count > 0 {
         lines.push(Line::from(format!("  Edge rebuilds: {rebuild_count}")));
