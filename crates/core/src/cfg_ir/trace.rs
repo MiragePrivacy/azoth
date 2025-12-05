@@ -22,6 +22,8 @@ pub enum OperationKind {
     TransformEnd {
         name: String,
     },
+    /// Marks the beginning of the finalization phase.
+    FinalizeStart,
     Build {
         body_blocks: usize,
         sections: usize,

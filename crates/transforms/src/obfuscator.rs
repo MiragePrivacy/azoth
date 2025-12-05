@@ -261,6 +261,9 @@ pub async fn obfuscate_bytecode(
         }
     }
 
+    // Start finalization phase for trace grouping
+    cfg_ir.record_finalize_start();
+
     // Step 4: Calculate metrics after transformation
     let final_block_count = cfg_ir.cfg.node_count();
     let final_instruction_count = count_instructions_in_cfg(&cfg_ir);

@@ -201,16 +201,14 @@ fn build_trace_groups(trace: &[TraceEvent]) -> Vec<TraceGroup> {
                     expanded: true,
                 });
             }
-            OperationKind::TransformEnd { name } => {
+            OperationKind::TransformEnd { .. } => {
                 // Close current group
                 if let Some(group) = current_group.take() {
                     groups.push(group);
                 }
-                // Events after this transform get named after it
-                pending_name = format!("Post-{name}");
             }
-            OperationKind::Finalize => {
-                // Finalize gets its own group
+            OperationKind::FinalizeStart => {
+                // Push any accumulated pending events as their own group
                 if !pending_events.is_empty() {
                     groups.push(TraceGroup {
                         name: std::mem::take(&mut pending_name),
@@ -218,11 +216,20 @@ fn build_trace_groups(trace: &[TraceEvent]) -> Vec<TraceGroup> {
                         expanded: true,
                     });
                 }
-                groups.push(TraceGroup {
+                // Start Finalize group
+                current_group = Some(TraceGroup {
                     name: "Finalize".to_string(),
-                    event_indices: vec![i],
+                    event_indices: Vec::new(),
                     expanded: true,
                 });
+            }
+            OperationKind::Finalize => {
+                // Add to current group (should be Finalize)
+                if let Some(ref mut group) = current_group {
+                    group.event_indices.push(i);
+                } else {
+                    pending_events.push(i);
+                }
             }
             _ => {
                 // Add to current transform group or pending
@@ -595,6 +602,7 @@ fn format_operation_kind_short(kind: &OperationKind) -> String {
             format!("PatchDispatcher({blocks_modified})")
         }
         OperationKind::ReplaceBody { instruction_count } => format!("Replace({instruction_count})"),
+        OperationKind::FinalizeStart => "▶ Finalize".to_string(),
         OperationKind::Finalize => "Finalize".to_string(),
     }
 }
@@ -874,6 +882,7 @@ fn format_operation_kind_full(kind: &OperationKind) -> String {
         OperationKind::ReplaceBody { instruction_count } => {
             format!("Replace Body ({instruction_count} instructions)")
         }
+        OperationKind::FinalizeStart => "Finalize Start".to_string(),
         OperationKind::Finalize => "Finalize".to_string(),
     }
 }

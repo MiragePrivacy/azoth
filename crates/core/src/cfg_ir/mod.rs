@@ -219,6 +219,15 @@ impl CfgIrBundle {
         });
     }
 
+    /// Records the start of the finalization phase for trace grouping.
+    pub fn record_finalize_start(&mut self) {
+        self.trace.push(TraceEvent {
+            kind: OperationKind::FinalizeStart,
+            diff: CfgIrDiff::None,
+            remapped_pcs: None,
+        });
+    }
+
     /// Replace the body of a block while keeping its connectivity metadata intact.
     pub fn overwrite_block(
         &mut self,
