@@ -62,6 +62,21 @@ enum ListEntry {
         #[allow(dead_code)]
         group_idx: usize,
     },
+    /// Grouped consecutive edge operations (collapsible)
+    EdgeGroup {
+        trace_indices: Vec<usize>,
+        #[allow(dead_code)]
+        group_idx: usize,
+        /// First trace index used as unique key for expansion state
+        key: usize,
+        expanded: bool,
+    },
+    /// Individual edge operation within an expanded EdgeGroup
+    EdgeOperation {
+        trace_idx: usize,
+        #[allow(dead_code)]
+        group_idx: usize,
+    },
 }
 
 /// Azoth TUI - Debug trace viewer
@@ -87,6 +102,8 @@ struct App {
     debug: DebugOutput,
     /// Grouped trace events
     groups: Vec<TraceGroup>,
+    /// Expanded edge groups (keyed by first trace index)
+    expanded_edge_groups: std::collections::HashSet<usize>,
     /// Flattened list of visible entries
     visible_entries: Vec<ListEntry>,
     /// Selected index in visible_entries
@@ -104,7 +121,8 @@ struct App {
 impl App {
     fn new(debug: DebugOutput) -> Self {
         let groups = build_trace_groups(&debug.trace);
-        let visible_entries = build_visible_entries(&groups);
+        let expanded_edge_groups = std::collections::HashSet::new();
+        let visible_entries = build_visible_entries(&groups, &debug.trace, &expanded_edge_groups);
         let mut list_state = ListState::default();
         if !visible_entries.is_empty() {
             list_state.select(Some(0));
@@ -112,6 +130,7 @@ impl App {
         Self {
             debug,
             groups,
+            expanded_edge_groups,
             visible_entries,
             selected: 0,
             list_state,
@@ -122,7 +141,8 @@ impl App {
     }
 
     fn rebuild_visible(&mut self) {
-        self.visible_entries = build_visible_entries(&self.groups);
+        self.visible_entries =
+            build_visible_entries(&self.groups, &self.debug.trace, &self.expanded_edge_groups);
         // Clamp selection
         if self.selected >= self.visible_entries.len() {
             self.selected = self.visible_entries.len().saturating_sub(1);
@@ -137,8 +157,9 @@ impl App {
     #[allow(dead_code)]
     fn current_trace(&self) -> Option<&TraceEvent> {
         match self.current_entry()? {
-            ListEntry::Operation { trace_idx, .. } => self.debug.trace.get(*trace_idx),
-            ListEntry::GroupHeader { .. } => None,
+            ListEntry::Operation { trace_idx, .. }
+            | ListEntry::EdgeOperation { trace_idx, .. } => self.debug.trace.get(*trace_idx),
+            ListEntry::GroupHeader { .. } | ListEntry::EdgeGroup { .. } => None,
         }
     }
 
@@ -159,11 +180,22 @@ impl App {
     }
 
     fn toggle_expand(&mut self) {
-        if let Some(ListEntry::GroupHeader { group_idx, .. }) = self.current_entry().cloned() {
-            if let Some(group) = self.groups.get_mut(group_idx) {
-                group.expanded = !group.expanded;
+        match self.current_entry().cloned() {
+            Some(ListEntry::GroupHeader { group_idx, .. }) => {
+                if let Some(group) = self.groups.get_mut(group_idx) {
+                    group.expanded = !group.expanded;
+                    self.rebuild_visible();
+                }
+            }
+            Some(ListEntry::EdgeGroup { key, .. }) => {
+                if self.expanded_edge_groups.contains(&key) {
+                    self.expanded_edge_groups.remove(&key);
+                } else {
+                    self.expanded_edge_groups.insert(key);
+                }
                 self.rebuild_visible();
             }
+            _ => {}
         }
     }
 
@@ -191,14 +223,14 @@ fn build_trace_groups(trace: &[TraceEvent]) -> Vec<TraceGroup> {
                     groups.push(TraceGroup {
                         name: std::mem::take(&mut pending_name),
                         event_indices: std::mem::take(&mut pending_events),
-                        expanded: true,
+                        expanded: false,
                     });
                 }
                 // Start new transform group
                 current_group = Some(TraceGroup {
                     name: name.clone(),
                     event_indices: Vec::new(),
-                    expanded: true,
+                    expanded: false,
                 });
             }
             OperationKind::TransformEnd { .. } => {
@@ -213,14 +245,14 @@ fn build_trace_groups(trace: &[TraceEvent]) -> Vec<TraceGroup> {
                     groups.push(TraceGroup {
                         name: std::mem::take(&mut pending_name),
                         event_indices: std::mem::take(&mut pending_events),
-                        expanded: true,
+                        expanded: false,
                     });
                 }
                 // Start Finalize group
                 current_group = Some(TraceGroup {
                     name: "Finalize".to_string(),
                     event_indices: Vec::new(),
-                    expanded: true,
+                    expanded: false,
                 });
             }
             OperationKind::Finalize => {
@@ -248,13 +280,13 @@ fn build_trace_groups(trace: &[TraceEvent]) -> Vec<TraceGroup> {
             groups.push(TraceGroup {
                 name: "All Operations".to_string(),
                 event_indices: pending_events,
-                expanded: true,
+                expanded: false,
             });
         } else {
             groups.push(TraceGroup {
                 name: pending_name,
                 event_indices: pending_events,
-                expanded: true,
+                expanded: false,
             });
         }
     }
@@ -267,7 +299,21 @@ fn build_trace_groups(trace: &[TraceEvent]) -> Vec<TraceGroup> {
     groups
 }
 
-fn build_visible_entries(groups: &[TraceGroup]) -> Vec<ListEntry> {
+/// Check if an operation kind is an edge-related operation
+const fn is_edge_operation(kind: &OperationKind) -> bool {
+    matches!(
+        kind,
+        OperationKind::SetUnconditionalJump { .. }
+            | OperationKind::SetConditionalJump { .. }
+            | OperationKind::RebuildEdges { .. }
+    )
+}
+
+fn build_visible_entries(
+    groups: &[TraceGroup],
+    trace: &[TraceEvent],
+    expanded_edge_groups: &std::collections::HashSet<usize>,
+) -> Vec<ListEntry> {
     let mut entries = Vec::new();
     for (gi, group) in groups.iter().enumerate() {
         entries.push(ListEntry::GroupHeader {
@@ -277,11 +323,61 @@ fn build_visible_entries(groups: &[TraceGroup]) -> Vec<ListEntry> {
             group_idx: gi,
         });
         if group.expanded {
-            for &trace_idx in &group.event_indices {
-                entries.push(ListEntry::Operation {
-                    trace_idx,
-                    group_idx: gi,
-                });
+            let mut i = 0;
+            while i < group.event_indices.len() {
+                let trace_idx = group.event_indices[i];
+                let event = &trace[trace_idx];
+
+                // Check if this is an edge operation
+                if is_edge_operation(&event.kind) {
+                    // Collect consecutive edge operations
+                    let mut edge_indices = vec![trace_idx];
+                    let mut j = i + 1;
+                    while j < group.event_indices.len() {
+                        let next_idx = group.event_indices[j];
+                        let next_event = &trace[next_idx];
+                        if is_edge_operation(&next_event.kind) {
+                            edge_indices.push(next_idx);
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Only group if there are multiple consecutive edge ops
+                    if edge_indices.len() > 1 {
+                        let key = edge_indices[0]; // Use first trace index as key
+                        let expanded = expanded_edge_groups.contains(&key);
+                        entries.push(ListEntry::EdgeGroup {
+                            trace_indices: edge_indices.clone(),
+                            group_idx: gi,
+                            key,
+                            expanded,
+                        });
+                        // If expanded, add individual edge operations
+                        if expanded {
+                            for &idx in &edge_indices {
+                                entries.push(ListEntry::EdgeOperation {
+                                    trace_idx: idx,
+                                    group_idx: gi,
+                                });
+                            }
+                        }
+                        i = j;
+                    } else {
+                        entries.push(ListEntry::Operation {
+                            trace_idx,
+                            group_idx: gi,
+                        });
+                        i += 1;
+                    }
+                } else {
+                    entries.push(ListEntry::Operation {
+                        trace_idx,
+                        group_idx: gi,
+                    });
+                    i += 1;
+                }
             }
         }
     }
@@ -521,6 +617,32 @@ fn render_list(f: &mut Frame<'_>, area: Rect, app: &mut App) {
                     };
                     ListItem::new(format!("  {kind_str} {diff_str}")).style(style)
                 }
+                ListEntry::EdgeGroup {
+                    trace_indices,
+                    expanded,
+                    ..
+                } => {
+                    let icon = if *expanded { "▼" } else { "▶" };
+                    let style = if is_selected {
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Magenta)
+                    };
+                    ListItem::new(format!("  {icon} Edges ({})", trace_indices.len())).style(style)
+                }
+                ListEntry::EdgeOperation { trace_idx, .. } => {
+                    let event = &app.debug.trace[*trace_idx];
+                    let kind_str = format_operation_kind_short(&event.kind);
+                    let diff_str = format_diff_summary(&event.diff);
+                    let style = if is_selected {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    ListItem::new(format!("    {kind_str} {diff_str}")).style(style)
+                }
             }
         })
         .collect();
@@ -556,12 +678,16 @@ fn render_detail(f: &mut Frame<'_>, area: Rect, app: &mut App) {
         Some(ListEntry::GroupHeader { name, op_count, .. }) => {
             format_group_detail_lines(name, *op_count, &app.groups, &app.debug.trace)
         }
-        Some(ListEntry::Operation { trace_idx, .. }) => {
+        Some(ListEntry::Operation { trace_idx, .. })
+        | Some(ListEntry::EdgeOperation { trace_idx, .. }) => {
             if let Some(event) = app.debug.trace.get(*trace_idx) {
                 format_operation_detail_lines(event)
             } else {
                 vec![Line::from("No event found")]
             }
+        }
+        Some(ListEntry::EdgeGroup { trace_indices, .. }) => {
+            format_edge_group_detail_lines(trace_indices, &app.debug.trace)
         }
         None => vec![Line::from("No selection")],
     };
@@ -673,6 +799,80 @@ fn format_group_detail_lines(
                 lines.push(Line::from(format!("  {op_type}: {count}")));
             }
             break;
+        }
+    }
+
+    lines
+}
+
+fn format_edge_group_detail_lines(trace_indices: &[usize], trace: &[TraceEvent]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    // Header
+    lines.push(Line::from(Span::styled(
+        format!("═══ Edge Operations ({}) ═══", trace_indices.len()),
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    // Count edge types
+    let mut jump_count = 0;
+    let mut branch_count = 0;
+    let mut rebuild_count = 0;
+
+    for &idx in trace_indices {
+        if let Some(event) = trace.get(idx) {
+            match &event.kind {
+                OperationKind::SetUnconditionalJump { .. } => jump_count += 1,
+                OperationKind::SetConditionalJump { .. } => branch_count += 1,
+                OperationKind::RebuildEdges { .. } => rebuild_count += 1,
+                _ => {}
+            }
+        }
+    }
+
+    lines.push(Line::from(Span::styled(
+        "Summary:",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    if jump_count > 0 {
+        lines.push(Line::from(format!("  Unconditional jumps: {jump_count}")));
+    }
+    if branch_count > 0 {
+        lines.push(Line::from(format!("  Conditional branches: {branch_count}")));
+    }
+    if rebuild_count > 0 {
+        lines.push(Line::from(format!("  Edge rebuilds: {rebuild_count}")));
+    }
+    lines.push(Line::from(""));
+
+    // List individual operations
+    lines.push(Line::from(Span::styled(
+        "Operations:",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+
+    for &idx in trace_indices {
+        if let Some(event) = trace.get(idx) {
+            let desc = match &event.kind {
+                OperationKind::SetUnconditionalJump { source, target } => {
+                    format!("  Jump: {source} → {target}")
+                }
+                OperationKind::SetConditionalJump {
+                    source,
+                    true_target,
+                    false_target,
+                } => {
+                    format!("  Branch: {source} → T:{true_target} / F:{false_target:?}")
+                }
+                OperationKind::RebuildEdges { node } => {
+                    format!("  Rebuild: {node}")
+                }
+                _ => format!("  {}", format_operation_kind_short(&event.kind)),
+            };
+            lines.push(Line::from(desc));
         }
     }
 
