@@ -50,7 +50,7 @@ pub mod scatter;
 pub mod types;
 
 use crate::{Error, Result, Transform};
-use azoth_core::cfg_ir::{Block, CfgIrBundle};
+use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle};
 use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
 use rand::rngs::StdRng;
@@ -207,7 +207,7 @@ impl ArithmeticChain {
         ctx: &ScatterContext,
         runtime_length: usize,
     ) -> Result<()> {
-        if let Block::Body(body) = &mut ir.cfg[node_idx] {
+        if let Block::Body(body) = &ir.cfg[node_idx] {
             // Compile the chain to instructions
             let compiled = compile_chain(chain, ctx, runtime_length);
 
@@ -217,8 +217,20 @@ impl ArithmeticChain {
                 ));
             }
 
-            // Replace the single PUSH32 instruction with the chain
-            body.instructions.splice(instr_idx..=instr_idx, compiled);
+            // Create new body with replaced instructions
+            let mut new_instructions = body.instructions.clone();
+            new_instructions.splice(instr_idx..=instr_idx, compiled);
+
+            let new_body = BlockBody {
+                start_pc: body.start_pc,
+                max_stack: body.max_stack,
+                control: body.control.clone(),
+                instructions: new_instructions,
+            };
+
+            // Use overwrite_block to record the trace
+            ir.overwrite_block(node_idx, new_body)
+                .map_err(|e| Error::Generic(e.to_string()))?;
         }
 
         Ok(())
