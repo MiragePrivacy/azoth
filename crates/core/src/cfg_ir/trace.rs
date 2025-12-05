@@ -29,6 +29,10 @@ pub enum OperationKind {
     OverwriteBlock {
         node: usize,
     },
+    /// Multiple blocks overwritten in a single batch operation.
+    OverwriteBlocks {
+        blocks_modified: usize,
+    },
     SetUnconditionalJump {
         source: usize,
         target: usize,

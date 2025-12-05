@@ -303,6 +303,53 @@ impl CfgIrBundle {
         Ok(())
     }
 
+    /// Batch-overwrite multiple blocks and emit a single `OverwriteBlocks` trace event.
+    ///
+    /// This is a generic batch operation for any transform that modifies multiple blocks.
+    pub fn overwrite_blocks(
+        &mut self,
+        mut modifications: Vec<(NodeIndex, BlockBody)>,
+    ) -> Result<(), Error> {
+        // Sort by node index for deterministic output
+        modifications.sort_by_key(|(node, _)| node.index());
+
+        let runtime_bounds = self.runtime_bounds;
+        let mut all_changes = Vec::new();
+
+        for (node, mut new_body) in modifications {
+            let before = snapshot_block_body(self, node);
+
+            if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
+                new_body.start_pc = body.start_pc;
+                body.instructions = new_body.instructions.clone();
+                body.max_stack = new_body.max_stack;
+                body.control = new_body.control.clone();
+            } else {
+                return Err(Error::InvalidBlockStructure(format!(
+                    "attempted to overwrite non-body or removed block {}",
+                    node.index()
+                )));
+            }
+
+            self.rebuild_edges_for_block(node)?;
+            self.assign_block_control(node, runtime_bounds);
+
+            let after = snapshot_block_body(self, node);
+            if let Some(change) = block_modification(node, before, after) {
+                all_changes.push(change);
+            }
+        }
+
+        let blocks_modified = all_changes.len();
+        let diff = diff_from_block_changes(all_changes);
+        self.record_operation(
+            OperationKind::OverwriteBlocks { blocks_modified },
+            diff,
+            None,
+        );
+        Ok(())
+    }
+
     /// Create or update an unconditional jump that ends the given block.
     pub fn set_unconditional_jump(
         &mut self,
