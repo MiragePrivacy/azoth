@@ -310,7 +310,7 @@ fn create_tier_nodes(
         control: BlockControl::Terminal,
     };
     next_pc += 2;
-    let invalid_node = ir.cfg.add_node(Block::Body(invalid_block));
+    let invalid_node = ir.add_block(Block::Body(invalid_block));
     ir.pc_to_block.insert(invalid_start, invalid_node);
     ir.rebuild_edges_for_block(invalid_node)
         .map_err(|err| Error::CoreError(err.to_string()))?;
@@ -385,7 +385,7 @@ fn create_tier_nodes(
         max_stack: 2,
         control: BlockControl::Unknown,
     };
-    let decoy_node = ir.cfg.add_node(Block::Body(decoy_block));
+    let decoy_node = ir.add_block(Block::Body(decoy_block));
     ir.pc_to_block.insert(decoy_start, decoy_node);
     ir.rebuild_edges_for_block(decoy_node)
         .map_err(|err| Error::CoreError(err.to_string()))?;
@@ -426,7 +426,7 @@ fn create_tier_nodes(
         max_stack: 1,
         control: BlockControl::Unknown,
     };
-    let stub_node = ir.cfg.add_node(Block::Body(stub_block));
+    let stub_node = ir.add_block(Block::Body(stub_block));
     ir.pc_to_block.insert(stub_start, stub_node);
     ir.set_unconditional_jump(stub_node, decoy_node)
         .map_err(|err| Error::CoreError(err.to_string()))?;
@@ -644,7 +644,7 @@ fn create_selector_controller(
         "Controller created"
     );
 
-    let node = ir.cfg.add_node(Block::Body(block));
+    let node = ir.add_block(Block::Body(block));
     ir.pc_to_block.insert(start_pc, node);
     ir.rebuild_edges_for_block(node)
         .map_err(|err| Error::CoreError(err.to_string()))?;

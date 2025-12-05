@@ -28,6 +28,11 @@ pub enum OperationKind {
         body_blocks: usize,
         sections: usize,
     },
+    /// A new block was added to the CFG.
+    AddBlock {
+        node: usize,
+        instruction_count: usize,
+    },
     OverwriteBlock {
         node: usize,
     },

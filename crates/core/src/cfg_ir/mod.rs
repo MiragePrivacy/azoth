@@ -228,6 +228,46 @@ impl CfgIrBundle {
         });
     }
 
+    /// Add a new block to the CFG and record the operation.
+    ///
+    /// Returns the `NodeIndex` of the newly added block.
+    pub fn add_block(&mut self, block: Block) -> NodeIndex {
+        let instruction_count = match &block {
+            Block::Body(body) => body.instructions.len(),
+            Block::Entry | Block::Exit => 0,
+        };
+        let node = self.cfg.add_node(block);
+
+        // Snapshot the new block for the diff
+        let after = snapshot_block_body(self, node);
+        let changes = if let Some(after_snap) = after {
+            vec![BlockModification {
+                node: node.index(),
+                before: BlockBodySnapshot {
+                    start_pc: 0,
+                    max_stack: 0,
+                    control: BlockControlSnapshot::Terminal,
+                    instructions: Vec::new(),
+                },
+                after: after_snap,
+            }]
+        } else {
+            Vec::new()
+        };
+        let diff = diff_from_block_changes(changes);
+
+        self.record_operation(
+            OperationKind::AddBlock {
+                node: node.index(),
+                instruction_count,
+            },
+            diff,
+            None,
+        );
+
+        node
+    }
+
     /// Replace the body of a block while keeping its connectivity metadata intact.
     pub fn overwrite_block(
         &mut self,

@@ -140,8 +140,12 @@ impl App {
         let groups = build_trace_groups(&debug.trace);
         let expanded_edge_groups = std::collections::HashSet::new();
         let expanded_symbolic_groups = std::collections::HashSet::new();
-        let visible_entries =
-            build_visible_entries(&groups, &debug.trace, &expanded_edge_groups, &expanded_symbolic_groups);
+        let visible_entries = build_visible_entries(
+            &groups,
+            &debug.trace,
+            &expanded_edge_groups,
+            &expanded_symbolic_groups,
+        );
         let mut list_state = ListState::default();
         if !visible_entries.is_empty() {
             list_state.select(Some(0));
@@ -427,7 +431,8 @@ fn build_visible_entries(
                     }
                 // Check if this is a symbolic operation
                 } else if is_symbolic_operation(&event.kind) {
-                    let symbolic_indices = collect_consecutive(group, trace, i, is_symbolic_operation);
+                    let symbolic_indices =
+                        collect_consecutive(group, trace, i, is_symbolic_operation);
                     let count = symbolic_indices.len();
 
                     // Only group if there are multiple consecutive symbolic ops
@@ -818,6 +823,7 @@ fn format_operation_kind_short(kind: &OperationKind) -> String {
         OperationKind::TransformStart { name } => format!("▶ {name}"),
         OperationKind::TransformEnd { name } => format!("◀ {name}"),
         OperationKind::Build { body_blocks, .. } => format!("Build({body_blocks})"),
+        OperationKind::AddBlock { node, .. } => format!("AddBlock({node})"),
         OperationKind::OverwriteBlock { node } => format!("Overwrite({node})"),
         OperationKind::OverwriteBlocks { blocks_modified } => {
             format!("Overwrite({blocks_modified})")
@@ -877,6 +883,7 @@ fn format_group_detail_lines(
                 if let Some(event) = trace.get(idx) {
                     let op_type = match &event.kind {
                         OperationKind::Build { .. } => "Build",
+                        OperationKind::AddBlock { .. } => "AddBlock",
                         OperationKind::OverwriteBlock { .. } => "OverwriteBlock",
                         OperationKind::OverwriteBlocks { .. } => "OverwriteBlocks",
                         OperationKind::SetUnconditionalJump { .. } => "SetUnconditionalJump",
@@ -904,6 +911,99 @@ fn format_group_detail_lines(
             for (op_type, count) in sorted {
                 lines.push(Line::from(format!("  {op_type}: {count}")));
             }
+
+            // Summarize all diffs in this group
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "CFG changes summary:",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+
+            let mut total_blocks_added = 0usize;
+            let mut total_blocks_modified = 0usize;
+            let mut total_instructions_added = 0i32;
+            let mut total_instructions_removed = 0i32;
+            let mut total_edges_added = 0usize;
+            let mut total_edges_removed = 0usize;
+            let mut total_pcs_remapped = 0usize;
+            let mut blocks_affected: std::collections::HashSet<usize> =
+                std::collections::HashSet::new();
+
+            for &idx in &group.event_indices {
+                if let Some(event) = trace.get(idx) {
+                    // Count blocks added from AddBlock operations
+                    if let OperationKind::AddBlock {
+                        instruction_count, ..
+                    } = &event.kind
+                    {
+                        total_blocks_added += 1;
+                        total_instructions_added += *instruction_count as i32;
+                    }
+
+                    match &event.diff {
+                        CfgIrDiff::BlockChanges(changes) => {
+                            for change in &changes.changes {
+                                blocks_affected.insert(change.node);
+                                total_blocks_modified += 1;
+                                let before_count = change.before.instructions.len() as i32;
+                                let after_count = change.after.instructions.len() as i32;
+                                let delta = after_count - before_count;
+                                if delta > 0 {
+                                    total_instructions_added += delta;
+                                } else {
+                                    total_instructions_removed += -delta;
+                                }
+                            }
+                        }
+                        CfgIrDiff::EdgeChanges(changes) => {
+                            total_edges_added += changes.added.len();
+                            total_edges_removed += changes.removed.len();
+                        }
+                        CfgIrDiff::PcsRemapped { blocks, .. } => {
+                            total_pcs_remapped += blocks.len();
+                        }
+                        CfgIrDiff::FullSnapshot(_) | CfgIrDiff::None => {}
+                    }
+                }
+            }
+
+            if total_blocks_added > 0 {
+                lines.push(Line::from(format!("  Blocks added: {total_blocks_added}")));
+            }
+            if total_blocks_modified > 0 {
+                lines.push(Line::from(format!(
+                    "  Blocks modified: {} ({} unique)",
+                    total_blocks_modified,
+                    blocks_affected.len()
+                )));
+            }
+            if total_instructions_added > 0 || total_instructions_removed > 0 {
+                lines.push(Line::from(format!(
+                    "  Instructions: +{total_instructions_added} / -{total_instructions_removed}"
+                )));
+            }
+            if total_edges_added > 0 || total_edges_removed > 0 {
+                lines.push(Line::from(format!(
+                    "  Edges: +{total_edges_added} / -{total_edges_removed}"
+                )));
+            }
+            if total_pcs_remapped > 0 {
+                lines.push(Line::from(format!(
+                    "  PCs remapped: {total_pcs_remapped} blocks"
+                )));
+            }
+            if total_blocks_added == 0
+                && total_blocks_modified == 0
+                && total_edges_added == 0
+                && total_edges_removed == 0
+                && total_pcs_remapped == 0
+            {
+                lines.push(Line::from(Span::styled(
+                    "  (no recorded changes)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+
             break;
         }
     }
@@ -1218,6 +1318,12 @@ fn format_operation_kind_full(kind: &OperationKind) -> String {
             sections,
         } => {
             format!("Build CFG ({body_blocks} blocks, {sections} sections)")
+        }
+        OperationKind::AddBlock {
+            node,
+            instruction_count,
+        } => {
+            format!("Add Block {node} ({instruction_count} instructions)")
         }
         OperationKind::OverwriteBlock { node } => format!("Overwrite Block {node}"),
         OperationKind::OverwriteBlocks { blocks_modified } => {
