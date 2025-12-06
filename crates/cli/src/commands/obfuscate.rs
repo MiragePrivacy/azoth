@@ -27,9 +27,9 @@ pub struct ObfuscateArgs {
     /// Cryptographic seed for deterministic obfuscation.
     #[arg(long)]
     seed: Option<String>,
-    /// Comma-separated list of OPTIONAL transforms (default: shuffle,jump_transform,opaque_pred).
+    /// Comma-separated list of transforms to apply.
     /// Note: function_dispatcher is ALWAYS applied and doesn't need to be specified.
-    #[arg(long, default_value = "shuffle")]
+    #[arg(long, default_value = "arithmetic_chain")]
     passes: String,
     /// Path to emit gas/size report as JSON (optional).
     #[arg(long)]
