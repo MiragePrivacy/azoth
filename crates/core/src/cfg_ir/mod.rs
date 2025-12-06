@@ -22,7 +22,7 @@ pub use trace::{
     InstructionPcDiff, JumpTargetKind as TraceJumpTargetKind, JumpTargetSnapshot, OperationKind,
     SectionSnapshot, TraceEvent, block_modification, block_start_pcs, diff_from_block_changes,
     diff_from_edge_changes, diff_from_pc_remap, snapshot_block_body, snapshot_bundle,
-    snapshot_edges,
+    snapshot_bundle_with_runtime, snapshot_edges,
 };
 
 type PcRemap = HashMap<usize, usize>;

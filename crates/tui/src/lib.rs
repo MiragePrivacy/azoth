@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod data;
+mod decompile;
 pub mod event;
 pub mod format;
 pub mod trace;
@@ -21,6 +22,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 pub use azoth_core::cfg_ir::TraceEvent;
 pub use data::{DebugMetadata, DebugOutput};
+pub use decompile::{extract_bytecode_snapshots, BytecodeSnapshots};
 
 use app::App;
 use event::run_event_loop;
@@ -29,12 +31,16 @@ use ui::ui;
 /// Run the TUI application with the given debug output.
 ///
 /// This function sets up the terminal, runs the main event loop,
-/// and restores the terminal state on exit.
+/// and restores the terminal state on exit. The decompile diff is
+/// computed lazily when the user first switches to the diff view.
 ///
 /// # Errors
 ///
 /// Returns an error if terminal setup, event handling, or cleanup fails.
-pub fn run(debug: DebugOutput) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(debug: DebugOutput, filename: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    // Extract bytecode snapshots for lazy diff computation
+    let snapshots = extract_bytecode_snapshots(&debug.trace);
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -42,8 +48,8 @@ pub fn run(debug: DebugOutput) -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Run app
-    let app = App::new(debug);
+    // Run app with snapshots for lazy diff computation
+    let app = App::new(debug, snapshots, filename);
     let res = run_event_loop(&mut terminal, app, ui);
 
     // Restore terminal

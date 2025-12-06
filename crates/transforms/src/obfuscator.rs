@@ -2,7 +2,7 @@ use crate::function_dispatcher::FunctionDispatcher;
 use crate::Transform;
 use azoth_core::seed::Seed;
 use azoth_core::{
-    cfg_ir::{self, snapshot_bundle, Block, CfgIrDiff, OperationKind, TraceEvent},
+    cfg_ir::{self, snapshot_bundle_with_runtime, Block, CfgIrDiff, OperationKind, TraceEvent},
     decoder, detection, encoder, process_bytecode_to_cfg, validator, Opcode,
 };
 use serde::{Deserialize, Serialize};
@@ -605,7 +605,7 @@ pub async fn obfuscate_bytecode(
         tracing::debug!("No selector mapping in result");
     }
 
-    let final_snapshot = snapshot_bundle(&cfg_ir);
+    let final_snapshot = snapshot_bundle_with_runtime(&cfg_ir, obfuscated_bytes.clone());
     cfg_ir.record_operation(
         OperationKind::Finalize,
         CfgIrDiff::FullSnapshot(Box::new(final_snapshot)),

@@ -86,6 +86,9 @@ pub struct CfgIrSnapshot {
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
     pub original_bytecode: Bytes,
     pub runtime_bounds: Option<(usize, usize)>,
+    /// Encoded runtime bytecode after obfuscation (only present in Finalize snapshots).
+    #[serde(default)]
+    pub encoded_runtime: Option<Bytes>,
     /// Detected function dispatcher info (blocks that form the selector dispatch table).
     #[serde(default)]
     pub dispatcher_info: Option<crate::detection::DispatcherInfo>,
@@ -263,10 +266,18 @@ pub fn snapshot_bundle(bundle: &CfgIrBundle) -> CfgIrSnapshot {
         selector_mapping: bundle.selector_mapping.clone(),
         original_bytecode: Bytes::from(bundle.original_bytecode.clone()),
         runtime_bounds: bundle.runtime_bounds,
+        encoded_runtime: None,
         dispatcher_info: bundle.dispatcher_info.clone(),
         dispatcher_blocks: bundle.dispatcher_blocks.iter().copied().collect(),
         protected_pcs,
     }
+}
+
+/// Captures a complete snapshot with the encoded runtime bytecode (for Finalize events).
+pub fn snapshot_bundle_with_runtime(bundle: &CfgIrBundle, encoded_runtime: Vec<u8>) -> CfgIrSnapshot {
+    let mut snapshot = snapshot_bundle(bundle);
+    snapshot.encoded_runtime = Some(Bytes::from(encoded_runtime));
+    snapshot
 }
 
 /// Captures the body of a block for diffing.

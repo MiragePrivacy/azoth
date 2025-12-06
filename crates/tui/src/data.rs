@@ -6,6 +6,16 @@ use std::collections::HashMap;
 use azoth_core::cfg_ir::TraceEvent;
 use ratatui::text::Line;
 
+/// Current view mode in the TUI.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ViewMode {
+    /// Debug trace view (default).
+    #[default]
+    Trace,
+    /// Decompile diff analysis view.
+    DecompileDiff,
+}
+
 /// Debug output format - subset of ObfuscationResult.
 ///
 /// This is the main data structure loaded from the debug JSON file

@@ -1396,11 +1396,16 @@ dependencies = [
 name = "azoth-tui"
 version = "0.1.0"
 dependencies = [
+ "azoth-analysis",
  "azoth-core",
  "crossterm",
  "ratatui",
+ "revm",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]

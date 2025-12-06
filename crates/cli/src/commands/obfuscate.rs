@@ -115,7 +115,7 @@ impl super::Command for ObfuscateArgs {
                 },
                 trace: result.trace,
             };
-            azoth_tui::run(debug)?;
+            azoth_tui::run(debug, Some(runtime.clone()))?;
         }
 
         Ok(())

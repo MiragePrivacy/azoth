@@ -18,7 +18,8 @@ pub struct TuiArgs {
 #[async_trait]
 impl Command for TuiArgs {
     async fn execute(self) -> Result<(), Box<dyn std::error::Error>> {
+        let filename = self.file.display().to_string();
         let debug = azoth_tui::load_debug_file(&self.file)?;
-        azoth_tui::run(debug)
+        azoth_tui::run(debug, Some(filename))
     }
 }
