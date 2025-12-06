@@ -2,9 +2,10 @@
 
 use crate::Opcode;
 use crate::decoder::Instruction;
+use serde::{Deserialize, Serialize};
 
 /// Detected function dispatcher with selectors and metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DispatcherInfo {
     /// Start offset of the dispatcher in the instruction sequence
     pub start_offset: usize,
@@ -17,7 +18,7 @@ pub struct DispatcherInfo {
 }
 
 /// Function selector (4-byte signature hash) paired with its implementation address.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionSelector {
     /// 4-byte function selector value
     pub selector: u32,
@@ -28,7 +29,7 @@ pub struct FunctionSelector {
 }
 
 /// Calldata extraction patterns used by Solidity compilers.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExtractionPattern {
     /// PUSH1 0x00 CALLDATALOAD PUSH1 0xE0 SHR
     Standard,

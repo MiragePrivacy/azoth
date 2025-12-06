@@ -1,0 +1,23 @@
+[package]
+name = "azoth-tui"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "azoth_tui"
+path = "src/lib.rs"
+
+[dependencies]
+azoth-core = { path = "../core" }
+azoth-analysis = { path = "../analysis" }
+crossterm = "0.28"
+ratatui = "0.29"
+revm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

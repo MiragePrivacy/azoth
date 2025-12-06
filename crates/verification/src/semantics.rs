@@ -1212,6 +1212,8 @@ pub mod tests {
             stub_patches: None,
             decoy_patches: None,
             controller_patches: None,
+            dispatcher_info: None,
+            dispatcher_blocks: std::collections::HashSet::new(),
         };
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
 
@@ -1263,6 +1265,8 @@ pub mod tests {
             stub_patches: None,
             decoy_patches: None,
             controller_patches: None,
+            dispatcher_info: None,
+            dispatcher_blocks: std::collections::HashSet::new(),
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
@@ -1288,6 +1292,8 @@ pub mod tests {
             stub_patches: None,
             decoy_patches: None,
             controller_patches: None,
+            dispatcher_info: None,
+            dispatcher_blocks: std::collections::HashSet::new(),
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);

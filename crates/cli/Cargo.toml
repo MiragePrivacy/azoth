@@ -12,6 +12,7 @@ async-trait.workspace = true
 azoth-core = { path = "../core" }
 azoth-analysis = { path = "../analysis" }
 azoth-transform = { path = "../transforms" }
+azoth-tui = { path = "../tui" }
 clap = { workspace = true, features = ["derive"] }
 hex.workspace = true
 owo-colors = "4"
