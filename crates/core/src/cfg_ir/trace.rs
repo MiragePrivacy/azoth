@@ -274,7 +274,10 @@ pub fn snapshot_bundle(bundle: &CfgIrBundle) -> CfgIrSnapshot {
 }
 
 /// Captures a complete snapshot with the encoded runtime bytecode (for Finalize events).
-pub fn snapshot_bundle_with_runtime(bundle: &CfgIrBundle, encoded_runtime: Vec<u8>) -> CfgIrSnapshot {
+pub fn snapshot_bundle_with_runtime(
+    bundle: &CfgIrBundle,
+    encoded_runtime: Vec<u8>,
+) -> CfgIrSnapshot {
     let mut snapshot = snapshot_bundle(bundle);
     snapshot.encoded_runtime = Some(Bytes::from(encoded_runtime));
     snapshot

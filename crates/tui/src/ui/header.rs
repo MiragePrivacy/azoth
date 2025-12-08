@@ -97,7 +97,10 @@ fn build_view_indicator(app: &App) -> Vec<Span<'static>> {
 /// Build filename display spans.
 fn build_filename_spans(app: &App) -> Vec<Span<'static>> {
     match &app.filename {
-        Some(name) => vec![Span::styled(name.clone(), Style::default().fg(Color::DarkGray))],
+        Some(name) => vec![Span::styled(
+            name.clone(),
+            Style::default().fg(Color::DarkGray),
+        )],
         None => Vec::new(),
     }
 }
@@ -113,7 +116,10 @@ fn build_shortcuts(app: &App) -> Vec<Span<'static>> {
     match app.view_mode {
         ViewMode::Trace => {
             spans.push(Span::styled("Space", Style::default().fg(Color::Yellow)));
-            spans.push(Span::styled(" Expand  ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                " Expand  ",
+                Style::default().fg(Color::DarkGray),
+            ));
         }
         ViewMode::DecompileDiff => {
             // No expand in diff view, but keep similar layout
@@ -121,12 +127,18 @@ fn build_shortcuts(app: &App) -> Vec<Span<'static>> {
     }
 
     spans.push(Span::styled("J/K", Style::default().fg(Color::Yellow)));
-    spans.push(Span::styled(" Scroll  ", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(
+        " Scroll  ",
+        Style::default().fg(Color::DarkGray),
+    ));
 
     // Tab hint if diff is available
     if app.has_diff() {
         spans.push(Span::styled("Tab", Style::default().fg(Color::Yellow)));
-        spans.push(Span::styled(" Switch  ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            " Switch  ",
+            Style::default().fg(Color::DarkGray),
+        ));
     }
 
     spans.push(Span::styled("q", Style::default().fg(Color::Yellow)));

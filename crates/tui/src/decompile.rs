@@ -81,9 +81,7 @@ fn extract_runtime_bytecode(snapshot: &azoth_core::cfg_ir::CfgIrSnapshot) -> Opt
 /// This function decompiles both bytecodes and computes a structured diff.
 /// Returns None if decompilation fails.
 #[allow(unreachable_pub)]
-pub async fn compute_decompile_diff(
-    snapshots: BytecodeSnapshots,
-) -> Option<StructuredDiffResult> {
+pub async fn compute_decompile_diff(snapshots: BytecodeSnapshots) -> Option<StructuredDiffResult> {
     // Suppress Heimdall's logging during decompilation (it outputs warnings to stderr)
     let original_source = decompile_quiet(snapshots.original).await.ok()?;
     let obfuscated_source = decompile_quiet(snapshots.obfuscated).await.ok()?;
