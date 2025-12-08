@@ -505,7 +505,10 @@ pub async fn obfuscate_bytecode(
 
     // Validate BEFORE appending data section - data section bytes would be
     // misinterpreted as code by the decoder, causing spurious validation failures
-    tracing::debug!("  Validating obfuscated runtime jump targets ({} bytes)", obfuscated_bytes.len());
+    tracing::debug!(
+        "  Validating obfuscated runtime jump targets ({} bytes)",
+        obfuscated_bytes.len()
+    );
     if let Err(e) = validator::validate_jump_targets(&obfuscated_bytes).await {
         eprintln!("\nVALIDATION FAILED");
         eprintln!("Error: {}", e);
