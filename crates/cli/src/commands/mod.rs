@@ -8,6 +8,7 @@ pub mod decode;
 pub mod decompile_diff;
 pub mod obfuscate;
 pub mod strip;
+pub mod tui;
 
 use thiserror::Error;
 
@@ -34,21 +35,23 @@ pub enum ObfuscateError {
     Serialize(#[from] serde_json::Error),
 }
 
-/// CLI subcommands for Bytecloak.
+/// CLI subcommands for Azoth.
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Decode bytecode to annotated assembly
+    /// Decode bytecode to annotated assembly.
     Decode(decode::DecodeArgs),
-    /// Strip init/auxdata, dump runtime hex
+    /// Strip init/auxdata, dump runtime hex.
     Strip(strip::StripArgs),
-    /// Write runtime CFG to stdout or a file
+    /// Write runtime CFG to stdout or a file.
     Cfg(cfg::CfgArgs),
-    /// Obfuscate bytecode with specified transforms
+    /// Obfuscate bytecode with specified transforms.
     Obfuscate(obfuscate::ObfuscateArgs),
-    /// Run obfuscation analysis across multiple seeds
+    /// Run obfuscation analysis across multiple seeds.
     Analyze(analyze::AnalyzeArgs),
-    /// Compare decompiled output before and after obfuscation
+    /// Compare decompiled output before and after obfuscation.
     DecompileDiff(decompile_diff::DecompileDiffArgs),
+    /// View obfuscation debug traces in a TUI.
+    Tui(tui::TuiArgs),
 }
 
 /// Trait for executing CLI subcommands.
@@ -74,6 +77,7 @@ impl Command for Cmd {
             Cmd::Obfuscate(args) => args.execute().await,
             Cmd::Analyze(args) => args.execute().await,
             Cmd::DecompileDiff(args) => args.execute().await,
+            Cmd::Tui(args) => args.execute().await,
         }
     }
 }

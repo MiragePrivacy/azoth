@@ -24,7 +24,7 @@ pub struct ObfuscateArgs {
     /// Input runtime bytecode as a hex string, .hex file, or binary file containing EVM bytecode.
     #[arg(long)]
     pub runtime: String,
-    /// Cryptographic seed for deterministic obfuscation
+    /// Cryptographic seed for deterministic obfuscation.
     #[arg(long)]
     seed: Option<String>,
     /// Comma-separated list of OPTIONAL transforms (default: shuffle,jump_transform,opaque_pred).
@@ -37,6 +37,9 @@ pub struct ObfuscateArgs {
     /// Path to emit a detailed CFG trace debug report as JSON.
     #[arg(long, value_name = "PATH")]
     emit_debug: Option<String>,
+    /// Launch TUI to view the debug trace after obfuscation.
+    #[arg(long)]
+    tui: bool,
 }
 
 /// Executes the `obfuscate` subcommand using the unified obfuscation pipeline.
@@ -50,6 +53,7 @@ impl super::Command for ObfuscateArgs {
             passes,
             emit,
             emit_debug,
+            tui,
         } = self;
 
         // Step 1: Read and normalize input
@@ -100,6 +104,19 @@ impl super::Command for ObfuscateArgs {
 
         // Step 8: Output final bytecode
         println!("{}", result.obfuscated_bytecode);
+
+        // Step 9: Launch TUI if requested
+        if tui {
+            let debug = azoth_tui::DebugOutput {
+                metadata: azoth_tui::DebugMetadata {
+                    transforms_applied: result.metadata.transforms_applied.clone(),
+                    size_limit_exceeded: result.metadata.size_limit_exceeded,
+                    unknown_opcodes_preserved: result.metadata.unknown_opcodes_preserved,
+                },
+                trace: result.trace,
+            };
+            azoth_tui::run(debug, Some(runtime.clone()))?;
+        }
 
         Ok(())
     }

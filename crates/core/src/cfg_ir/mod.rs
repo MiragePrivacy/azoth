@@ -22,7 +22,7 @@ pub use trace::{
     InstructionPcDiff, JumpTargetKind as TraceJumpTargetKind, JumpTargetSnapshot, OperationKind,
     SectionSnapshot, TraceEvent, block_modification, block_start_pcs, diff_from_block_changes,
     diff_from_edge_changes, diff_from_pc_remap, snapshot_block_body, snapshot_bundle,
-    snapshot_edges,
+    snapshot_bundle_with_runtime, snapshot_edges,
 };
 
 type PcRemap = HashMap<usize, usize>;
@@ -151,6 +151,10 @@ pub struct CfgIrBundle {
     pub stub_patches: Option<Vec<(NodeIndex, usize, u8, NodeIndex)>>,
     pub decoy_patches: Option<Vec<(NodeIndex, usize, u8, usize)>>,
     pub controller_patches: Option<Vec<(NodeIndex, usize, u8, usize)>>,
+    /// Detected function dispatcher info.
+    pub dispatcher_info: Option<crate::detection::DispatcherInfo>,
+    /// Block nodes that are part of the dispatcher (either original or added by transform).
+    pub dispatcher_blocks: HashSet<usize>,
 }
 
 impl CfgIrBundle {
@@ -219,6 +223,55 @@ impl CfgIrBundle {
         });
     }
 
+    /// Records the start of the finalization phase for trace grouping.
+    pub fn record_finalize_start(&mut self) {
+        self.trace.push(TraceEvent {
+            kind: OperationKind::FinalizeStart,
+            diff: CfgIrDiff::None,
+            remapped_pcs: None,
+        });
+    }
+
+    /// Add a new block to the CFG and record the operation.
+    ///
+    /// Returns the `NodeIndex` of the newly added block.
+    pub fn add_block(&mut self, block: Block) -> NodeIndex {
+        let instruction_count = match &block {
+            Block::Body(body) => body.instructions.len(),
+            Block::Entry | Block::Exit => 0,
+        };
+        let node = self.cfg.add_node(block);
+
+        // Snapshot the new block for the diff
+        let after = snapshot_block_body(self, node);
+        let changes = if let Some(after_snap) = after {
+            vec![BlockModification {
+                node: node.index(),
+                before: BlockBodySnapshot {
+                    start_pc: 0,
+                    max_stack: 0,
+                    control: BlockControlSnapshot::Terminal,
+                    instructions: Vec::new(),
+                },
+                after: after_snap,
+            }]
+        } else {
+            Vec::new()
+        };
+        let diff = diff_from_block_changes(changes);
+
+        self.record_operation(
+            OperationKind::AddBlock {
+                node: node.index(),
+                instruction_count,
+            },
+            diff,
+            None,
+        );
+
+        node
+    }
+
     /// Replace the body of a block while keeping its connectivity metadata intact.
     pub fn overwrite_block(
         &mut self,
@@ -249,6 +302,101 @@ impl CfgIrBundle {
         let diff = diff_from_block_changes(changes);
         self.record_operation(
             OperationKind::OverwriteBlock { node: node.index() },
+            diff,
+            None,
+        );
+        Ok(())
+    }
+
+    /// Batch-overwrite multiple blocks and emit a single `PatchDispatcher` trace event.
+    ///
+    /// This is more efficient for transforms that modify many blocks at once,
+    /// such as the function dispatcher transform.
+    pub fn patch_dispatcher_blocks(
+        &mut self,
+        mut modifications: Vec<(NodeIndex, BlockBody)>,
+    ) -> Result<(), Error> {
+        // Sort by node index for deterministic output
+        modifications.sort_by_key(|(node, _)| node.index());
+
+        let runtime_bounds = self.runtime_bounds;
+        let mut all_changes = Vec::new();
+
+        for (node, mut new_body) in modifications {
+            let before = snapshot_block_body(self, node);
+
+            if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
+                new_body.start_pc = body.start_pc;
+                body.instructions = new_body.instructions.clone();
+                body.max_stack = new_body.max_stack;
+                body.control = new_body.control.clone();
+            } else {
+                return Err(Error::InvalidBlockStructure(format!(
+                    "attempted to overwrite non-body or removed block {}",
+                    node.index()
+                )));
+            }
+
+            self.rebuild_edges_for_block(node)?;
+            self.assign_block_control(node, runtime_bounds);
+
+            let after = snapshot_block_body(self, node);
+            if let Some(change) = block_modification(node, before, after) {
+                all_changes.push(change);
+            }
+        }
+
+        let blocks_modified = all_changes.len();
+        let diff = diff_from_block_changes(all_changes);
+        self.record_operation(
+            OperationKind::PatchDispatcher { blocks_modified },
+            diff,
+            None,
+        );
+        Ok(())
+    }
+
+    /// Batch-overwrite multiple blocks and emit a single `OverwriteBlocks` trace event.
+    ///
+    /// This is a generic batch operation for any transform that modifies multiple blocks.
+    pub fn overwrite_blocks(
+        &mut self,
+        mut modifications: Vec<(NodeIndex, BlockBody)>,
+    ) -> Result<(), Error> {
+        // Sort by node index for deterministic output
+        modifications.sort_by_key(|(node, _)| node.index());
+
+        let runtime_bounds = self.runtime_bounds;
+        let mut all_changes = Vec::new();
+
+        for (node, mut new_body) in modifications {
+            let before = snapshot_block_body(self, node);
+
+            if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
+                new_body.start_pc = body.start_pc;
+                body.instructions = new_body.instructions.clone();
+                body.max_stack = new_body.max_stack;
+                body.control = new_body.control.clone();
+            } else {
+                return Err(Error::InvalidBlockStructure(format!(
+                    "attempted to overwrite non-body or removed block {}",
+                    node.index()
+                )));
+            }
+
+            self.rebuild_edges_for_block(node)?;
+            self.assign_block_control(node, runtime_bounds);
+
+            let after = snapshot_block_body(self, node);
+            if let Some(change) = block_modification(node, before, after) {
+                all_changes.push(change);
+            }
+        }
+
+        let blocks_modified = all_changes.len();
+        let diff = diff_from_block_changes(all_changes);
+        self.record_operation(
+            OperationKind::OverwriteBlocks { blocks_modified },
             diff,
             None,
         );
@@ -1120,6 +1268,18 @@ pub fn build_cfg_ir(
 
     let pc_to_block = node_by_pc.clone();
 
+    // Detect function dispatcher for visualization
+    let dispatcher_info = if let Some((start, end)) = runtime_bounds {
+        let runtime_instructions: Vec<_> = instructions
+            .iter()
+            .filter(|i| i.pc >= start && i.pc < end)
+            .cloned()
+            .collect();
+        crate::detection::detect_function_dispatcher(&runtime_instructions)
+    } else {
+        crate::detection::detect_function_dispatcher(instructions)
+    };
+
     let mut bundle = CfgIrBundle {
         cfg,
         pc_to_block,
@@ -1134,6 +1294,8 @@ pub fn build_cfg_ir(
         stub_patches: None,
         decoy_patches: None,
         controller_patches: None,
+        dispatcher_info,
+        dispatcher_blocks: HashSet::new(),
     };
     let body_blocks = bundle
         .cfg

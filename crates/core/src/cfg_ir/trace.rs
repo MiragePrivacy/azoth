@@ -22,12 +22,23 @@ pub enum OperationKind {
     TransformEnd {
         name: String,
     },
+    /// Marks the beginning of the finalization phase.
+    FinalizeStart,
     Build {
         body_blocks: usize,
         sections: usize,
     },
+    /// A new block was added to the CFG.
+    AddBlock {
+        node: usize,
+        instruction_count: usize,
+    },
     OverwriteBlock {
         node: usize,
+    },
+    /// Multiple blocks overwritten in a single batch operation.
+    OverwriteBlocks {
+        blocks_modified: usize,
     },
     SetUnconditionalJump {
         source: usize,
@@ -46,6 +57,10 @@ pub enum OperationKind {
     },
     ReindexPcs,
     PatchJumpImmediates,
+    /// Dispatcher selector tokens patched across multiple blocks.
+    PatchDispatcher {
+        blocks_modified: usize,
+    },
     ReplaceBody {
         instruction_count: usize,
     },
@@ -71,6 +86,18 @@ pub struct CfgIrSnapshot {
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
     pub original_bytecode: Bytes,
     pub runtime_bounds: Option<(usize, usize)>,
+    /// Encoded runtime bytecode after obfuscation (only present in Finalize snapshots).
+    #[serde(default)]
+    pub encoded_runtime: Option<Bytes>,
+    /// Detected function dispatcher info (blocks that form the selector dispatch table).
+    #[serde(default)]
+    pub dispatcher_info: Option<crate::detection::DispatcherInfo>,
+    /// Block node indices that are part of the dispatcher (original or added by transform).
+    #[serde(default)]
+    pub dispatcher_blocks: Vec<usize>,
+    /// PCs that should not be modified by transforms (dispatcher/controller metadata).
+    #[serde(default)]
+    pub protected_pcs: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +240,23 @@ pub fn snapshot_bundle(bundle: &CfgIrBundle) -> CfgIrSnapshot {
 
     let sections = bundle.sections.iter().map(SectionSnapshot::from).collect();
 
+    // Collect protected PCs from all patch types
+    let mut protected_pcs = Vec::new();
+    if let Some(patches) = &bundle.dispatcher_patches {
+        protected_pcs.extend(patches.iter().map(|(_, pc, _, _)| *pc));
+    }
+    if let Some(patches) = &bundle.stub_patches {
+        protected_pcs.extend(patches.iter().map(|(_, pc, _, _)| *pc));
+    }
+    if let Some(patches) = &bundle.decoy_patches {
+        protected_pcs.extend(patches.iter().map(|(_, pc, _, _)| *pc));
+    }
+    if let Some(patches) = &bundle.controller_patches {
+        protected_pcs.extend(patches.iter().map(|(_, pc, _, _)| *pc));
+    }
+    protected_pcs.sort_unstable();
+    protected_pcs.dedup();
+
     CfgIrSnapshot {
         blocks,
         edges,
@@ -222,7 +266,21 @@ pub fn snapshot_bundle(bundle: &CfgIrBundle) -> CfgIrSnapshot {
         selector_mapping: bundle.selector_mapping.clone(),
         original_bytecode: Bytes::from(bundle.original_bytecode.clone()),
         runtime_bounds: bundle.runtime_bounds,
+        encoded_runtime: None,
+        dispatcher_info: bundle.dispatcher_info.clone(),
+        dispatcher_blocks: bundle.dispatcher_blocks.iter().copied().collect(),
+        protected_pcs,
     }
+}
+
+/// Captures a complete snapshot with the encoded runtime bytecode (for Finalize events).
+pub fn snapshot_bundle_with_runtime(
+    bundle: &CfgIrBundle,
+    encoded_runtime: Vec<u8>,
+) -> CfgIrSnapshot {
+    let mut snapshot = snapshot_bundle(bundle);
+    snapshot.encoded_runtime = Some(Bytes::from(encoded_runtime));
+    snapshot
 }
 
 /// Captures the body of a block for diffing.
@@ -257,18 +315,39 @@ pub fn diff_from_block_changes(changes: Vec<BlockModification>) -> CfgIrDiff {
 }
 
 /// Creates a diff describing updated edges.
+///
+/// Edges are compared by their source, target, and kind - not by their ID,
+/// since edge IDs change when edges are removed and re-added.
 pub fn diff_from_edge_changes(
     node: NodeIndex,
     removed: Vec<EdgeSnapshot>,
     added: Vec<EdgeSnapshot>,
 ) -> CfgIrDiff {
-    if removed.is_empty() && added.is_empty() {
+    // Compare edges by their meaningful properties, ignoring ID
+    let edges_equivalent = |a: &EdgeSnapshot, b: &EdgeSnapshot| {
+        a.source == b.source && a.target == b.target && a.kind == b.kind
+    };
+
+    // Filter out edges that appear in both removed and added (unchanged edges)
+    let actually_removed: Vec<_> = removed
+        .iter()
+        .filter(|r| !added.iter().any(|a| edges_equivalent(r, a)))
+        .cloned()
+        .collect();
+
+    let actually_added: Vec<_> = added
+        .iter()
+        .filter(|a| !removed.iter().any(|r| edges_equivalent(a, r)))
+        .cloned()
+        .collect();
+
+    if actually_removed.is_empty() && actually_added.is_empty() {
         CfgIrDiff::None
     } else {
         CfgIrDiff::EdgeChanges(EdgeChangeSet {
             node: node.index(),
-            removed,
-            added,
+            removed: actually_removed,
+            added: actually_added,
         })
     }
 }
