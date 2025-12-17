@@ -12,11 +12,11 @@ pub struct AnalyzeArgs {
     /// Number of obfuscated samples to generate.
     pub iterations: usize,
     /// Input deployment bytecode as hex, .hex file, or binary file.
-    #[arg(value_name = "BYTECODE", default_value = DEFAULT_DEPLOYMENT_PATH)]
-    pub input: String,
+    #[arg(short = 'D', long = "deployment", value_name = "BYTECODE", default_value = DEFAULT_DEPLOYMENT_PATH)]
+    pub deployment_bytecode: String,
     /// Input runtime bytecode as hex, .hex file, or binary file.
-    #[arg(long, value_name = "RUNTIME", default_value = DEFAULT_RUNTIME_PATH)]
-    pub runtime: String,
+    #[arg(short = 'R', long = "runtime", value_name = "RUNTIME", default_value = DEFAULT_RUNTIME_PATH)]
+    pub runtime_bytecode: String,
     /// Where to write the markdown report (default: ./obfuscation_analysis_report.md).
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
@@ -30,14 +30,14 @@ impl super::Command for AnalyzeArgs {
     async fn execute(self) -> Result<(), Box<dyn Error>> {
         let AnalyzeArgs {
             iterations,
-            input,
-            runtime,
+            deployment_bytecode,
+            runtime_bytecode,
             output,
             max_attempts,
         } = self;
 
-        let input_hex = read_input(&input)?;
-        let runtime_hex = read_input(&runtime)?;
+        let input_hex = read_input(&deployment_bytecode)?;
+        let runtime_hex = read_input(&runtime_bytecode)?;
 
         let mut config = AnalysisConfig::new(&input_hex, &runtime_hex, iterations);
         config.max_attempts = max_attempts;
