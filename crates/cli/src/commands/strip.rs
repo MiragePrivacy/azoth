@@ -16,10 +16,11 @@ use std::path::Path;
 #[derive(Args)]
 pub struct StripArgs {
     /// Input deployment bytecode as a hex string (0x...) or file path containing EVM bytecode.
-    pub input: String,
+    #[arg(short = 'D', long = "deployment")]
+    pub deployment_bytecode: String,
     /// Input runtime bytecode as a hex string (0x...) or file path containing EVM bytecode.
-    #[arg(long)]
-    pub runtime: String,
+    #[arg(short = 'R', long = "runtime")]
+    pub runtime_bytecode: String,
     /// Output raw cleaned runtime hex instead of JSON report
     #[arg(long)]
     raw: bool,
@@ -29,10 +30,10 @@ pub struct StripArgs {
 #[async_trait]
 impl super::Command for StripArgs {
     async fn execute(self) -> Result<(), Box<dyn Error>> {
-        let is_file = !self.input.starts_with("0x") && Path::new(&self.input).is_file();
-        let runtime_is_file = !self.runtime.starts_with("0x") && Path::new(&self.runtime).is_file();
-        let (instructions, _, _, bytes) = decode_bytecode(&self.input, is_file).await?;
-        let runtime_bytes = input_to_bytes(&self.runtime, runtime_is_file)?;
+        let is_file = !self.deployment_bytecode.starts_with("0x") && Path::new(&self.deployment_bytecode).is_file();
+        let runtime_is_file = !self.runtime_bytecode.starts_with("0x") && Path::new(&self.runtime_bytecode).is_file();
+        let (instructions, _, _, bytes) = decode_bytecode(&self.deployment_bytecode, is_file).await?;
+        let runtime_bytes = input_to_bytes(&self.runtime_bytecode, runtime_is_file)?;
         let sections = locate_sections(&bytes, &instructions, &runtime_bytes)?;
         let (clean_runtime, report) = strip_bytecode(&bytes, &sections)?;
 

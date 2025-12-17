@@ -31,11 +31,12 @@ use super::obfuscate::{build_passes, read_input};
 #[derive(Args)]
 pub struct DecompileDiffArgs {
     /// Input deployment bytecode as a hex string (0x...), .hex file, or binary file.
-    pub input: String,
+    #[arg(short = 'D', long = "deployment")]
+    pub deployment_bytecode: String,
 
     /// Input runtime bytecode as a hex string (0x...), .hex file, or binary file.
-    #[arg(long)]
-    pub runtime: String,
+    #[arg(short = 'R', long = "runtime")]
+    pub runtime_bytecode: String,
 
     /// Comma-separated list of transforms (default: shuffle).
     #[arg(long, default_value = "shuffle")]
@@ -113,8 +114,8 @@ impl AggregatedStructuredStats {
 #[async_trait]
 impl super::Command for DecompileDiffArgs {
     async fn execute(self) -> Result<(), Box<dyn Error>> {
-        let input_bytecode = read_input(&self.input)?;
-        let runtime_bytecode = read_input(&self.runtime)?;
+        let input_bytecode = read_input(&self.deployment_bytecode)?;
+        let runtime_bytecode = read_input(&self.runtime_bytecode)?;
         let pre_bytes = hex::decode(runtime_bytecode.trim_start_matches("0x"))?;
 
         // Run iterations in parallel with bounded concurrency

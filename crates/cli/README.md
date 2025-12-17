@@ -19,9 +19,9 @@ cargo build --release --bin azoth
 Decodes EVM bytecode into human-readable instruction format.
 
 ```bash
-azoth decode <INPUT>
-azoth decode 0x608060405234801561001057600080fd5b50
-azoth decode path/to/bytecode.hex
+azoth decode -D <DEPLOYMENT_BYTECODE>
+azoth decode --deployment 0x608060405234801561001057600080fd5b50
+azoth decode -D path/to/bytecode.hex
 ```
 
 Outputs the raw assembly from Heimdall disassembler followed by a list of instructions with program counters and opcodes.
@@ -30,40 +30,47 @@ Outputs the raw assembly from Heimdall disassembler followed by a list of instru
 Extracts runtime bytecode from deployment bytecode, removing init code and auxdata.
 
 ```bash
-azoth strip <INPUT>
-azoth strip 0x608060405234801561001057600080fd5b50
-azoth strip --raw path/to/bytecode.hex
+azoth strip -D <DEPLOYMENT_BYTECODE> -R <RUNTIME_BYTECODE>
+azoth strip --deployment 0x608060405234801561001057600080fd5b50 --runtime 0x6080...
+azoth strip -D path/to/deployment.hex -R path/to/runtime.hex --raw
 ```
 
 Options:
+- `-D, --deployment <BYTECODE>` - Input deployment bytecode (required)
+- `-R, --runtime <BYTECODE>` - Input runtime bytecode (required)
 - `--raw` - Output raw cleaned runtime hex instead of JSON report
 
 ### `azoth cfg`
 Generates a Graphviz .dot file representing the control flow graph.
 
 ```bash
-azoth cfg <INPUT>
-azoth cfg --output graph.dot 0x608060405234801561001057600080fd5b50
+azoth cfg -D <DEPLOYMENT_BYTECODE> -R <RUNTIME_BYTECODE>
+azoth cfg --deployment 0x6080... --runtime 0x6080... --output graph.dot
+azoth cfg -D path/to/deployment.hex -R path/to/runtime.hex
 ```
 
 Options:
-- `--output <file>` - Write .dot file to specified path (default: stdout)
+- `-D, --deployment <BYTECODE>` - Input deployment bytecode (required)
+- `-R, --runtime <BYTECODE>` - Input runtime bytecode (required)
+- `-o, --output <file>` - Write .dot file to specified path (default: stdout)
 
 ### `azoth obfuscate`
 Applies obfuscation transformations to bytecode.
 
 ```bash
-azoth obfuscate <INPUT>
-azoth obfuscate --seed 12345 0x608060405234801561001057600080fd5b50
-azoth obfuscate --passes shuffle,jump_transform path/to/bytecode.hex
+azoth obfuscate -D <DEPLOYMENT_BYTECODE> -R <RUNTIME_BYTECODE>
+azoth obfuscate --deployment 0x6080... --runtime 0x6080... --seed 12345
+azoth obfuscate -D path/to/deployment.hex -R path/to/runtime.hex --passes shuffle
 ```
 
 Options:
-- `--seed <value>` - Random seed for transform application (default: 42)
-- `--passes <list>` - Comma-separated list of transforms (default: shuffle,jump_transform,opaque_pred)
-- `--accept-threshold <value>` - Minimum quality threshold for accepting transforms (default: 0.0)
-- `--max-size-delta <fraction>` - Maximum allowable size increase (default: 0.1)
+- `-D, --deployment <BYTECODE>` - Input deployment bytecode (required)
+- `-R, --runtime <BYTECODE>` - Input runtime bytecode (required)
+- `--seed <value>` - Cryptographic seed for deterministic obfuscation
+- `--passes <list>` - Comma-separated list of transforms (default: shuffle)
 - `--emit <file>` - Path to write gas/size report as JSON
+- `--emit-debug <PATH>` - Path to emit detailed CFG trace debug report as JSON
+- `--tui` - Launch TUI to view debug trace after obfuscation
 
 Available transforms: `shuffle`, `jump_transform`, `opaque_pred`
 
@@ -73,12 +80,14 @@ Note: `function_dispatcher` is always applied automatically.
 Generates multiple obfuscated variants and reports how much of the original bytecode survives unchanged.
 
 ```bash
-azoth analyze <ITERATIONS>
-azoth analyze 50 examples/escrow-bytecode/artifacts/runtime_bytecode.hex
-azoth analyze 25 0x608060405234801561001057600080fd5b50 --output reports/analysis.md
+azoth analyze <ITERATIONS> -D <DEPLOYMENT_BYTECODE> -R <RUNTIME_BYTECODE>
+azoth analyze 50 --deployment path/to/deployment.hex --runtime path/to/runtime.hex
+azoth analyze 25 -D 0x6080... -R 0x6080... --output reports/analysis.md
 ```
 
 Options:
+- `-D, --deployment <BYTECODE>` - Input deployment bytecode (default: examples/escrow-bytecode/artifacts/deployment_bytecode.hex)
+- `-R, --runtime <BYTECODE>` - Input runtime bytecode (default: examples/escrow-bytecode/artifacts/runtime_bytecode.hex)
 - `--output <path>` - Where to write the markdown report (default: ./obfuscation_analysis_report.md)
 - `--max-attempts <n>` - Retry budget per iteration when a seed fails (default: 5)
 

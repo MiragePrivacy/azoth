@@ -20,10 +20,11 @@ use std::path::Path;
 #[derive(Args)]
 pub struct ObfuscateArgs {
     /// Input deployment bytecode as a hex string, .hex file, or binary file containing EVM bytecode.
-    pub input: String,
+    #[arg(short = 'D', long = "deployment")]
+    pub deployment_bytecode: String,
     /// Input runtime bytecode as a hex string, .hex file, or binary file containing EVM bytecode.
-    #[arg(long)]
-    pub runtime: String,
+    #[arg(short = 'R', long = "runtime")]
+    pub runtime_bytecode: String,
     /// Cryptographic seed for deterministic obfuscation.
     #[arg(long)]
     seed: Option<String>,
@@ -47,8 +48,8 @@ pub struct ObfuscateArgs {
 impl super::Command for ObfuscateArgs {
     async fn execute(self) -> Result<(), Box<dyn Error>> {
         let ObfuscateArgs {
-            input,
-            runtime,
+            deployment_bytecode,
+            runtime_bytecode,
             seed,
             passes,
             emit,
@@ -57,8 +58,8 @@ impl super::Command for ObfuscateArgs {
         } = self;
 
         // Step 1: Read and normalize input
-        let input_bytecode = read_input(&input)?;
-        let runtime_bytecode = read_input(&runtime)?;
+        let input_bytecode = read_input(&deployment_bytecode)?;
+        let runtime_bytecode_hex = read_input(&runtime_bytecode)?;
 
         // Step 2: Build transforms from CLI args
         let transforms = build_passes(&passes)?;
@@ -77,7 +78,7 @@ impl super::Command for ObfuscateArgs {
         config.preserve_unknown_opcodes = true;
 
         // Step 4: Run obfuscation pipeline
-        let result = match obfuscate_bytecode(&input_bytecode, &runtime_bytecode, config).await {
+        let result = match obfuscate_bytecode(&input_bytecode, &runtime_bytecode_hex, config).await {
             Ok(result) => result,
             Err(e) => return Err(format!("{e}").into()),
         };
@@ -115,7 +116,7 @@ impl super::Command for ObfuscateArgs {
                 },
                 trace: result.trace,
             };
-            azoth_tui::run(debug, Some(runtime.clone()))?;
+            azoth_tui::run(debug, Some(runtime_bytecode.clone()))?;
         }
 
         Ok(())
