@@ -21,6 +21,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
+use crate::commands::DEFAULT_PASSES;
+
 use super::obfuscate::{build_passes, read_input};
 
 /// Arguments for the `decompile-diff` subcommand.
@@ -38,7 +40,7 @@ pub struct DecompileDiffArgs {
     pub runtime: String,
 
     /// Comma-separated list of transforms (default: shuffle).
-    #[arg(long, default_value = "shuffle")]
+    #[arg(long, default_value = DEFAULT_PASSES)]
     pub passes: String,
 
     /// Number of iterations to run with different seeds for statistical analysis.
