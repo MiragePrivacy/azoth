@@ -56,7 +56,7 @@ fn compute_initial_values(
 
 /// Evaluate a chain forward to verify it produces the target.
 pub fn evaluate_forward(initial_values: &[[u8; 32]], operations: &[ArithmeticOp]) -> [u8; 32] {
-    assert_eq!(
+    debug_assert_eq!(
         initial_values.len(),
         operations.len() + 1,
         "Need exactly one more initial value than operations"
@@ -109,54 +109,6 @@ pub fn estimate_gas_cost(chain: &ArithmeticChainDef) -> u64 {
     gas
 }
 
-/// Validate that a chain is well-formed.
-pub fn validate_chain(chain: &ArithmeticChainDef) -> Result<(), ChainValidationError> {
-    let expected_values = chain.operations.len() + 1;
-
-    if chain.initial_values.len() != expected_values {
-        return Err(ChainValidationError::ValueCountMismatch {
-            expected: expected_values,
-            actual: chain.initial_values.len(),
-        });
-    }
-
-    if chain.scatter_locations.len() != expected_values {
-        return Err(ChainValidationError::ScatterCountMismatch {
-            expected: expected_values,
-            actual: chain.scatter_locations.len(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Errors that can occur during chain validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChainValidationError {
-    /// Number of initial values doesn't match operations + 1.
-    ValueCountMismatch { expected: usize, actual: usize },
-    /// Number of scatter locations doesn't match initial values.
-    ScatterCountMismatch { expected: usize, actual: usize },
-}
-
-impl std::fmt::Display for ChainValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ValueCountMismatch { expected, actual } => {
-                write!(f, "expected {} initial values but got {}", expected, actual)
-            }
-            Self::ScatterCountMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "expected {} scatter locations but got {}",
-                    expected, actual
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for ChainValidationError {}
 
 #[cfg(test)]
 mod tests {
@@ -176,7 +128,7 @@ mod tests {
         let chain = generate_chain(target, &config, &mut rng);
 
         assert_eq!(chain.target_value, target);
-        assert!(validate_chain(&chain).is_ok());
+        assert_eq!(chain.initial_values.len(), chain.operations.len() + 1);
     }
 
     #[test]
@@ -219,19 +171,4 @@ mod tests {
         assert!(gas < 1000);
     }
 
-    #[test]
-    fn validate_chain_catches_mismatched_lengths() {
-        let chain = ArithmeticChainDef {
-            target_value: [0; 32],
-            initial_values: vec![[0; 32]; 3],
-            operations: vec![ArithmeticOp::Add], // 1 op expects 2 values
-            scatter_locations: vec![ScatterStrategy::CodeCopy { offset: 0 }; 3],
-        };
-
-        let result = validate_chain(&chain);
-        assert!(matches!(
-            result,
-            Err(ChainValidationError::ValueCountMismatch { .. })
-        ));
-    }
 }

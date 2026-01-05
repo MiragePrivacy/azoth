@@ -120,59 +120,6 @@ pub fn stack_delta(chain: &ArithmeticChainDef) -> i32 {
     loads - ops
 }
 
-/// Validate that a chain compilation will produce correct stack behavior.
-pub fn validate_stack_behavior(chain: &ArithmeticChainDef) -> Result<(), StackValidationError> {
-    if chain.initial_values.len() != chain.operations.len() + 1 {
-        return Err(StackValidationError::ValueOperationMismatch {
-            values: chain.initial_values.len(),
-            operations: chain.operations.len(),
-        });
-    }
-
-    let delta = stack_delta(chain);
-    if delta != 1 {
-        return Err(StackValidationError::IncorrectDelta {
-            expected: 1,
-            actual: delta,
-        });
-    }
-
-    Ok(())
-}
-
-/// Errors related to stack validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StackValidationError {
-    /// Stack delta doesn't match expected value.
-    IncorrectDelta { expected: i32, actual: i32 },
-    /// Number of values doesn't match operations + 1.
-    ValueOperationMismatch { values: usize, operations: usize },
-}
-
-impl std::fmt::Display for StackValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::IncorrectDelta { expected, actual } => {
-                write!(
-                    f,
-                    "incorrect stack delta: expected {}, got {}",
-                    expected, actual
-                )
-            }
-            Self::ValueOperationMismatch { values, operations } => {
-                write!(
-                    f,
-                    "value/operation mismatch: {} values for {} operations (expected {})",
-                    values,
-                    operations,
-                    operations + 1
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for StackValidationError {}
 
 #[cfg(test)]
 mod tests {
@@ -210,28 +157,6 @@ mod tests {
     fn stack_delta_is_one() {
         let chain = sample_chain();
         assert_eq!(stack_delta(&chain), 1);
-    }
-
-    #[test]
-    fn validate_stack_behavior_accepts_valid_chain() {
-        let chain = sample_chain();
-        assert!(validate_stack_behavior(&chain).is_ok());
-    }
-
-    #[test]
-    fn validate_stack_behavior_rejects_mismatched_chain() {
-        let chain = ArithmeticChainDef {
-            target_value: [0; 32],
-            initial_values: vec![[0; 32]; 5],
-            operations: vec![ArithmeticOp::Add, ArithmeticOp::Sub],
-            scatter_locations: vec![],
-        };
-
-        let result = validate_stack_behavior(&chain);
-        assert!(matches!(
-            result,
-            Err(StackValidationError::ValueOperationMismatch { .. })
-        ));
     }
 
     #[test]

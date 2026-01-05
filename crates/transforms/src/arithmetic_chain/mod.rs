@@ -57,7 +57,7 @@ use rand::rngs::StdRng;
 use std::collections::HashSet;
 use tracing::debug;
 
-pub use chain::{estimate_gas_cost, evaluate_forward, generate_chain, validate_chain};
+pub use chain::{estimate_gas_cost, evaluate_forward, generate_chain};
 pub use compiler::{compile_chain, compile_chain_inline, estimate_bytecode_size, stack_delta};
 pub use scatter::{apply_scattering, generate_load_instructions};
 pub use types::{
@@ -264,16 +264,11 @@ impl Transform for ArithmeticChain {
         for (node_idx, instr_idx, value) in targets {
             let chain = generate_chain(value, &self.config, rng);
 
-            if let Err(e) = validate_chain(&chain) {
-                debug!("Chain validation failed: {}, skipping target", e);
-                continue;
-            }
-
-            let computed = evaluate_forward(&chain.initial_values, &chain.operations);
-            if computed != value {
-                debug!("Chain forward evaluation mismatch, skipping target");
-                continue;
-            }
+            assert_eq!(
+                evaluate_forward(&chain.initial_values, &chain.operations),
+                value,
+                "Chain forward evaluation must match target"
+            );
 
             chains.push((node_idx, instr_idx, chain));
         }
