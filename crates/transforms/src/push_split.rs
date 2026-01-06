@@ -15,13 +15,17 @@
 //! SUB                // variant op; chain length and ops vary per split
 //! SSTORE
 //! ```
+//!
+//! Safety: blocks that contain `JUMP`/`JUMPI` are skipped to avoid mutating
+//! raw jump-table immediates that are not symbolically remapped.
 
 use crate::{collect_protected_nodes, collect_protected_pcs, Error, Result, Transform};
-use azoth_core::cfg_ir::{Block, CfgIrBundle};
+use azoth_core::cfg_ir::{Block, BlockControl, CfgIrBundle, JumpTarget};
 use azoth_core::decoder::Instruction;
 use azoth_core::Opcode;
 use rand::rngs::StdRng;
 use rand::Rng;
+use std::fmt::Write;
 use tracing::debug;
 
 /// Split medium-width PUSH immediates into multi-step arithmetic chains.
@@ -46,9 +50,15 @@ impl Transform for PushSplit {
         let protected_nodes = collect_protected_nodes(ir);
         let mut changed = false;
 
+        let runtime_bounds = ir.runtime_bounds;
+
+        let _ = runtime_bounds;
         let nodes: Vec<_> = ir.cfg.node_indices().collect();
         for node in nodes {
             if protected_nodes.contains(&node) {
+                continue;
+            }
+            if ir.dispatcher_blocks.contains(&node.index()) {
                 continue;
             }
             let Some(block) = ir.cfg.node_weight_mut(node) else {
@@ -58,6 +68,29 @@ impl Transform for PushSplit {
                 Block::Body(body) => body,
                 _ => continue,
             };
+
+            // Skip init-code blocks; only mutate runtime for now to avoid constructor jumps.
+            if let Some((start, end)) = runtime_bounds {
+                if body.start_pc < start || body.start_pc >= end {
+                    continue;
+                }
+            }
+
+            if block_has_jump(body) {
+                debug!(
+                    "PushSplit: skipping block with jump opcode at PC 0x{:x}",
+                    body.start_pc
+                );
+                continue;
+            }
+
+            if has_raw_jump_target(body) {
+                debug!(
+                    "PushSplit: skipping block with raw jump target at PC 0x{:x}",
+                    body.start_pc
+                );
+                continue;
+            }
 
             let original = body.instructions.clone();
             let mut rewritten: Vec<Instruction> = Vec::with_capacity(original.len());
@@ -78,14 +111,77 @@ impl Transform for PushSplit {
                         continue;
                     }
 
+                    // Skip if this is the second PUSH in a SplitAdd pattern: PUSH; PUSH; ADD; JUMP
+                    if idx >= 1
+                        && original
+                            .get(idx + 2)
+                            .is_some_and(|jump| matches!(jump.op, Opcode::JUMP | Opcode::JUMPI))
+                        && original
+                            .get(idx + 1)
+                            .is_some_and(|add| matches!(add.op, Opcode::ADD))
+                        && original
+                            .get(idx - 1)
+                            .is_some_and(|prev| matches!(prev.op, Opcode::PUSH(_)))
+                    {
+                        debug!("Skipping second PUSH in SplitAdd at PC 0x{:x}", instr.pc);
+                        rewritten.push(instr.clone());
+                        continue;
+                    }
+
+                    // Skip SplitAdd jump patterns: PUSH <lhs>; PUSH <rhs>; ADD; JUMP/JUMPI
+                    if original
+                        .get(idx + 3)
+                        .is_some_and(|jump| matches!(jump.op, Opcode::JUMP | Opcode::JUMPI))
+                    {
+                        if let (Some(push_b), Some(add_instr)) =
+                            (original.get(idx + 1), original.get(idx + 2))
+                        {
+                            // Check for PUSH; PUSH; ADD; JUMP pattern
+                            if matches!(push_b.op, Opcode::PUSH(_))
+                                && matches!(add_instr.op, Opcode::ADD)
+                            {
+                                debug!("Skipping first PUSH in SplitAdd at PC 0x{:x}", instr.pc);
+                                rewritten.push(instr.clone());
+                                continue;
+                            }
+                            // Also check for PC-relative: PUSH <delta>; PC; ADD; JUMP
+                            if matches!(push_b.op, Opcode::PC)
+                                && matches!(add_instr.op, Opcode::ADD)
+                            {
+                                debug!("Skipping PUSH in PcRelative at PC 0x{:x}", instr.pc);
+                                rewritten.push(instr.clone());
+                                continue;
+                            }
+                        }
+                    }
+
                     if let Some(imm_hex) = &instr.imm {
                         if let Ok(value) = u128::from_str_radix(imm_hex, 16) {
+                            let before_window = format_window(&original, idx, 2);
                             let chain = generate_chain(value, width, rng);
                             let base_pc = instr.pc;
                             let mut pc = base_pc;
 
+                            debug!(
+                                "PushSplit: split at pc=0x{:x} width={} value=0x{} into parts={}",
+                                base_pc,
+                                width,
+                                imm_hex,
+                                format_chain(&chain, width)
+                            );
+
+                            let chain_len = chain.len() * 2;
+                            let rewritten_start = rewritten.len();
                             for (part, op) in chain {
                                 pc = emit_part(part, op, pc, &mut rewritten);
+                            }
+                            let after_window =
+                                format_window(&rewritten, rewritten_start, chain_len.min(6));
+                            if !before_window.is_empty() || !after_window.is_empty() {
+                                debug!(
+                                    "PushSplit: context before=[{}] after=[{}]",
+                                    before_window, after_window
+                                );
                             }
 
                             body.max_stack = body.max_stack.max(2);
@@ -98,19 +194,42 @@ impl Transform for PushSplit {
                 rewritten.push(instr.clone());
             }
 
-            body.instructions = rewritten;
+            if rewritten != original {
+                body.instructions = rewritten;
+                ir.rebuild_edges_for_block(node)
+                    .map_err(|e| Error::CoreError(e.to_string()))?;
+            }
         }
 
         if changed {
-            debug!("PushSplit: applied splits, reindexing PCs");
-            ir.reindex_pcs()
-                .map_err(|e| Error::CoreError(e.to_string()))?;
+            debug!("PushSplit: applied splits");
         } else {
             debug!("PushSplit: no eligible PUSH instructions found");
         }
 
         Ok(changed)
     }
+}
+
+fn has_raw_jump_target(body: &azoth_core::cfg_ir::BlockBody) -> bool {
+    fn target_is_raw(target: &JumpTarget) -> bool {
+        matches!(target, JumpTarget::Raw { .. })
+    }
+
+    match &body.control {
+        BlockControl::Jump { target } => target_is_raw(target),
+        BlockControl::Branch {
+            true_target,
+            false_target,
+        } => target_is_raw(true_target) || target_is_raw(false_target),
+        _ => false,
+    }
+}
+
+fn block_has_jump(body: &azoth_core::cfg_ir::BlockBody) -> bool {
+    body.instructions
+        .iter()
+        .any(|instr| matches!(instr.op, Opcode::JUMP | Opcode::JUMPI))
 }
 
 fn matches_push_range(op: &Opcode) -> Option<u8> {
@@ -142,7 +261,33 @@ enum CombineOp {
 
 /// Generate a randomized chain of (push, combine-op) pairs whose reduction yields `value`.
 fn generate_chain(value: u128, width_bytes: u8, rng: &mut StdRng) -> Vec<(u128, CombineOp)> {
-    let modulus: u128 = 1u128 << (width_bytes as u32 * 8);
+    let bits = (width_bytes as u32) * 8;
+    let full_width = bits == 128;
+    let modulus = (!full_width).then(|| 1u128 << bits);
+    let mask = modulus.map(|m| m - 1).unwrap_or(u128::MAX);
+    let sample = |rng: &mut StdRng| -> u128 {
+        if let Some(m) = modulus {
+            rng.random_range(0..m)
+        } else {
+            rng.random::<u128>()
+        }
+    };
+
+    let add_mod = |acc: u128, part: u128| -> u128 {
+        if let Some(m) = modulus {
+            (acc + part) % m
+        } else {
+            acc.wrapping_add(part)
+        }
+    };
+
+    let sub_mod = |acc: u128, part: u128| -> u128 {
+        if let Some(m) = modulus {
+            (acc + m - part) % m
+        } else {
+            acc.wrapping_sub(part)
+        }
+    };
     let parts = rng.random_range(2..=4);
 
     let prefer_xor = rng.random_bool(0.4);
@@ -151,11 +296,11 @@ fn generate_chain(value: u128, width_bytes: u8, rng: &mut StdRng) -> Vec<(u128, 
         let mut acc = 0u128;
         for i in 0..parts {
             if i + 1 == parts {
-                pushes.push((acc ^ value, CombineOp::Xor));
+                pushes.push(((acc ^ value) & mask, CombineOp::Xor));
             } else {
-                let part = rng.random_range(0..modulus);
+                let part = sample(rng);
                 acc ^= part;
-                pushes.push((part, CombineOp::Xor));
+                pushes.push((part & mask, CombineOp::Xor));
             }
         }
         return pushes;
@@ -180,26 +325,77 @@ fn generate_chain(value: u128, width_bytes: u8, rng: &mut StdRng) -> Vec<(u128, 
     });
 
     for (i, op) in ops.iter().enumerate() {
-        let part = rng.random_range(0..modulus);
+        let part = sample(rng) & mask;
         pushes.push((part, *op));
         acc = match op {
-            CombineOp::Add => (acc + part) % modulus,
-            CombineOp::Sub => (acc + modulus - part) % modulus,
+            CombineOp::Add => add_mod(acc, part),
+            CombineOp::Sub => sub_mod(acc, part),
             CombineOp::Xor => unreachable!(),
         };
 
         if i + 1 == ops.len() {
             let final_op = *op;
             let final_part = match final_op {
-                CombineOp::Add => (value + modulus - acc) % modulus,
-                CombineOp::Sub => (acc + modulus - value) % modulus,
+                CombineOp::Add => {
+                    if let Some(m) = modulus {
+                        (value + m - acc) % m
+                    } else {
+                        value.wrapping_sub(acc)
+                    }
+                }
+                CombineOp::Sub => {
+                    if let Some(m) = modulus {
+                        (acc + m - value) % m
+                    } else {
+                        acc.wrapping_sub(value)
+                    }
+                }
                 CombineOp::Xor => unreachable!(),
             };
-            pushes.push((final_part, final_op));
+            pushes.push((final_part & mask, final_op));
         }
     }
 
     pushes
+}
+
+fn format_chain(chain: &[(u128, CombineOp)], width_bytes: u8) -> String {
+    let mut parts = Vec::with_capacity(chain.len());
+    for (val, op) in chain {
+        let op_str = match op {
+            CombineOp::Add => "+",
+            CombineOp::Sub => "-",
+            CombineOp::Xor => "^",
+        };
+        parts.push(format!("{op_str}0x{}", format_hex(*val, width_bytes)));
+    }
+    parts.join(" ")
+}
+
+fn format_window(instructions: &[Instruction], center_idx: usize, count: usize) -> String {
+    if instructions.is_empty() || count == 0 {
+        return String::new();
+    }
+    let start = center_idx.saturating_sub(count / 2);
+    let end = (start + count).min(instructions.len());
+    let mut out = String::new();
+    for instr in &instructions[start..end] {
+        let op = match instr.op {
+            Opcode::PUSH(w) => format!("PUSH{}", w),
+            other => format!("{:?}", other),
+        };
+        let _ = write!(
+            &mut out,
+            "pc=0x{:x}: {} {} | ",
+            instr.pc,
+            op,
+            instr.imm.as_deref().unwrap_or("")
+        );
+    }
+    if out.ends_with(" | ") {
+        out.truncate(out.len().saturating_sub(3));
+    }
+    out
 }
 
 fn emit_part(part: u128, op: CombineOp, pc: usize, out: &mut Vec<Instruction>) -> usize {
