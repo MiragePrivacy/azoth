@@ -41,7 +41,7 @@ jobs:
 
           # Run decompile-diff, capturing statistics to stdout and diff to file
           RUST_LOG=error ./target/release/azoth decompile-diff \
-            "$DEPLOYMENT" \
+            --deployment "$DEPLOYMENT" \
             --runtime "$RUNTIME" \
             --passes "" \
             --iterations 50 \
