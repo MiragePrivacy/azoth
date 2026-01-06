@@ -120,7 +120,6 @@ pub fn stack_delta(chain: &ArithmeticChainDef) -> i32 {
     loads - ops
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

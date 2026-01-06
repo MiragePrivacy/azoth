@@ -109,7 +109,6 @@ pub fn estimate_gas_cost(chain: &ArithmeticChainDef) -> u64 {
     gas
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +169,4 @@ mod tests {
         assert!(gas >= (chain.operations.len() * 3) as u64);
         assert!(gas < 1000);
     }
-
 }
