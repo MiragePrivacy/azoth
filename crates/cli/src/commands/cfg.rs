@@ -31,9 +31,12 @@ pub struct CfgArgs {
 #[async_trait]
 impl super::Command for CfgArgs {
     async fn execute(self) -> Result<(), Box<dyn Error>> {
-        let is_file = !self.deployment_bytecode.starts_with("0x") && Path::new(&self.deployment_bytecode).is_file();
-        let runtime_is_file = !self.runtime_bytecode.starts_with("0x") && Path::new(&self.runtime_bytecode).is_file();
-        let (instructions, _, _, bytes) = decode_bytecode(&self.deployment_bytecode, is_file).await?;
+        let is_file = !self.deployment_bytecode.starts_with("0x")
+            && Path::new(&self.deployment_bytecode).is_file();
+        let runtime_is_file =
+            !self.runtime_bytecode.starts_with("0x") && Path::new(&self.runtime_bytecode).is_file();
+        let (instructions, _, _, bytes) =
+            decode_bytecode(&self.deployment_bytecode, is_file).await?;
         let runtime_bytes = input_to_bytes(&self.runtime_bytecode, runtime_is_file)?;
         let sections = locate_sections(&bytes, &instructions, &runtime_bytes)?;
         let (_clean_runtime, clean_report) = strip_bytecode(&bytes, &sections)?;

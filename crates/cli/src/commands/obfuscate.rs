@@ -78,7 +78,8 @@ impl super::Command for ObfuscateArgs {
         config.preserve_unknown_opcodes = true;
 
         // Step 4: Run obfuscation pipeline
-        let result = match obfuscate_bytecode(&input_bytecode, &runtime_bytecode_hex, config).await {
+        let result = match obfuscate_bytecode(&input_bytecode, &runtime_bytecode_hex, config).await
+        {
             Ok(result) => result,
             Err(e) => return Err(format!("{e}").into()),
         };

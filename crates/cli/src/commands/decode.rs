@@ -19,7 +19,8 @@ pub struct DecodeArgs {
 #[async_trait]
 impl super::Command for DecodeArgs {
     async fn execute(self) -> Result<(), Box<dyn Error>> {
-        let is_file = !self.deployment_bytecode.starts_with("0x") && Path::new(&self.deployment_bytecode).is_file();
+        let is_file = !self.deployment_bytecode.starts_with("0x")
+            && Path::new(&self.deployment_bytecode).is_file();
         let (instructions, _, asm, _) = decode_bytecode(&self.deployment_bytecode, is_file).await?;
         println!("{asm}");
         for instruction in instructions {
