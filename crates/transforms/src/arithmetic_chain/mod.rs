@@ -55,6 +55,7 @@ use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle};
 use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
 use rand::rngs::StdRng;
+use rand::Rng;
 use std::collections::HashSet;
 use tracing::debug;
 
@@ -117,13 +118,15 @@ impl ArithmeticChain {
         Self { config }
     }
 
-    /// Find all PUSH4-PUSH32 instructions that should be transformed.
+    /// Find all PUSH16-PUSH32 instructions that should be transformed.
     ///
     /// Returns tuples of (node_index, instruction_index, push_size, value).
+    /// Uses `transform_probability` to randomly skip some eligible targets.
     fn find_targets(
         &self,
         ir: &CfgIrBundle,
         protected_pcs: &HashSet<usize>,
+        rng: &mut StdRng,
     ) -> Vec<(NodeIndex, usize, u8, [u8; 32])> {
         let mut targets = Vec::new();
 
@@ -194,6 +197,11 @@ impl ArithmeticChain {
                     // Extract the value (padded to 32 bytes)
                     if let Some(ref imm) = instr.imm {
                         if let Ok(value) = parse_push_value(imm) {
+                            // Apply transform probability
+                            if rng.random::<f32>() > self.config.transform_probability {
+                                continue;
+                            }
+
                             debug!(
                                 "Found PUSH{} target at PC {:#x}, node {:?}, value: 0x{}",
                                 push_size,
@@ -270,7 +278,7 @@ impl Transform for ArithmeticChain {
             HashSet::new()
         };
 
-        let targets = self.find_targets(ir, &protected_pcs);
+        let targets = self.find_targets(ir, &protected_pcs, rng);
 
         if targets.is_empty() {
             debug!("No PUSH targets found - skipping");

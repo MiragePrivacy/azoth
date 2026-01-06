@@ -369,8 +369,11 @@ pub struct ChainConfig {
     pub inline_ratio: f32,
     /// Skip protected PCs (dispatcher selectors, controller targets, etc.).
     pub respect_protected_pcs: bool,
-    /// Maximum number of PUSH32 targets to transform per invocation.
+    /// Maximum number of PUSH targets to transform per invocation.
     pub max_targets: Option<usize>,
+    /// Probability of transforming each eligible PUSH (0.0 to 1.0).
+    /// 0.0 = none, 1.0 = all eligible targets.
+    pub transform_probability: f32,
 }
 
 impl Default for ChainConfig {
@@ -380,6 +383,7 @@ impl Default for ChainConfig {
             inline_ratio: 0.9,
             respect_protected_pcs: true,
             max_targets: None,
+            transform_probability: 0.6,
         }
     }
 }
