@@ -2,6 +2,7 @@ use crate::arithmetic_chain::ArithmeticChain;
 use crate::function_dispatcher::FunctionDispatcher;
 use crate::push_split::PushSplit;
 use crate::Transform;
+use crate::storage_gates::StorageGates;
 use azoth_core::seed::Seed;
 use azoth_core::{
     cfg_ir::{self, snapshot_bundle_with_runtime, Block, CfgIrDiff, OperationKind, TraceEvent},
@@ -37,6 +38,15 @@ impl std::fmt::Display for ObfuscationError {
 
 impl std::error::Error for ObfuscationError {}
 
+impl From<crate::Error> for ObfuscationError {
+    fn from(e: crate::Error) -> Self {
+        Self {
+            message: e.to_string(),
+            trace: Vec::new(),
+        }
+    }
+}
+
 /// Configuration for the obfuscation pipeline
 pub struct ObfuscationConfig {
     /// Cryptographic seed for deterministic obfuscation
@@ -62,7 +72,7 @@ impl Default for ObfuscationConfig {
     fn default() -> Self {
         Self {
             seed: Seed::generate(),
-            transforms: vec![Box::new(ArithmeticChain::new()), Box::new(PushSplit::new())],
+            transforms: vec![Box::new(ArithmeticChain::new()), Box::new(PushSplit::new()), Box::new(StorageGates::new())],
             preserve_unknown_opcodes: true,
         }
     }
@@ -379,8 +389,9 @@ pub async fn obfuscate_bytecode(
         );
         let dispatcher = FunctionDispatcher::new();
 
-        // Build edits for stub patches
+        // Build edits for stub patches and collect updated metadata
         let mut edits = Vec::new();
+        let mut updated_stub_patches = Vec::new();
         for (stub_node, old_pc, push_width, decoy_node) in stub_patches {
             // Look up the decoy block's first instruction PC (which should be the JUMPDEST)
             let new_decoy_pc = match &cfg_ir.cfg[decoy_node] {
@@ -429,6 +440,9 @@ pub async fn obfuscate_bytecode(
             );
 
             edits.push((stub_node, new_pc, Opcode::PUSH(push_width), Some(formatted)));
+
+            // Store updated metadata with new PC
+            updated_stub_patches.push((stub_node, new_pc, push_width, decoy_node));
         }
 
         if !edits.is_empty() {
@@ -436,6 +450,9 @@ pub async fn obfuscate_bytecode(
                 .apply_instruction_replacements(&mut cfg_ir, edits)
                 .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
         }
+
+        // Update the stub_patches metadata with remapped values
+        cfg_ir.stub_patches = Some(updated_stub_patches);
         // Debug: show resulting stub PUSH widths
         if let Some(stub_patches) = cfg_ir.stub_patches.clone() {
             for (stub_node, _, _, decoy_node) in stub_patches {
@@ -474,8 +491,9 @@ pub async fn obfuscate_bytecode(
         );
         let dispatcher = FunctionDispatcher::new();
 
-        // Build edits for decoy patches
+        // Build edits for decoy patches and collect updated metadata
         let mut edits = Vec::new();
+        let mut updated_decoy_patches = Vec::new();
         for (decoy_node, old_pc, push_width, old_target_pc) in decoy_patches {
             // Map the target PC using the PC mapping
             let new_target_pc = pc_mapping
@@ -512,6 +530,9 @@ pub async fn obfuscate_bytecode(
                 Opcode::PUSH(push_width),
                 Some(formatted),
             ));
+
+            // Store updated metadata with new target PC
+            updated_decoy_patches.push((decoy_node, new_pc, push_width, new_target_pc));
         }
 
         if !edits.is_empty() {
@@ -519,6 +540,9 @@ pub async fn obfuscate_bytecode(
                 .apply_instruction_replacements(&mut cfg_ir, edits)
                 .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
         }
+
+        // Update the decoy_patches metadata with remapped values
+        cfg_ir.decoy_patches = Some(updated_decoy_patches);
         tracing::debug!("  Decoy patches re-applied successfully");
     }
 
@@ -529,9 +553,36 @@ pub async fn obfuscate_bytecode(
             controller_patches.len()
         );
         let dispatcher = FunctionDispatcher::new();
-        dispatcher
-            .reapply_controller_patches(&mut cfg_ir, &controller_patches, &pc_mapping)
-            .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
+
+        // Build edits and collect updated metadata
+        let mut edits = Vec::new();
+        let mut updated_controller_patches = Vec::new();
+        for (node, old_push_pc, push_width, old_target_pc) in controller_patches {
+            let new_target_pc = pc_mapping
+                .get(&old_target_pc)
+                .copied()
+                .unwrap_or(old_target_pc);
+            let new_push_pc = pc_mapping.get(&old_push_pc).copied().unwrap_or(old_push_pc);
+
+            let target_rel = if let Some((start, _)) = cfg_ir.runtime_bounds {
+                new_target_pc.saturating_sub(start)
+            } else {
+                new_target_pc
+            };
+
+            let formatted = format!("{:0width$x}", target_rel, width = push_width as usize * 2);
+            edits.push((node, new_push_pc, Opcode::PUSH(push_width), Some(formatted)));
+
+            // Store updated metadata with new target PC
+            updated_controller_patches.push((node, new_push_pc, push_width, new_target_pc));
+        }
+
+        if !edits.is_empty() {
+            dispatcher.apply_instruction_replacements(&mut cfg_ir, edits)?;
+        }
+
+        // Update the controller_patches metadata with remapped values
+        cfg_ir.controller_patches = Some(updated_controller_patches);
         tracing::debug!("  Controller patches re-applied successfully");
     }
 
