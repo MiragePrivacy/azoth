@@ -336,9 +336,9 @@ pub enum ScatterStrategy {
         /// Offset within the data section where this value is stored.
         offset: usize,
     },
-    /// Embed as inline PUSH32 instruction.
+    /// Embed as inline PUSH instruction.
     Inline,
-    /// Embed as PUSH32 in an unreachable code path (not yet implemented).
+    /// Embed as PUSH in an unreachable code path (not yet implemented).
     #[allow(dead_code)]
     DeadPath {
         /// The CFG block containing the dead path with this value.
@@ -346,10 +346,10 @@ pub enum ScatterStrategy {
     },
 }
 
-/// A single arithmetic chain targeting one PUSH32 constant.
+/// A single arithmetic chain targeting one PUSH constant.
 #[derive(Debug, Clone)]
 pub struct ArithmeticChainDef {
-    /// Original PUSH32 value being protected.
+    /// Original PUSH value being protected (padded to 32 bytes).
     pub target_value: [u8; 32],
     /// Backward-computed initial values needed to produce target.
     pub initial_values: Vec<[u8; 32]>,
@@ -387,9 +387,9 @@ impl Default for ChainConfig {
 /// Metadata stored to enable chain reversal for testing and verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainReverseData {
-    /// PC of original PUSH32 instruction.
+    /// PC of original PUSH instruction.
     pub original_pc: usize,
-    /// Original 32-byte constant that was protected.
+    /// Original constant that was protected (padded to 32 bytes).
     pub original_value: [u8; 32],
     /// PC range of the replacement chain (start, end).
     pub chain_pc_range: (usize, usize),
@@ -413,9 +413,9 @@ pub struct ScatterInfo {
 pub enum ScatterLocation {
     /// Value stored in data section at given offset.
     DataSection { offset: usize },
-    /// Value embedded as inline PUSH32 instruction.
+    /// Value embedded as inline PUSH instruction.
     Inline,
-    /// Value stored as PUSH32 in dead code block at given PC.
+    /// Value stored as PUSH in dead code block at given PC.
     #[allow(dead_code)]
     DeadPathBlock { pc: usize },
 }

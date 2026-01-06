@@ -8,7 +8,7 @@ use azoth_core::Opcode;
 /// The generated instruction sequence:
 /// 1. Loads the first initial value onto the stack
 /// 2. For each operation: loads the next value, applies the operation
-/// 3. Result is left on the stack (replacing what PUSH32 would have produced)
+/// 3. Result is left on the stack (replacing what the original PUSH would have produced)
 pub fn compile_chain(
     chain: &ArithmeticChainDef,
     _ctx: &ScatterContext,
@@ -113,7 +113,7 @@ pub fn estimate_bytecode_size(chain: &ArithmeticChainDef) -> usize {
 
 /// Calculate the stack delta of a compiled chain.
 ///
-/// Should be +1, same as the PUSH32 it replaces.
+/// Should be +1, same as the PUSH instruction it replaces.
 pub fn stack_delta(chain: &ArithmeticChainDef) -> i32 {
     let loads = chain.initial_values.len() as i32;
     let ops = chain.operations.len() as i32;

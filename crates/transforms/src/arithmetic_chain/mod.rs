@@ -1,12 +1,13 @@
 //! Arithmetic chain obfuscation transform.
 //!
-//! This transform protects PUSH32 constants by replacing them with arithmetic
-//! chains that compute the same value at runtime from scattered initial values.
+//! This transform protects PUSH constants (16-32 bytes) by replacing them with
+//! arithmetic chains that compute the same value at runtime from scattered
+//! initial values.
 //!
 //! ## How It Works
 //!
-//! 1. **Target Identification**: Find all PUSH32 instructions not in protected
-//!    regions (dispatcher selectors, controller targets, etc.)
+//! 1. **Target Identification**: Find all PUSH16-PUSH32 instructions not in
+//!    protected regions (dispatcher selectors, controller targets, etc.)
 //!
 //! 2. **Chain Generation**: For each target, generate a random sequence of
 //!    arithmetic operations (ADD, SUB, XOR, AND, OR, MUL, DIV)
@@ -18,13 +19,13 @@
 //! 4. **Value Scattering**: Embed initial values either in a data section
 //!    (loaded via CODECOPY) or in dead code paths
 //!
-//! 5. **Code Replacement**: Replace each PUSH32 with the compiled chain
+//! 5. **Code Replacement**: Replace each PUSH with the compiled chain
 //!
 //! ## Example
 //!
 //! Original:
 //! ```text
-//! PUSH32 0xdeadbeef...
+//! PUSH8 0xdeadbeef12345678
 //! ```
 //!
 //! Transformed (conceptually):
@@ -40,7 +41,7 @@
 //! ADD                 ; v0 + v1
 //! ; ... load v2 ...
 //! XOR                 ; result
-//! ; Result equals original 0xdeadbeef...
+//! ; Result equals original 0x00...00deadbeef12345678 (padded to 32 bytes)
 //! ```
 
 pub mod chain;
@@ -78,10 +79,18 @@ fn collect_protected_pcs(ir: &CfgIrBundle) -> HashSet<usize> {
     protected
 }
 
-/// Arithmetic chain transform for PUSH32 constant obfuscation.
+/// Minimum PUSH size to consider for arithmetic chain transformation.
+/// Set to 16 to avoid transforming smaller values that may be jump targets,
+/// function selectors, or other semantic constants.
+const MIN_PUSH_SIZE: u8 = 16;
+
+/// Maximum PUSH size to consider for arithmetic chain transformation.
+const MAX_PUSH_SIZE: u8 = 32;
+
+/// Arithmetic chain transform for PUSH constant obfuscation.
 ///
-/// This transform replaces PUSH32 instructions with computed values derived
-/// from scattered initial values through arithmetic operation chains.
+/// This transform replaces PUSH16-PUSH32 instructions with computed values
+/// derived from scattered initial values through arithmetic operation chains.
 #[derive(Debug)]
 pub struct ArithmeticChain {
     config: ChainConfig,
@@ -108,37 +117,40 @@ impl ArithmeticChain {
         Self { config }
     }
 
-    /// Find all PUSH32 instructions that should be transformed.
+    /// Find all PUSH4-PUSH32 instructions that should be transformed.
+    ///
+    /// Returns tuples of (node_index, instruction_index, push_size, value).
     fn find_targets(
         &self,
         ir: &CfgIrBundle,
         protected_pcs: &HashSet<usize>,
-    ) -> Vec<(NodeIndex, usize, [u8; 32])> {
+    ) -> Vec<(NodeIndex, usize, u8, [u8; 32])> {
         let mut targets = Vec::new();
 
         for node_idx in ir.cfg.node_indices() {
             if let Block::Body(body) = &ir.cfg[node_idx] {
                 for (instr_idx, instr) in body.instructions.iter().enumerate() {
-                    // Check if this is a PUSH32
-                    if !matches!(instr.op, Opcode::PUSH(32)) {
-                        continue;
-                    }
+                    // Check if this is a PUSH in the target range (4-32 bytes)
+                    let push_size = match instr.op {
+                        Opcode::PUSH(n) if (MIN_PUSH_SIZE..=MAX_PUSH_SIZE).contains(&n) => n,
+                        _ => continue,
+                    };
 
                     // Skip protected PCs
                     if self.config.respect_protected_pcs && protected_pcs.contains(&instr.pc) {
-                        debug!("Skipping protected PUSH32 at PC {:#x}", instr.pc);
+                        debug!("Skipping protected PUSH{} at PC {:#x}", push_size, instr.pc);
                         continue;
                     }
 
-                    // Skip PUSH32 immediately followed by JUMP/JUMPI - these are jump targets
+                    // Skip PUSH immediately followed by JUMP/JUMPI - these are jump targets
                     if body
                         .instructions
                         .get(instr_idx + 1)
                         .is_some_and(|next| matches!(next.op, Opcode::JUMP | Opcode::JUMPI))
                     {
                         debug!(
-                            "Skipping PUSH32 at PC {:#x} - immediate jump target",
-                            instr.pc
+                            "Skipping PUSH{} at PC {:#x} - immediate jump target",
+                            push_size, instr.pc
                         );
                         continue;
                     }
@@ -148,41 +160,48 @@ impl ArithmeticChain {
                         // Panic(uint256) selector: 0x4e487b71
                         if imm.starts_with("4e487b71") {
                             debug!(
-                                "Skipping PUSH32 at PC {:#x} - Solidity panic selector",
-                                instr.pc
+                                "Skipping PUSH{} at PC {:#x} - Solidity panic selector",
+                                push_size, instr.pc
                             );
                             continue;
                         }
                         // Error(string) selector: 0x08c379a0
                         if imm.starts_with("08c379a0") {
                             debug!(
-                                "Skipping PUSH32 at PC {:#x} - Solidity error selector",
-                                instr.pc
+                                "Skipping PUSH{} at PC {:#x} - Solidity error selector",
+                                push_size, instr.pc
                             );
                             continue;
                         }
-                        // Max uint256 (all 0xff) - used in overflow checks
+                        // Max value (all 0xff) - used in overflow checks
                         if imm.chars().all(|c| c == 'f' || c == 'F') {
-                            debug!("Skipping PUSH32 at PC {:#x} - max uint256 value", instr.pc);
+                            debug!(
+                                "Skipping PUSH{} at PC {:#x} - max value",
+                                push_size, instr.pc
+                            );
                             continue;
                         }
                         // Zero value (all 0x00) - trivial, not worth transforming
                         if imm.chars().all(|c| c == '0') {
-                            debug!("Skipping PUSH32 at PC {:#x} - zero value", instr.pc);
+                            debug!(
+                                "Skipping PUSH{} at PC {:#x} - zero value",
+                                push_size, instr.pc
+                            );
                             continue;
                         }
                     }
 
-                    // Extract the 32-byte value
+                    // Extract the value (padded to 32 bytes)
                     if let Some(ref imm) = instr.imm {
-                        if let Ok(value) = parse_push32_value(imm) {
+                        if let Ok(value) = parse_push_value(imm) {
                             debug!(
-                                "Found PUSH32 target at PC {:#x}, node {:?}, value: 0x{}",
+                                "Found PUSH{} target at PC {:#x}, node {:?}, value: 0x{}",
+                                push_size,
                                 instr.pc,
                                 node_idx,
-                                hex::encode(&value[..8]) // First 8 bytes for brevity
+                                hex::encode(&value[32 - push_size as usize..])
                             );
-                            targets.push((node_idx, instr_idx, value));
+                            targets.push((node_idx, instr_idx, push_size, value));
                         }
                     }
                 }
@@ -197,7 +216,7 @@ impl ArithmeticChain {
         targets
     }
 
-    /// Replace a PUSH32 instruction with a compiled chain.
+    /// Replace a PUSH instruction with a compiled chain.
     fn replace_instruction(
         &self,
         ir: &mut CfgIrBundle,
@@ -254,23 +273,24 @@ impl Transform for ArithmeticChain {
         let targets = self.find_targets(ir, &protected_pcs);
 
         if targets.is_empty() {
-            debug!("No PUSH32 targets found - skipping");
+            debug!("No PUSH targets found - skipping");
             return Ok(false);
         }
 
-        debug!("Found {} PUSH32 targets for transformation", targets.len());
+        debug!("Found {} PUSH targets for transformation", targets.len());
 
-        let mut chains: Vec<(NodeIndex, usize, ArithmeticChainDef)> = Vec::new();
-        for (node_idx, instr_idx, value) in targets {
+        // Store (node_idx, instr_idx, push_size, chain) for each target
+        let mut chains: Vec<(NodeIndex, usize, u8, ArithmeticChainDef)> = Vec::new();
+        for (node_idx, instr_idx, push_size, value) in targets {
             let chain = generate_chain(value, &self.config, rng);
 
-            assert_eq!(
+            debug_assert_eq!(
                 evaluate_forward(&chain.initial_values, &chain.operations),
                 value,
                 "Chain forward evaluation must match target"
             );
 
-            chains.push((node_idx, instr_idx, chain));
+            chains.push((node_idx, instr_idx, push_size, chain));
         }
 
         if chains.is_empty() {
@@ -279,18 +299,18 @@ impl Transform for ArithmeticChain {
         }
 
         let mut scatter_ctx = ScatterContext::new();
-        for (_, _, chain) in &mut chains {
+        for (_, _, _, chain) in &mut chains {
             apply_scattering(ir, chain, &mut scatter_ctx, rng)?;
         }
 
         // Estimate runtime code length for CODECOPY offset calculation
-        // We need to account for the size increase from replacing PUSH32s with chains
+        // We need to account for the size increase from replacing PUSH instructions with chains
         let base_runtime_length = estimate_runtime_length(ir);
 
         // Calculate how much the runtime will grow from chain replacements
-        // Each PUSH32 (33 bytes) is replaced with CODECOPY load sequences + operations
+        // Each PUSH{n} (1+n bytes) is replaced with CODECOPY load sequences + operations
         let mut growth: usize = 0;
-        for (_, _, chain) in &chains {
+        for (_, _, push_size, chain) in &chains {
             // Each value load is 11 bytes for typical offsets < 65536:
             // PUSH1 mem(2) + PUSH2 offset(3) + PUSH1 size(2) + CODECOPY(1) + PUSH1 mem(2) + MLOAD(1)
             let load_size = chain.initial_values.len() * 11;
@@ -306,18 +326,20 @@ impl Transform for ArithmeticChain {
                     }
                 })
                 .sum();
-            // Chain size minus the PUSH32 it replaces (33 bytes)
+            // Chain size minus the original PUSH instruction (1 + push_size bytes)
+            let original_size = 1 + *push_size as usize;
             let chain_size = load_size + ops_size;
             debug!(
-                "Chain: {} values, {} ops, load_size={}, ops_size={}, chain_size={}, growth={}",
+                "Chain: {} values, {} ops, load_size={}, ops_size={}, chain_size={}, original={}, growth={}",
                 chain.initial_values.len(),
                 chain.operations.len(),
                 load_size,
                 ops_size,
                 chain_size,
-                chain_size.saturating_sub(33)
+                original_size,
+                chain_size.saturating_sub(original_size)
             );
-            growth += chain_size.saturating_sub(33);
+            growth += chain_size.saturating_sub(original_size);
         }
 
         // Total offset: runtime code + growth from chains
@@ -328,7 +350,7 @@ impl Transform for ArithmeticChain {
             base_runtime_length, growth, runtime_length
         );
 
-        for (node_idx, instr_idx, chain) in chains.into_iter().rev() {
+        for (node_idx, instr_idx, _push_size, chain) in chains.into_iter().rev() {
             self.replace_instruction(
                 ir,
                 node_idx,
@@ -352,18 +374,15 @@ impl Transform for ArithmeticChain {
     }
 }
 
-/// Parse a PUSH32 immediate value from hex string.
-fn parse_push32_value(hex_str: &str) -> std::result::Result<[u8; 32], hex::FromHexError> {
+/// Parse a PUSH immediate value from hex string into a 32-byte array.
+///
+/// The value is right-aligned (padded with leading zeros) to match EVM semantics.
+fn parse_push_value(hex_str: &str) -> std::result::Result<[u8; 32], hex::FromHexError> {
     let bytes = hex::decode(hex_str)?;
-    if bytes.len() != 32 {
-        // Pad with leading zeros if needed
-        let mut value = [0u8; 32];
-        let offset = 32 - bytes.len();
-        value[offset..].copy_from_slice(&bytes);
-        return Ok(value);
-    }
+    // Pad with leading zeros to 32 bytes
     let mut value = [0u8; 32];
-    value.copy_from_slice(&bytes);
+    let offset = 32 - bytes.len();
+    value[offset..].copy_from_slice(&bytes);
     Ok(value)
 }
 
@@ -406,17 +425,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_push32_value_full() {
+    fn parse_push_value_full() {
         let hex = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-        let result = parse_push32_value(hex).unwrap();
+        let result = parse_push_value(hex).unwrap();
         assert_eq!(&result[0..4], &[0xde, 0xad, 0xbe, 0xef]);
     }
 
     #[test]
-    fn parse_push32_value_short_pads_zeros() {
+    fn parse_push_value_short_pads_zeros() {
         let hex = "42";
-        let result = parse_push32_value(hex).unwrap();
+        let result = parse_push_value(hex).unwrap();
         assert_eq!(result[31], 0x42);
         assert_eq!(result[0..31], [0u8; 31]);
+    }
+
+    #[test]
+    fn parse_push_value_4_bytes() {
+        let hex = "deadbeef";
+        let result = parse_push_value(hex).unwrap();
+        assert_eq!(&result[28..32], &[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(result[0..28], [0u8; 28]);
+    }
+
+    #[test]
+    fn parse_push_value_8_bytes() {
+        let hex = "1234567890abcdef";
+        let result = parse_push_value(hex).unwrap();
+        assert_eq!(
+            &result[24..32],
+            &[0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef]
+        );
+        assert_eq!(result[0..24], [0u8; 24]);
     }
 }
