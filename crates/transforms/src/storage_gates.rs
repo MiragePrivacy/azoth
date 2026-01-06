@@ -297,11 +297,11 @@ impl StorageGates {
 
         while let Some(node) = stack.pop() {
             if let Block::Body(body) = &ir.cfg[node] {
-                if body.instructions.iter().any(|instr| {
-                    Self::STATE_MUTATING_OPCODES
-                        .iter()
-                        .any(|op| *op == instr.op)
-                }) {
+                if body
+                    .instructions
+                    .iter()
+                    .any(|instr| Self::STATE_MUTATING_OPCODES.contains(&instr.op))
+                {
                     return true;
                 }
             }
@@ -422,8 +422,6 @@ impl StorageGates {
         Self::node_containing_pc(ir, pc)
     }
 
-    
-
     fn infer_successors(ir: &CfgIrBundle, body: &BlockBody) -> Vec<NodeIndex> {
         let mut successors = Vec::new();
         if body.instructions.is_empty() {
@@ -498,13 +496,21 @@ impl StorageGates {
         }
         let instructions = &body.instructions;
         let immediate = if jump_idx >= 1
-            && matches!(instructions[jump_idx - 1].op, Opcode::PUSH(_) | Opcode::PUSH0)
-        {
+            && matches!(
+                instructions[jump_idx - 1].op,
+                Opcode::PUSH(_) | Opcode::PUSH0
+            ) {
             Self::parse_immediate(&instructions[jump_idx - 1])
         } else if jump_idx >= 3
             && instructions[jump_idx - 1].op == Opcode::ADD
-            && matches!(instructions[jump_idx - 2].op, Opcode::PUSH(_) | Opcode::PUSH0)
-            && matches!(instructions[jump_idx - 3].op, Opcode::PUSH(_) | Opcode::PUSH0)
+            && matches!(
+                instructions[jump_idx - 2].op,
+                Opcode::PUSH(_) | Opcode::PUSH0
+            )
+            && matches!(
+                instructions[jump_idx - 3].op,
+                Opcode::PUSH(_) | Opcode::PUSH0
+            )
         {
             let first = Self::parse_immediate(&instructions[jump_idx - 3])?;
             let second = Self::parse_immediate(&instructions[jump_idx - 2])?;
@@ -579,9 +585,9 @@ impl Transform for StorageGates {
             .node_indices()
             .filter(|node| {
                 if let Block::Body(body) = &ir.cfg[*node] {
-                    body.instructions.iter().any(|instr| {
-                        Self::STATE_MUTATING_OPCODES.iter().any(|op| *op == instr.op)
-                    })
+                    body.instructions
+                        .iter()
+                        .any(|instr| Self::STATE_MUTATING_OPCODES.contains(&instr.op))
                 } else {
                     false
                 }
