@@ -4,7 +4,7 @@
 //! This module processes input bytecode and uses the unified obfuscation pipeline
 //! from `azoth-transform` to apply transforms and output obfuscated bytecode.
 
-use crate::commands::ObfuscateError;
+use crate::commands::{ObfuscateError, DEFAULT_PASSES};
 use async_trait::async_trait;
 use azoth_core::seed::Seed;
 use azoth_transform::obfuscator::{
@@ -28,9 +28,9 @@ pub struct ObfuscateArgs {
     /// Cryptographic seed for deterministic obfuscation.
     #[arg(long)]
     seed: Option<String>,
-    /// Comma-separated list of OPTIONAL transforms (default: shuffle,jump_transform,opaque_pred).
+    /// Comma-separated list of transforms to apply.
     /// Note: function_dispatcher is ALWAYS applied and doesn't need to be specified.
-    #[arg(long, default_value = "shuffle")]
+    #[arg(long, default_value = DEFAULT_PASSES)]
     passes: String,
     /// Path to emit gas/size report as JSON (optional).
     #[arg(long)]

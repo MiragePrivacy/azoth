@@ -43,7 +43,6 @@ jobs:
           RUST_LOG=error ./target/release/azoth decompile-diff \
             --deployment "$DEPLOYMENT" \
             --runtime "$RUNTIME" \
-            --passes "" \
             --iterations 50 \
             --changed-only \
             -o decompile-diff.txt \

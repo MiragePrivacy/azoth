@@ -12,6 +12,8 @@ pub mod tui;
 
 use thiserror::Error;
 
+pub const DEFAULT_PASSES: &str = "arithmetic_chain";
+
 /// Errors that can occur during obfuscation.
 #[derive(Debug, Error)]
 pub enum ObfuscateError {
