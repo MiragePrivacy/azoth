@@ -25,11 +25,60 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
+use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::layer::SubscriberExt;
+
+/// A writer that captures log output to a buffer.
+/// Uses Arc<Mutex> because tracing's `with_default` requires Send + Sync.
+/// parking_lot::Mutex is just a single atomic op for uncontended locks.
+#[derive(Clone)]
+struct LogCapture {
+    buffer: Arc<Mutex<Vec<u8>>>,
+}
+
+impl LogCapture {
+    fn new() -> Self {
+        Self {
+            buffer: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn clear(&self) {
+        self.buffer.lock().clear();
+    }
+
+    fn extract_lines(&self) -> Vec<String> {
+        String::from_utf8_lossy(&self.buffer.lock())
+            .lines()
+            .map(|s| s.to_string())
+            .collect()
+    }
+}
+
+impl Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buffer.lock().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for LogCapture {
+    type Writer = LogCapture;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
 
 // Contract bytecodes
 const ESCROW_DEPLOYMENT: &str =
@@ -180,6 +229,8 @@ struct CrashReport {
     obfuscated_bytecode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    logs: Vec<String>,
 }
 
 /// Statistics tracked during fuzzing
@@ -334,6 +385,7 @@ struct FuzzFailure {
     message: String,
     trace: Vec<TraceEvent>,
     obfuscated_bytecode: Option<String>,
+    logs: Vec<String>,
 }
 
 fn save_crash(
@@ -363,6 +415,7 @@ fn save_crash(
         message: failure.message.clone(),
         obfuscated_bytecode: failure.obfuscated_bytecode.clone(),
         trace_file,
+        logs: failure.logs.clone(),
     };
 
     let path = crash_dir.join(format!("crash_{}.json", report.id));
@@ -380,6 +433,7 @@ async fn run_fuzz_input(input: &FuzzInput) -> Result<(), FuzzFailure> {
         message: format!("invalid passes: {e}"),
         trace: Vec::new(),
         obfuscated_bytecode: None,
+        logs: Vec::new(),
     })?;
 
     let config = ObfuscationConfig { seed, transforms, preserve_unknown_opcodes: true };
@@ -397,6 +451,7 @@ async fn run_fuzz_input(input: &FuzzInput) -> Result<(), FuzzFailure> {
                 message: e.message,
                 trace: e.trace,
                 obfuscated_bytecode: None,
+                logs: Vec::new(),
             }
         })?;
 
@@ -406,6 +461,7 @@ async fn run_fuzz_input(input: &FuzzInput) -> Result<(), FuzzFailure> {
             message: "failed to prepare original bytecode".into(),
             trace: result.trace.clone(),
             obfuscated_bytecode: Some(result.obfuscated_bytecode.clone()),
+            logs: Vec::new(),
         })?;
 
     let original_deployed = deploy_to_revm(&original_bytes, input.contract).is_ok();
@@ -416,6 +472,7 @@ async fn run_fuzz_input(input: &FuzzInput) -> Result<(), FuzzFailure> {
             message: "failed to prepare obfuscated bytecode".into(),
             trace: result.trace.clone(),
             obfuscated_bytecode: Some(result.obfuscated_bytecode.clone()),
+            logs: Vec::new(),
         })?;
 
     let obfuscated_deployed = deploy_to_revm(&prepared_obfuscated, input.contract).is_ok();
@@ -433,10 +490,32 @@ async fn run_fuzz_input(input: &FuzzInput) -> Result<(), FuzzFailure> {
             ),
             trace: result.trace,
             obfuscated_bytecode: Some(result.obfuscated_bytecode),
+            logs: Vec::new(),
         });
     }
 
     Ok(())
+}
+
+/// Runs a fuzz input using the provided log capture buffer.
+/// Clears the buffer before running and extracts logs on failure.
+fn run_fuzz_input_capturing(
+    input: &FuzzInput,
+    log_capture: &LogCapture,
+) -> Result<(), FuzzFailure> {
+    // Clear the buffer before each run
+    log_capture.clear();
+
+    // Run the fuzz input synchronously (we're already inside with_default)
+    let result = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(run_fuzz_input(input))
+    });
+
+    // On failure, attach the captured logs
+    result.map_err(|mut failure| {
+        failure.logs = log_capture.extract_lines();
+        failure
+    })
 }
 
 async fn replay_crash(crash_file: &PathBuf) -> Result<(), Box<dyn Error>> {
@@ -460,15 +539,48 @@ async fn replay_crash(crash_file: &PathBuf) -> Result<(), Box<dyn Error>> {
     if let Some(ref trace) = report.trace_file {
         println!("Debug trace: {trace}");
     }
+    if !report.logs.is_empty() {
+        println!("Captured logs: {} lines", report.logs.len());
+    }
     println!();
 
+    // Display captured logs from the crash file
+    if !report.logs.is_empty() {
+        println!("=== Captured Logs ===");
+        for line in &report.logs {
+            println!("{line}");
+        }
+        println!();
+    }
+
     println!("Running...");
-    match run_fuzz_input(&report.input).await {
+
+    // Set up log capturing for the replay
+    let log_capture = LogCapture::new();
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(log_capture.clone())
+            .with_ansi(false)
+            .without_time(),
+    );
+
+    let result = tracing::subscriber::with_default(subscriber, || {
+        run_fuzz_input_capturing(&report.input, &log_capture)
+    });
+
+    match result {
         Ok(()) => println!("SUCCESS - No error reproduced!"),
         Err(failure) => {
             println!("REPRODUCED!");
             println!("Error: {}", failure.kind);
             println!("Message: {}", failure.message);
+            if !failure.logs.is_empty() {
+                println!();
+                println!("=== New Logs ===");
+                for line in &failure.logs {
+                    println!("{line}");
+                }
+            }
         }
     }
 
@@ -520,6 +632,9 @@ fn list_crashes(crash_dir: &PathBuf) -> Result<(), Box<dyn Error>> {
         if report.trace_file.is_some() {
             println!("  Trace: available");
         }
+        if !report.logs.is_empty() {
+            println!("  Logs: {} lines", report.logs.len());
+        }
         println!();
     }
 
@@ -533,6 +648,31 @@ async fn fuzzer_worker(
     semaphore: Arc<Semaphore>,
     crash_dir: PathBuf,
 ) {
+    // Create a log capture buffer for this worker
+    let log_capture = LogCapture::new();
+
+    // Set up a subscriber that captures logs to our buffer (no console output)
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(log_capture.clone())
+            .with_ansi(false)
+            .without_time(),
+    );
+
+    // Run the entire worker loop with our capturing subscriber
+    tracing::subscriber::with_default(subscriber, || {
+        fuzzer_worker_inner(worker_id, stats, args, semaphore, crash_dir, log_capture)
+    });
+}
+
+fn fuzzer_worker_inner(
+    worker_id: usize,
+    stats: Arc<FuzzStats>,
+    args: Arc<FuzzArgs>,
+    semaphore: Arc<Semaphore>,
+    crash_dir: PathBuf,
+    log_capture: LogCapture,
+) {
     let mut rng = SmallRng::seed_from_u64(worker_id as u64 ^ 0xdeadbeef);
 
     loop {
@@ -544,7 +684,11 @@ async fn fuzzer_worker(
             break;
         }
 
-        let _permit = semaphore.acquire().await.unwrap();
+        // Acquire permit synchronously
+        let _permit = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(semaphore.acquire())
+        })
+        .unwrap();
 
         let contract = Contract::ALL[(rng.next_u32() as usize) % Contract::ALL.len()];
         let mut seed_bytes = [0u8; 32];
@@ -553,7 +697,7 @@ async fn fuzzer_worker(
 
         let input = FuzzInput::new(contract, seed_bytes, passes);
 
-        match run_fuzz_input(&input).await {
+        match run_fuzz_input_capturing(&input, &log_capture) {
             Ok(()) => {
                 stats
                     .successful_obfuscations
@@ -593,17 +737,20 @@ async fn fuzzer_worker(
         }
 
         if iters > 0 && iters.is_multiple_of(100) {
-            let rate = iters as f64 / stats.start_time.elapsed().as_secs_f64();
+            let elapsed = stats.start_time.elapsed();
+            let secs = elapsed.as_secs();
+            let rate = iters as f64 / elapsed.as_secs_f64();
             let crashes = stats.unique_crashes.lock().len();
             print!(
-                "\r[{:.1}/s] iter={} ok={} mismatch={} crashes={}   ",
+                "\r[{:02}:{:02}] {:.1}/s iter={} ok={} mismatch={} crashes={}   ",
+                secs / 60,
+                secs % 60,
                 rate,
                 iters,
                 stats.successful_deployments.load(Ordering::Relaxed),
                 stats.deployment_mismatches.load(Ordering::Relaxed),
                 crashes
             );
-            use std::io::Write;
             std::io::stdout().flush().ok();
         }
     }
