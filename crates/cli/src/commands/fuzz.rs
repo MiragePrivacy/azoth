@@ -30,9 +30,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Semaphore;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
+
+fn num_cpus() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
 
 /// A writer that captures log output to a buffer.
 /// Uses Arc<Mutex> because tracing's `with_default` requires Send + Sync.
@@ -96,8 +101,8 @@ pub struct FuzzArgs {
     #[command(subcommand)]
     command: Option<FuzzCommand>,
 
-    /// Number of parallel fuzzing tasks
-    #[arg(short = 'j', long, default_value = "8")]
+    /// Number of parallel fuzzing tasks (defaults to number of CPU cores)
+    #[arg(short = 'j', long, default_value_t = num_cpus())]
     jobs: usize,
 
     /// Maximum iterations (0 = infinite)
@@ -133,6 +138,13 @@ enum Contract {
 
 impl Contract {
     const ALL: [Self; 2] = [Self::Escrow, Self::Counter];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Escrow => "escrow",
+            Self::Counter => "counter",
+        }
+    }
 
     fn deployment_hex(self) -> &'static str {
         match self {
@@ -266,7 +278,8 @@ impl FuzzStats {
             0.0
         };
 
-        println!("\n=== Fuzzing Summary ===");
+        // Clear the status line and print summary header
+        println!("\r\x1b[K=== Fuzzing Summary ===");
         println!("Duration: {:.1}s", elapsed);
         println!("Iterations: {}", iters);
         println!("Rate: {:.1} iter/sec", rate);
@@ -499,17 +512,15 @@ async fn run_fuzz_input(input: &FuzzInput) -> Result<(), FuzzFailure> {
 
 /// Runs a fuzz input using the provided log capture buffer.
 /// Clears the buffer before running and extracts logs on failure.
-fn run_fuzz_input_capturing(
+async fn run_fuzz_input_capturing(
     input: &FuzzInput,
     log_capture: &LogCapture,
 ) -> Result<(), FuzzFailure> {
     // Clear the buffer before each run
     log_capture.clear();
 
-    // Run the fuzz input synchronously (we're already inside with_default)
-    let result = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(run_fuzz_input(input))
-    });
+    // Run the fuzz input
+    let result = run_fuzz_input(input).await;
 
     // On failure, attach the captured logs
     result.map_err(|mut failure| {
@@ -563,10 +574,10 @@ async fn replay_crash(crash_file: &PathBuf) -> Result<(), Box<dyn Error>> {
             .with_ansi(false)
             .without_time(),
     );
+    let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+    let _guard = tracing::dispatcher::set_default(&dispatch);
 
-    let result = tracing::subscriber::with_default(subscriber, || {
-        run_fuzz_input_capturing(&report.input, &log_capture)
-    });
+    let result = run_fuzz_input_capturing(&report.input, &log_capture).await;
 
     match result {
         Ok(()) => println!("SUCCESS - No error reproduced!"),
@@ -645,7 +656,6 @@ async fn fuzzer_worker(
     worker_id: usize,
     stats: Arc<FuzzStats>,
     args: Arc<FuzzArgs>,
-    semaphore: Arc<Semaphore>,
     crash_dir: PathBuf,
 ) {
     // Create a log capture buffer for this worker
@@ -658,21 +668,9 @@ async fn fuzzer_worker(
             .with_ansi(false)
             .without_time(),
     );
+    let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+    let _guard = tracing::dispatcher::set_default(&dispatch);
 
-    // Run the entire worker loop with our capturing subscriber
-    tracing::subscriber::with_default(subscriber, || {
-        fuzzer_worker_inner(worker_id, stats, args, semaphore, crash_dir, log_capture)
-    });
-}
-
-fn fuzzer_worker_inner(
-    worker_id: usize,
-    stats: Arc<FuzzStats>,
-    args: Arc<FuzzArgs>,
-    semaphore: Arc<Semaphore>,
-    crash_dir: PathBuf,
-    log_capture: LogCapture,
-) {
     let mut rng = SmallRng::seed_from_u64(worker_id as u64 ^ 0xdeadbeef);
 
     loop {
@@ -684,12 +682,6 @@ fn fuzzer_worker_inner(
             break;
         }
 
-        // Acquire permit synchronously
-        let _permit = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(semaphore.acquire())
-        })
-        .unwrap();
-
         let contract = Contract::ALL[(rng.next_u32() as usize) % Contract::ALL.len()];
         let mut seed_bytes = [0u8; 32];
         rng.fill_bytes(&mut seed_bytes);
@@ -697,7 +689,7 @@ fn fuzzer_worker_inner(
 
         let input = FuzzInput::new(contract, seed_bytes, passes);
 
-        match run_fuzz_input_capturing(&input, &log_capture) {
+        match run_fuzz_input_capturing(&input, &log_capture).await {
             Ok(()) => {
                 stats
                     .successful_obfuscations
@@ -789,25 +781,24 @@ impl super::Command for FuzzArgs {
             }
         );
         println!("Crash dir: {}", self.crash_dir.display());
-        println!("Contracts: escrow, counter");
-        println!("Transforms: none, shuffle, opaque, jump_addr, and combinations");
+        let contracts: Vec<_> = Contract::ALL.iter().map(|c| c.name()).collect();
+        println!("Contracts: {}", contracts.join(", "));
+        println!("Transforms: none, {}", FUZZ_PASSES.join(", "));
         println!();
 
         let args = Arc::new(self);
         let stats = Arc::new(FuzzStats::new());
-        let semaphore = Arc::new(Semaphore::new(args.jobs * 2));
         let crash_dir = args.crash_dir.clone();
 
         let mut handles = Vec::new();
         for worker_id in 0..args.jobs {
             let stats = stats.clone();
             let args = args.clone();
-            let semaphore = semaphore.clone();
             let crash_dir = crash_dir.clone();
 
-            handles.push(tokio::spawn(async move {
-                fuzzer_worker(worker_id, stats, args, semaphore, crash_dir).await;
-            }));
+            handles.push(tokio::spawn(
+                fuzzer_worker(worker_id, stats, args, crash_dir),
+            ));
         }
 
         for handle in handles {
