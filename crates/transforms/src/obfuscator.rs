@@ -11,6 +11,29 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
+/// Error from the obfuscation pipeline, including a partial trace for debugging.
+#[derive(Debug)]
+pub struct ObfuscationError {
+    /// The underlying error message.
+    pub message: String,
+    /// Partial trace captured before the error occurred.
+    pub trace: Vec<TraceEvent>,
+}
+
+impl ObfuscationError {
+    fn from_err(e: impl std::fmt::Display, trace: &[TraceEvent]) -> Self {
+        Self { message: e.to_string(), trace: trace.to_vec() }
+    }
+}
+
+impl std::fmt::Display for ObfuscationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for ObfuscationError {}
+
 /// Configuration for the obfuscation pipeline
 pub struct ObfuscationConfig {
     /// Cryptographic seed for deterministic obfuscation
@@ -101,13 +124,15 @@ pub async fn obfuscate_bytecode(
     deployment_bytecode: &str,
     runtime_bytecode: &str,
     config: ObfuscationConfig,
-) -> Result<ObfuscationResult, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ObfuscationResult, ObfuscationError> {
     tracing::debug!("Starting obfuscation pipeline:");
     tracing::debug!("  User transforms: {}", config.transforms.len());
 
     // Step 1: Process bytecode to CFG-IR
     let (mut cfg_ir, instructions, sections, bytes) =
-        process_bytecode_to_cfg(deployment_bytecode, false, runtime_bytecode, false).await?;
+        process_bytecode_to_cfg(deployment_bytecode, false, runtime_bytecode, false)
+            .await
+            .map_err(|e| ObfuscationError { message: e.to_string(), trace: Vec::new() })?;
     let original_size = bytes.len();
 
     tracing::debug!("  Input size: {} bytes", original_size);
@@ -293,11 +318,15 @@ pub async fn obfuscate_bytecode(
 
     // Step 5: Reindex PCs
     tracing::debug!("  Reindexing PCs to normalize to 0-based addressing");
-    let (pc_mapping, old_runtime_bounds) = cfg_ir.reindex_pcs()?;
+    let (pc_mapping, old_runtime_bounds) = cfg_ir
+        .reindex_pcs()
+        .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
     tracing::debug!("  PC reindexing complete: {} mappings", pc_mapping.len());
 
     // Patch jump immediates using the PC mapping
-    cfg_ir.patch_jump_immediates(&pc_mapping, old_runtime_bounds)?;
+    cfg_ir
+        .patch_jump_immediates(&pc_mapping, old_runtime_bounds)
+        .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
     tracing::debug!("  Patched jump immediates after PC reindexing");
 
     // Re-apply dispatcher jump target patches with OLD controller PCs (before updating)
@@ -311,12 +340,14 @@ pub async fn obfuscate_bytecode(
             dispatcher_patches.len()
         );
         let dispatcher = FunctionDispatcher::new();
-        dispatcher.reapply_dispatcher_patches(
-            &mut cfg_ir,
-            &controller_pcs,
-            &dispatcher_patches,
-            &pc_mapping,
-        )?;
+        dispatcher
+            .reapply_dispatcher_patches(
+                &mut cfg_ir,
+                &controller_pcs,
+                &dispatcher_patches,
+                &pc_mapping,
+            )
+            .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
         tracing::debug!("  Dispatcher jump target patches re-applied successfully");
 
         // Now update dispatcher_controller_pcs with remapped PCs
@@ -395,7 +426,9 @@ pub async fn obfuscate_bytecode(
         }
 
         if !edits.is_empty() {
-            dispatcher.apply_instruction_replacements(&mut cfg_ir, edits)?;
+            dispatcher
+                .apply_instruction_replacements(&mut cfg_ir, edits)
+                .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
         }
         // Debug: show resulting stub PUSH widths
         if let Some(stub_patches) = cfg_ir.stub_patches.clone() {
@@ -476,7 +509,9 @@ pub async fn obfuscate_bytecode(
         }
 
         if !edits.is_empty() {
-            dispatcher.apply_instruction_replacements(&mut cfg_ir, edits)?;
+            dispatcher
+                .apply_instruction_replacements(&mut cfg_ir, edits)
+                .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
         }
         tracing::debug!("  Decoy patches re-applied successfully");
     }
@@ -488,7 +523,9 @@ pub async fn obfuscate_bytecode(
             controller_patches.len()
         );
         let dispatcher = FunctionDispatcher::new();
-        dispatcher.reapply_controller_patches(&mut cfg_ir, &controller_patches, &pc_mapping)?;
+        dispatcher
+            .reapply_controller_patches(&mut cfg_ir, &controller_patches, &pc_mapping)
+            .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
         tracing::debug!("  Controller patches re-applied successfully");
     }
 
@@ -500,7 +537,8 @@ pub async fn obfuscate_bytecode(
     );
 
     // Step 7: Encode back to bytecode (always with original for unknown opcode preservation)
-    let mut obfuscated_bytes = encoder::encode(&all_instructions, &bytes)?;
+    let mut obfuscated_bytes = encoder::encode(&all_instructions, &bytes)
+        .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
 
     tracing::debug!("  Encoded to {} bytes", obfuscated_bytes.len());
 
@@ -511,33 +549,8 @@ pub async fn obfuscate_bytecode(
         obfuscated_bytes.len()
     );
     if let Err(e) = validator::validate_jump_targets(&obfuscated_bytes).await {
-        eprintln!("\nVALIDATION FAILED");
-        eprintln!("Error: {}", e);
-        eprintln!(
-            "Obfuscated bytecode ({} bytes): 0x{}",
-            obfuscated_bytes.len(),
-            hex::encode(&obfuscated_bytes)
-        );
-
-        // Decode and show instructions around problematic area
-        eprintln!("Decoding bytecode to show instructions...");
-        match decoder::decode_bytecode(&hex::encode(&obfuscated_bytes), false).await {
-            Ok((instructions, _, _, _)) => {
-                eprintln!("Total instructions: {}", instructions.len());
-                eprintln!("\nAll instructions:");
-                for (i, instr) in instructions.iter().enumerate() {
-                    eprintln!(
-                        "  [{:3}] PC=0x{:02x} {:?} imm={:?}",
-                        i, instr.pc, instr.op, instr.imm
-                    );
-                }
-            }
-            Err(decode_err) => {
-                eprintln!("Failed to decode bytecode: {}", decode_err);
-            }
-        }
-
-        return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
+        tracing::warn!("Validation failed: {}", e);
+        return Err(ObfuscationError::from_err(e, &cfg_ir.trace));
     }
     tracing::debug!("  Jump validation passed");
 

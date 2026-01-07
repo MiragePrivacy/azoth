@@ -5,8 +5,9 @@
 
 use super::obfuscate::build_passes;
 use async_trait::async_trait;
+use azoth_core::cfg_ir::TraceEvent;
 use azoth_core::seed::Seed;
-use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig, ObfuscationResult};
+use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use clap::{Args, Subcommand};
 use parking_lot::Mutex;
 use rand::rngs::SmallRng;
@@ -327,11 +328,12 @@ fn crash_hash(input: &FuzzInput, error: &str) -> String {
     hex::encode(&hasher.finalize()[..8])
 }
 
-/// Failure from a fuzz run, containing error info and optional result for debugging.
+/// Failure from a fuzz run, containing error info and trace for debugging.
 struct FuzzFailure {
     kind: ErrorKind,
     message: String,
-    result: Option<ObfuscationResult>,
+    trace: Vec<TraceEvent>,
+    obfuscated_bytecode: Option<String>,
 }
 
 fn save_crash(
@@ -343,11 +345,11 @@ fn save_crash(
 
     let crash_id = crash_hash(input, &failure.message);
 
-    // Save trace file if we have a result
-    let trace_file = if let Some(ref result) = failure.result {
+    // Save trace file if we have trace events
+    let trace_file = if !failure.trace.is_empty() {
         let filename = format!("trace_{crash_id}.json");
         let path = crash_dir.join(&filename);
-        fs::write(&path, serde_json::to_string_pretty(result)?)?;
+        fs::write(&path, serde_json::to_string_pretty(&failure.trace)?)?;
         Some(filename)
     } else {
         None
@@ -359,10 +361,7 @@ fn save_crash(
         input: input.clone(),
         error_kind: failure.kind.clone(),
         message: failure.message.clone(),
-        obfuscated_bytecode: failure
-            .result
-            .as_ref()
-            .map(|r| r.obfuscated_bytecode.clone()),
+        obfuscated_bytecode: failure.obfuscated_bytecode.clone(),
         trace_file,
     };
 
@@ -379,27 +378,25 @@ async fn run_fuzz_input(input: &FuzzInput) -> Result<(), FuzzFailure> {
     let transforms = build_passes(&input.passes).map_err(|e| FuzzFailure {
         kind: ErrorKind::Obfuscation,
         message: format!("invalid passes: {e}"),
-        result: None,
+        trace: Vec::new(),
+        obfuscated_bytecode: None,
     })?;
 
-    let config = ObfuscationConfig {
-        seed,
-        transforms,
-        preserve_unknown_opcodes: true,
-    };
+    let config = ObfuscationConfig { seed, transforms, preserve_unknown_opcodes: true };
 
     let result = obfuscate_bytecode(deployment_hex, runtime_hex, config)
         .await
         .map_err(|e| {
-            let msg = e.to_string();
+            let kind = if e.message.contains("validation") || e.message.contains("invalid jump") {
+                ErrorKind::Validation
+            } else {
+                ErrorKind::Obfuscation
+            };
             FuzzFailure {
-                kind: if msg.contains("validation") || msg.contains("invalid jump") {
-                    ErrorKind::Validation
-                } else {
-                    ErrorKind::Obfuscation
-                },
-                message: msg,
-                result: None,
+                kind,
+                message: e.message,
+                trace: e.trace,
+                obfuscated_bytecode: None,
             }
         })?;
 
@@ -407,7 +404,8 @@ async fn run_fuzz_input(input: &FuzzInput) -> Result<(), FuzzFailure> {
         prepare_bytecode(input.contract, deployment_hex).ok_or_else(|| FuzzFailure {
             kind: ErrorKind::Obfuscation,
             message: "failed to prepare original bytecode".into(),
-            result: Some(result.clone()),
+            trace: result.trace.clone(),
+            obfuscated_bytecode: Some(result.obfuscated_bytecode.clone()),
         })?;
 
     let original_deployed = deploy_to_revm(&original_bytes, input.contract).is_ok();
@@ -416,7 +414,8 @@ async fn run_fuzz_input(input: &FuzzInput) -> Result<(), FuzzFailure> {
         .ok_or_else(|| FuzzFailure {
             kind: ErrorKind::Obfuscation,
             message: "failed to prepare obfuscated bytecode".into(),
-            result: Some(result.clone()),
+            trace: result.trace.clone(),
+            obfuscated_bytecode: Some(result.obfuscated_bytecode.clone()),
         })?;
 
     let obfuscated_deployed = deploy_to_revm(&prepared_obfuscated, input.contract).is_ok();
@@ -432,7 +431,8 @@ async fn run_fuzz_input(input: &FuzzInput) -> Result<(), FuzzFailure> {
                 original_bytes.len(),
                 prepared_obfuscated.len()
             ),
-            result: Some(result),
+            trace: result.trace,
+            obfuscated_bytecode: Some(result.obfuscated_bytecode),
         });
     }
 
