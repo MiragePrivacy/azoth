@@ -72,6 +72,11 @@ impl Seed {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.inner
     }
+
+    /// Create from raw 32-byte array (useful for fuzzing)
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self { inner: bytes }
+    }
 }
 
 #[cfg(test)]
