@@ -22,7 +22,10 @@ pub struct ObfuscationError {
 
 impl ObfuscationError {
     fn from_err(e: impl std::fmt::Display, trace: &[TraceEvent]) -> Self {
-        Self { message: e.to_string(), trace: trace.to_vec() }
+        Self {
+            message: e.to_string(),
+            trace: trace.to_vec(),
+        }
     }
 }
 
@@ -132,7 +135,10 @@ pub async fn obfuscate_bytecode(
     let (mut cfg_ir, instructions, sections, bytes) =
         process_bytecode_to_cfg(deployment_bytecode, false, runtime_bytecode, false)
             .await
-            .map_err(|e| ObfuscationError { message: e.to_string(), trace: Vec::new() })?;
+            .map_err(|e| ObfuscationError {
+                message: e.to_string(),
+                trace: Vec::new(),
+            })?;
     let original_size = bytes.len();
 
     tracing::debug!("  Input size: {} bytes", original_size);

@@ -442,7 +442,11 @@ async fn run_fuzz_input(input: &FuzzInput, check_deploy: bool) -> Result<(), Fuz
         logs: Vec::new(),
     })?;
 
-    let config = ObfuscationConfig { seed, transforms, preserve_unknown_opcodes: true };
+    let config = ObfuscationConfig {
+        seed,
+        transforms,
+        preserve_unknown_opcodes: true,
+    };
 
     let result = obfuscate_bytecode(deployment_hex, runtime_hex, config)
         .await
@@ -711,7 +715,6 @@ async fn fuzzer_worker(
                 }
             }
         }
-
     }
 }
 
@@ -799,9 +802,9 @@ impl super::Command for FuzzArgs {
             let args = args.clone();
             let crash_dir = crash_dir.clone();
 
-            handles.push(tokio::spawn(
-                fuzzer_worker(worker_id, stats, args, crash_dir),
-            ));
+            handles.push(tokio::spawn(fuzzer_worker(
+                worker_id, stats, args, crash_dir,
+            )));
         }
 
         for handle in handles {
