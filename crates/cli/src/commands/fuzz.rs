@@ -728,23 +728,34 @@ async fn fuzzer_worker(
             }
         }
 
-        if iters > 0 && iters.is_multiple_of(100) {
-            let elapsed = stats.start_time.elapsed();
-            let secs = elapsed.as_secs();
-            let rate = iters as f64 / elapsed.as_secs_f64();
-            let crashes = stats.unique_crashes.lock().len();
-            print!(
-                "\r[{:02}:{:02}] {:.1}/s iter={} ok={} mismatch={} crashes={}   ",
-                secs / 60,
-                secs % 60,
-                rate,
-                iters,
-                stats.successful_deployments.load(Ordering::Relaxed),
-                stats.deployment_mismatches.load(Ordering::Relaxed),
-                crashes
-            );
-            std::io::stdout().flush().ok();
-        }
+    }
+}
+
+fn status_printer(stats: Arc<FuzzStats>, stop: Arc<std::sync::atomic::AtomicBool>) {
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let elapsed = stats.start_time.elapsed();
+        let secs = elapsed.as_secs();
+        let iters = stats.iterations.load(Ordering::Relaxed);
+        let rate = if elapsed.as_secs_f64() > 0.0 {
+            iters as f64 / elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+        let ok = stats.successful_deployments.load(Ordering::Relaxed);
+        let mismatch = stats.deployment_mismatches.load(Ordering::Relaxed);
+        let crashes = stats.unique_crashes.lock().len();
+        print!(
+            "\r\x1b[K[{:02}:{:02}] {:.1}/s iter={} ok={} mismatch={} crashes={}",
+            secs / 60,
+            secs % 60,
+            rate,
+            iters,
+            ok,
+            mismatch,
+            crashes
+        );
+        std::io::stdout().flush().ok();
     }
 }
 
@@ -790,6 +801,14 @@ impl super::Command for FuzzArgs {
         let stats = Arc::new(FuzzStats::new());
         let crash_dir = args.crash_dir.clone();
 
+        // Spawn status printer on dedicated thread
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let status_thread = {
+            let stats = stats.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || status_printer(stats, stop))
+        };
+
         let mut handles = Vec::new();
         for worker_id in 0..args.jobs {
             let stats = stats.clone();
@@ -805,6 +824,9 @@ impl super::Command for FuzzArgs {
             let _ = handle.await;
         }
 
+        // Stop status printer and print summary
+        stop.store(true, Ordering::Relaxed);
+        let _ = status_thread.join();
         stats.print_summary();
         Ok(())
     }
