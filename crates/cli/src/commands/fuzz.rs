@@ -116,6 +116,10 @@ pub struct FuzzArgs {
     /// Directory to save crash inputs
     #[arg(long, default_value = "crashes")]
     crash_dir: PathBuf,
+
+    /// Check that obfuscated bytecode deploys successfully
+    #[arg(long, default_value = "false")]
+    check_deploy: bool,
 }
 
 #[derive(Subcommand)]
@@ -248,9 +252,8 @@ struct CrashReport {
 /// Statistics tracked during fuzzing
 struct FuzzStats {
     iterations: AtomicU64,
-    successful_obfuscations: AtomicU64,
-    successful_deployments: AtomicU64,
-    obfuscation_errors: AtomicU64,
+    successes: AtomicU64,
+    errors: AtomicU64,
     deployment_mismatches: AtomicU64,
     unique_crashes: Mutex<HashSet<String>>,
     start_time: Instant,
@@ -260,16 +263,15 @@ impl FuzzStats {
     fn new() -> Self {
         Self {
             iterations: AtomicU64::new(0),
-            successful_obfuscations: AtomicU64::new(0),
-            successful_deployments: AtomicU64::new(0),
-            obfuscation_errors: AtomicU64::new(0),
+            successes: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
             deployment_mismatches: AtomicU64::new(0),
             unique_crashes: Mutex::new(HashSet::new()),
             start_time: Instant::now(),
         }
     }
 
-    fn print_summary(&self) {
+    fn print_summary(&self, check_deploy: bool) {
         let elapsed = self.start_time.elapsed().as_secs_f64();
         let iters = self.iterations.load(Ordering::Relaxed);
         let rate = if elapsed > 0.0 {
@@ -278,27 +280,18 @@ impl FuzzStats {
             0.0
         };
 
-        // Clear the status line and print summary header
         println!("\r\x1b[K=== Fuzzing Summary ===");
         println!("Duration: {:.1}s", elapsed);
         println!("Iterations: {}", iters);
         println!("Rate: {:.1} iter/sec", rate);
-        println!(
-            "Successful obfuscations: {}",
-            self.successful_obfuscations.load(Ordering::Relaxed)
-        );
-        println!(
-            "Successful deployments: {}",
-            self.successful_deployments.load(Ordering::Relaxed)
-        );
-        println!(
-            "Obfuscation errors: {}",
-            self.obfuscation_errors.load(Ordering::Relaxed)
-        );
-        println!(
-            "Deployment mismatches: {}",
-            self.deployment_mismatches.load(Ordering::Relaxed)
-        );
+        println!("Successes: {}", self.successes.load(Ordering::Relaxed));
+        println!("Errors: {}", self.errors.load(Ordering::Relaxed));
+        if check_deploy {
+            println!(
+                "Deployment mismatches: {}",
+                self.deployment_mismatches.load(Ordering::Relaxed)
+            );
+        }
         println!("Unique crashes saved: {}", self.unique_crashes.lock().len());
     }
 }
@@ -436,7 +429,7 @@ fn save_crash(
     Ok(path)
 }
 
-async fn run_fuzz_input(input: &FuzzInput) -> Result<(), FuzzFailure> {
+async fn run_fuzz_input(input: &FuzzInput, check_deploy: bool) -> Result<(), FuzzFailure> {
     let deployment_hex = input.contract.deployment_hex();
     let runtime_hex = input.contract.runtime_hex();
     let seed = Seed::from_bytes(input.seed_bytes());
@@ -467,6 +460,10 @@ async fn run_fuzz_input(input: &FuzzInput) -> Result<(), FuzzFailure> {
                 logs: Vec::new(),
             }
         })?;
+
+    if !check_deploy {
+        return Ok(());
+    }
 
     let original_bytes =
         prepare_bytecode(input.contract, deployment_hex).ok_or_else(|| FuzzFailure {
@@ -515,21 +512,17 @@ async fn run_fuzz_input(input: &FuzzInput) -> Result<(), FuzzFailure> {
 async fn run_fuzz_input_capturing(
     input: &FuzzInput,
     log_capture: &LogCapture,
+    check_deploy: bool,
 ) -> Result<(), FuzzFailure> {
-    // Clear the buffer before each run
     log_capture.clear();
-
-    // Run the fuzz input
-    let result = run_fuzz_input(input).await;
-
-    // On failure, attach the captured logs
+    let result = run_fuzz_input(input, check_deploy).await;
     result.map_err(|mut failure| {
         failure.logs = log_capture.extract_lines();
         failure
     })
 }
 
-async fn replay_crash(crash_file: &PathBuf) -> Result<(), Box<dyn Error>> {
+async fn replay_crash(crash_file: &PathBuf, check_deploy: bool) -> Result<(), Box<dyn Error>> {
     let content = fs::read_to_string(crash_file)?;
     let report: CrashReport = serde_json::from_str(&content)?;
 
@@ -555,7 +548,6 @@ async fn replay_crash(crash_file: &PathBuf) -> Result<(), Box<dyn Error>> {
     }
     println!();
 
-    // Display captured logs from the crash file
     if !report.logs.is_empty() {
         println!("=== Captured Logs ===");
         for line in &report.logs {
@@ -566,7 +558,6 @@ async fn replay_crash(crash_file: &PathBuf) -> Result<(), Box<dyn Error>> {
 
     println!("Running...");
 
-    // Set up log capturing for the replay
     let log_capture = LogCapture::new();
     let subscriber = tracing_subscriber::registry().with(
         tracing_subscriber::fmt::layer()
@@ -577,7 +568,7 @@ async fn replay_crash(crash_file: &PathBuf) -> Result<(), Box<dyn Error>> {
     let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
     let _guard = tracing::dispatcher::set_default(&dispatch);
 
-    let result = run_fuzz_input_capturing(&report.input, &log_capture).await;
+    let result = run_fuzz_input_capturing(&report.input, &log_capture, check_deploy).await;
 
     match result {
         Ok(()) => println!("SUCCESS - No error reproduced!"),
@@ -658,10 +649,7 @@ async fn fuzzer_worker(
     args: Arc<FuzzArgs>,
     crash_dir: PathBuf,
 ) {
-    // Create a log capture buffer for this worker
     let log_capture = LogCapture::new();
-
-    // Set up a subscriber that captures logs to our buffer (no console output)
     let subscriber = tracing_subscriber::registry().with(
         tracing_subscriber::fmt::layer()
             .with_writer(log_capture.clone())
@@ -689,12 +677,9 @@ async fn fuzzer_worker(
 
         let input = FuzzInput::new(contract, seed_bytes, passes);
 
-        match run_fuzz_input_capturing(&input, &log_capture).await {
+        match run_fuzz_input_capturing(&input, &log_capture, args.check_deploy).await {
             Ok(()) => {
-                stats
-                    .successful_obfuscations
-                    .fetch_add(1, Ordering::Relaxed);
-                stats.successful_deployments.fetch_add(1, Ordering::Relaxed);
+                stats.successes.fetch_add(1, Ordering::Relaxed);
             }
             Err(failure) => {
                 let is_mismatch = matches!(failure.kind, ErrorKind::DeploymentMismatch { .. });
@@ -702,9 +687,8 @@ async fn fuzzer_worker(
 
                 if is_mismatch {
                     stats.deployment_mismatches.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    stats.obfuscation_errors.fetch_add(1, Ordering::Relaxed);
                 }
+                stats.errors.fetch_add(1, Ordering::Relaxed);
 
                 if is_interesting {
                     let crash_id = crash_hash(&input, &failure.message);
@@ -742,7 +726,7 @@ fn status_printer(stats: Arc<FuzzStats>, stop: Arc<std::sync::atomic::AtomicBool
         } else {
             0.0
         };
-        let ok = stats.successful_deployments.load(Ordering::Relaxed);
+        let ok = stats.successes.load(Ordering::Relaxed);
         let mismatch = stats.deployment_mismatches.load(Ordering::Relaxed);
         let crashes = stats.unique_crashes.lock().len();
         print!(
@@ -764,7 +748,7 @@ impl super::Command for FuzzArgs {
     async fn execute(self) -> Result<(), Box<dyn Error>> {
         match &self.command {
             Some(FuzzCommand::Replay { crash_file }) => {
-                return replay_crash(crash_file).await;
+                return replay_crash(crash_file, self.check_deploy).await;
             }
             Some(FuzzCommand::List) => {
                 return list_crashes(&self.crash_dir);
@@ -827,7 +811,7 @@ impl super::Command for FuzzArgs {
         // Stop status printer and print summary
         stop.store(true, Ordering::Relaxed);
         let _ = status_thread.join();
-        stats.print_summary();
+        stats.print_summary(args.check_deploy);
         Ok(())
     }
 }
