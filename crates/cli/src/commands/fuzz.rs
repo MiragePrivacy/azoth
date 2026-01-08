@@ -3,7 +3,16 @@
 //! Runs parallel fuzz testing against the obfuscation pipeline, saving
 //! reproducible crash inputs with debug traces for TUI visualization.
 
-use super::obfuscate::build_passes;
+use std::collections::HashSet;
+use std::error::Error;
+use std::fmt;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
 use async_trait::async_trait;
 use azoth_core::cfg_ir::TraceEvent;
 use azoth_core::seed::Seed;
@@ -21,17 +30,11 @@ use revm::state::AccountInfo;
 use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
-use std::collections::HashSet;
-use std::error::Error;
-use std::fmt;
-use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
+
+use super::obfuscate::build_passes;
+use crate::commands::DEFAULT_PASSES;
 
 fn num_cpus() -> usize {
     std::thread::available_parallelism()
@@ -165,16 +168,13 @@ impl Contract {
     }
 }
 
-/// Available transforms for fuzzing.
-const FUZZ_PASSES: [&str; 1] = ["arithmetic_chain"];
-
 /// Generate a random comma-separated pass string from bits.
 fn passes_from_bits(bits: u8) -> String {
-    FUZZ_PASSES
-        .iter()
+    DEFAULT_PASSES
+        .split(",")
         .enumerate()
         .filter(|(i, _)| bits & (1 << i) != 0)
-        .map(|(_, name)| *name)
+        .map(|(_, name)| name)
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -781,7 +781,7 @@ impl super::Command for FuzzArgs {
         println!("Crash dir: {}", self.crash_dir.display());
         let contracts: Vec<_> = Contract::ALL.iter().map(|c| c.name()).collect();
         println!("Contracts: {}", contracts.join(", "));
-        println!("Transforms: none, {}", FUZZ_PASSES.join(", "));
+        println!("Transforms: none, {}", DEFAULT_PASSES);
         println!();
 
         let args = Arc::new(self);
