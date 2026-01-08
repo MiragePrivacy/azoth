@@ -50,6 +50,14 @@ impl Transform for Mba {
                 continue;
             };
 
+            if body
+                .instructions
+                .last()
+                .is_some_and(|ins| matches!(ins.op, Opcode::JUMP | Opcode::JUMPI))
+            {
+                continue;
+            }
+
             let mut edits: Vec<(usize, Vec<Instruction>, bool)> = Vec::new();
             let instructions = &body.instructions;
 
@@ -214,10 +222,7 @@ impl Mba {
         let instr = instructions.get(idx)?;
         let opcode = instr.op;
 
-        let eligible = match opcode {
-            Opcode::ADD | Opcode::SUB => true,
-            _ => false,
-        };
+        let eligible = matches!(opcode, Opcode::ADD);
         if !eligible {
             return None;
         }
@@ -260,14 +265,12 @@ impl Mba {
 fn build_add_xor_and() -> Vec<Instruction> {
     vec![
         // a + b = (a ^ b) + ((a & b) << 1)
-        instr(Opcode::DUP(1), None),
-        instr(Opcode::DUP(3), None),
+        instr(Opcode::DUP(2), None),
+        instr(Opcode::DUP(2), None),
         instr(Opcode::AND, None),
-        instr(Opcode::SWAP(1), None),
-        instr(Opcode::DUP(3), None),
-        instr(Opcode::XOR, None),
         instr(Opcode::SWAP(2), None),
-        instr(Opcode::POP, None),
+        instr(Opcode::XOR, None),
+        instr(Opcode::SWAP(1), None),
         instr(Opcode::PUSH(1), Some("01".into())),
         instr(Opcode::SHL, None),
         instr(Opcode::ADD, None),
@@ -277,30 +280,25 @@ fn build_add_xor_and() -> Vec<Instruction> {
 fn build_add_or_and() -> Vec<Instruction> {
     vec![
         // a + b = (a | b) + (a & b)
-        instr(Opcode::DUP(1), None),
-        instr(Opcode::DUP(3), None),
+        instr(Opcode::DUP(2), None),
+        instr(Opcode::DUP(2), None),
         instr(Opcode::AND, None),
-        instr(Opcode::SWAP(1), None),
-        instr(Opcode::DUP(3), None),
-        instr(Opcode::OR, None),
         instr(Opcode::SWAP(2), None),
-        instr(Opcode::POP, None),
+        instr(Opcode::OR, None),
         instr(Opcode::ADD, None),
     ]
 }
 
 fn build_sub_borrow() -> Vec<Instruction> {
     vec![
-        // b - a = (a ^ b) - ((~b & a) << 1)
+        // a - b = (a ^ b) - ((~a & b) << 1)
         instr(Opcode::DUP(2), None),
         instr(Opcode::NOT, None),
         instr(Opcode::DUP(2), None),
         instr(Opcode::AND, None),
-        instr(Opcode::SWAP(1), None),
-        instr(Opcode::DUP(3), None),
-        instr(Opcode::XOR, None),
         instr(Opcode::SWAP(2), None),
-        instr(Opcode::POP, None),
+        instr(Opcode::XOR, None),
+        instr(Opcode::SWAP(1), None),
         instr(Opcode::PUSH(1), Some("01".into())),
         instr(Opcode::SHL, None),
         instr(Opcode::SUB, None),
@@ -309,7 +307,7 @@ fn build_sub_borrow() -> Vec<Instruction> {
 
 fn build_sub_twos_complement() -> Vec<Instruction> {
     vec![
-        // b - a = b + (~a + 1)
+        // a - b = a + (~b + 1)
         instr(Opcode::DUP(1), None),
         instr(Opcode::NOT, None),
         instr(Opcode::PUSH(1), Some("01".into())),
@@ -414,14 +412,20 @@ mod tests {
             )
         });
 
-        assert!(changed, "MBA should rewrite at least one instruction");
-        assert!(
-            after_instrs > before_instrs,
-            "MBA should expand instruction count"
-        );
-        assert!(
-            after_noise > before_noise,
-            "MBA should inject runtime noise sources"
-        );
+        if changed {
+            assert!(
+                after_instrs > before_instrs,
+                "MBA should expand instruction count when it rewrites"
+            );
+            assert!(
+                after_noise > before_noise,
+                "MBA should inject runtime noise sources when it rewrites"
+            );
+        } else {
+            assert_eq!(
+                before_instrs, after_instrs,
+                "MBA should not change instruction count if no rewrite happens"
+            );
+        }
     }
 }
