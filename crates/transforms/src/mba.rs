@@ -124,11 +124,11 @@ enum NoiseSource {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum NoiseEncoding {
-    XorZero,
-    OrZero,
-    AddZero,
-    SubZero,
-    AndNotZero,
+    Xor,
+    Or,
+    Add,
+    Sub,
+    AndNot,
 }
 
 impl NoiseSource {
@@ -165,33 +165,33 @@ impl NoiseSource {
 impl NoiseEncoding {
     fn random(rng: &mut StdRng) -> Self {
         match rng.random_range(0..5) {
-            0 => NoiseEncoding::XorZero,
-            1 => NoiseEncoding::OrZero,
-            2 => NoiseEncoding::AddZero,
-            3 => NoiseEncoding::SubZero,
-            _ => NoiseEncoding::AndNotZero,
+            0 => NoiseEncoding::Xor,
+            1 => NoiseEncoding::Or,
+            2 => NoiseEncoding::Add,
+            3 => NoiseEncoding::Sub,
+            _ => NoiseEncoding::AndNot,
         }
     }
 
     fn emit(self, out: &mut Vec<Instruction>) {
         match self {
-            NoiseEncoding::XorZero => {
+            NoiseEncoding::Xor => {
                 out.push(instr(Opcode::PUSH0, None));
                 out.push(instr(Opcode::XOR, None));
             }
-            NoiseEncoding::OrZero => {
+            NoiseEncoding::Or => {
                 out.push(instr(Opcode::PUSH0, None));
                 out.push(instr(Opcode::OR, None));
             }
-            NoiseEncoding::AddZero => {
+            NoiseEncoding::Add => {
                 out.push(instr(Opcode::PUSH0, None));
                 out.push(instr(Opcode::ADD, None));
             }
-            NoiseEncoding::SubZero => {
+            NoiseEncoding::Sub => {
                 out.push(instr(Opcode::PUSH0, None));
                 out.push(instr(Opcode::SUB, None));
             }
-            NoiseEncoding::AndNotZero => {
+            NoiseEncoding::AndNot => {
                 out.push(instr(Opcode::PUSH0, None));
                 out.push(instr(Opcode::NOT, None));
                 out.push(instr(Opcode::AND, None));
