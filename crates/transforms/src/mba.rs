@@ -5,7 +5,7 @@
 //!   x + y == (x | y) + (x & y)
 //!   b - a == b + (~a + 1)
 
-use crate::{Result, Transform, collect_protected_nodes, collect_protected_pcs};
+use crate::{collect_protected_nodes, collect_protected_pcs, Result, Transform};
 use azoth_core::cfg_ir::{Block, CfgIrBundle};
 use azoth_core::decoder::Instruction;
 use azoth_core::Opcode;
@@ -17,8 +17,7 @@ const MAX_INSTRUCTIONS_ADDED: usize = 24;
 
 /// Mixed Boolean Arithmetic transform.
 #[derive(Debug, Default)]
-pub struct Mba {
-}
+pub struct Mba {}
 
 impl Mba {
     pub fn new() -> Self {
@@ -368,12 +367,7 @@ mod tests {
         ir.cfg
             .node_indices()
             .filter_map(|n| match &ir.cfg[n] {
-                Block::Body(body) => Some(
-                    body.instructions
-                        .iter()
-                        .filter(|ins| f(ins.op))
-                        .count(),
-                ),
+                Block::Body(body) => Some(body.instructions.iter().filter(|ins| f(ins.op)).count()),
                 _ => None,
             })
             .sum()
