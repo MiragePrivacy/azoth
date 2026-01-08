@@ -1,5 +1,6 @@
 use crate::arithmetic_chain::ArithmeticChain;
 use crate::function_dispatcher::FunctionDispatcher;
+use crate::push_split::PushSplit;
 use crate::Transform;
 use azoth_core::seed::Seed;
 use azoth_core::{
@@ -35,7 +36,7 @@ impl Default for ObfuscationConfig {
     fn default() -> Self {
         Self {
             seed: Seed::generate(),
-            transforms: vec![Box::new(ArithmeticChain::new())],
+            transforms: vec![Box::new(ArithmeticChain::new()), Box::new(PushSplit::new())],
             preserve_unknown_opcodes: true,
         }
     }
