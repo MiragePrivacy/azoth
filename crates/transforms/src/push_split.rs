@@ -61,12 +61,8 @@ impl Transform for PushSplit {
             if ir.dispatcher_blocks.contains(&node.index()) {
                 continue;
             }
-            let Some(block) = ir.cfg.node_weight_mut(node) else {
+            let Some(Block::Body(body)) = ir.cfg.node_weight(node) else {
                 continue;
-            };
-            let body = match block {
-                Block::Body(body) => body,
-                _ => continue,
             };
 
             // Skip init-code blocks; only mutate runtime for now to avoid constructor jumps.
@@ -93,7 +89,9 @@ impl Transform for PushSplit {
             }
 
             let original = body.instructions.clone();
+            let original_max_stack = body.max_stack;
             let mut rewritten: Vec<Instruction> = Vec::with_capacity(original.len());
+            let mut new_max_stack = original_max_stack;
 
             for (idx, instr) in original.iter().enumerate() {
                 if let Some(width) = matches_push_range(&instr.op) {
@@ -184,7 +182,7 @@ impl Transform for PushSplit {
                                 );
                             }
 
-                            body.max_stack = body.max_stack.max(2);
+                            new_max_stack = new_max_stack.max(2);
                             changed = true;
                             continue;
                         }
@@ -194,12 +192,11 @@ impl Transform for PushSplit {
                 rewritten.push(instr.clone());
             }
 
-            if rewritten != original {
+            if rewritten != original || new_max_stack != original_max_stack {
                 let mut new_body = body.clone();
                 new_body.instructions = rewritten;
+                new_body.max_stack = new_max_stack;
                 ir.overwrite_block(node, new_body)
-                    .map_err(|e| Error::CoreError(e.to_string()))?;
-                ir.rebuild_edges_for_block(node)
                     .map_err(|e| Error::CoreError(e.to_string()))?;
             }
         }
