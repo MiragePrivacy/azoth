@@ -195,7 +195,10 @@ impl Transform for PushSplit {
             }
 
             if rewritten != original {
-                body.instructions = rewritten;
+                let mut new_body = body.clone();
+                new_body.instructions = rewritten;
+                ir.overwrite_block(node, new_body)
+                    .map_err(|e| Error::CoreError(e.to_string()))?;
                 ir.rebuild_edges_for_block(node)
                     .map_err(|e| Error::CoreError(e.to_string()))?;
             }
