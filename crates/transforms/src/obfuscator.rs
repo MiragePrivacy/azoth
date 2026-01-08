@@ -1,7 +1,7 @@
 use crate::arithmetic_chain::ArithmeticChain;
 use crate::function_dispatcher::FunctionDispatcher;
-use crate::Transform;
 use crate::push_split::PushSplit;
+use crate::Transform;
 use azoth_core::seed::Seed;
 use azoth_core::{
     cfg_ir::{self, snapshot_bundle_with_runtime, Block, CfgIrDiff, OperationKind, TraceEvent},
