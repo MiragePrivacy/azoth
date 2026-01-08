@@ -6,6 +6,7 @@ pub mod analyze;
 pub mod cfg;
 pub mod decode;
 pub mod decompile_diff;
+pub mod fuzz;
 pub mod obfuscate;
 pub mod strip;
 pub mod tui;
@@ -54,6 +55,8 @@ pub enum Cmd {
     DecompileDiff(decompile_diff::DecompileDiffArgs),
     /// View obfuscation debug traces in a TUI.
     Tui(tui::TuiArgs),
+    /// Fuzz test the obfuscation pipeline.
+    Fuzz(fuzz::FuzzArgs),
 }
 
 /// Trait for executing CLI subcommands.
@@ -80,6 +83,7 @@ impl Command for Cmd {
             Cmd::Analyze(args) => args.execute().await,
             Cmd::DecompileDiff(args) => args.execute().await,
             Cmd::Tui(args) => args.execute().await,
+            Cmd::Fuzz(args) => args.execute().await,
         }
     }
 }
