@@ -173,7 +173,9 @@ async fn apply_mirage_obfuscation(
     let config = create_mirage_config(seed_k2);
 
     // Use the unified obfuscation pipeline
-    obfuscate_bytecode(&hex_input, &runtime_hex, config).await
+    obfuscate_bytecode(&hex_input, &runtime_hex, config)
+        .await
+        .map_err(|e| e.into())
 }
 
 /// Create Mirage-specific obfuscation configuration

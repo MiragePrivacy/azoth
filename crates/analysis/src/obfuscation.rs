@@ -403,7 +403,7 @@ pub async fn analyze_obfuscation(
                 Err(err) => {
                     return Err(AnalysisError::ObfuscationFailure {
                         attempts: config.max_attempts,
-                        source: err,
+                        source: Box::new(err),
                     });
                 }
             }
