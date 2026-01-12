@@ -1,123 +1,104 @@
-use crate::commands::{obfuscate::read_input, ObfuscateError};
+use crate::commands::obfuscate::read_input;
 use async_trait::async_trait;
-use azoth_analysis::obfuscation::{analyze_obfuscation, AnalysisConfig, AnalysisError};
+use azoth_analysis::comparison::compare_to_dataset;
+use azoth_analysis::dataset::{self, Dataset, DatasetError};
+use azoth_core::Opcode;
 use clap::Args;
 use std::{error::Error, path::PathBuf};
-const DEFAULT_DEPLOYMENT_PATH: &str = "examples/escrow-bytecode/artifacts/deployment_bytecode.hex";
-const DEFAULT_RUNTIME_PATH: &str = "examples/escrow-bytecode/artifacts/runtime_bytecode.hex";
 
-/// Analyze how much bytecode survives obfuscation across multiple seeds.
+/// Compare runtime bytecode against the Ethereum contracts dataset.
 #[derive(Args)]
 pub struct AnalyzeArgs {
-    /// Number of obfuscated samples to generate.
-    pub iterations: usize,
-    /// Input deployment bytecode as hex, .hex file, or binary file.
-    #[arg(short = 'D', long = "deployment", value_name = "BYTECODE", default_value = DEFAULT_DEPLOYMENT_PATH)]
-    pub deployment_bytecode: String,
     /// Input runtime bytecode as hex, .hex file, or binary file.
-    #[arg(short = 'R', long = "runtime", value_name = "RUNTIME", default_value = DEFAULT_RUNTIME_PATH)]
-    pub runtime_bytecode: String,
-    /// Where to write the markdown report (default: ./obfuscation_analysis_report.md).
+    #[arg(value_name = "BYTECODE")]
+    pub bytecode: String,
+    /// Override dataset root (default: ~/.azoth/datasets/ethereum_contracts).
     #[arg(long, value_name = "PATH")]
-    output: Option<PathBuf>,
-    /// Maximum attempts per iteration when an obfuscation fails.
-    #[arg(long, default_value_t = 5)]
-    max_attempts: usize,
+    dataset_root: Option<PathBuf>,
+    /// Rebuild the dataset index before comparing.
+    #[arg(long)]
+    reindex: bool,
 }
 
 #[async_trait]
 impl super::Command for AnalyzeArgs {
     async fn execute(self) -> Result<(), Box<dyn Error>> {
         let AnalyzeArgs {
-            iterations,
-            deployment_bytecode,
-            runtime_bytecode,
-            output,
-            max_attempts,
+            bytecode,
+            dataset_root,
+            reindex,
         } = self;
 
-        let input_hex = read_input(&deployment_bytecode)?;
-        let runtime_hex = read_input(&runtime_bytecode)?;
+        let input_hex = read_input(&bytecode)?;
+        let bytecode_bytes = decode_hex(&input_hex)?;
 
-        let mut config = AnalysisConfig::new(&input_hex, &runtime_hex, iterations);
-        config.max_attempts = max_attempts;
-        if let Some(path) = output {
-            config.report_path = path;
+        let root = dataset_root
+            .clone()
+            .unwrap_or_else(dataset::storage::dataset_root);
+
+        if reindex {
+            let dataset = Dataset::load(Some(root.clone()))?;
+            let index = dataset::index::build_index(&dataset)?;
+            dataset::save_index(Some(root.clone()), &index)?;
         }
 
-        let report = match analyze_obfuscation(config).await {
-            Ok(report) => report,
-            Err(AnalysisError::UnknownOpcodes { count }) => {
-                println!("Analysis aborted: obfuscation preserved {count} unknown opcode(s).\nStrip or normalize the bytecode before running analysis.");
+        let index = match dataset::load_index(Some(root.clone())) {
+            Ok(index) => index,
+            Err(DatasetError::MissingIndex) => {
+                println!(
+                    "Dataset index not found at {}. Run `azoth dataset download` and `azoth dataset reindex` first.",
+                    dataset::index_path(Some(root)).display()
+                );
                 return Ok(());
             }
-            Err(err) => return Err(map_analysis_error(err)),
+            Err(err) => return Err(Box::new(err)),
         };
 
+        if let Ok(dataset) = Dataset::load(Some(root.clone())) {
+            if let Ok(manifest_hash) = dataset.manifest_hash() {
+                if manifest_hash != index.manifest_hash {
+                    println!("Warning: dataset index is out of date with the manifest. Run `azoth dataset reindex`.");
+                }
+            }
+        }
+
+        let result = compare_to_dataset(&bytecode_bytes, &index)?;
+
         println!("============================================================");
-        println!("SUMMARY");
+        println!("DATASET COMPARISON");
         println!("============================================================");
-        println!(
-            "Average longest sequence:  {:.2} bytes ({:.2}% of original)",
-            report.summary.average_length, report.summary.preservation_ratio
-        );
-        println!(
-            "Median longest sequence:   {:.2} bytes",
-            report.summary.median_length
-        );
-        println!(
-            "Standard deviation:        {:.2} bytes",
-            report.summary.std_dev
-        );
-        println!(
-            "Range:                     {}-{} bytes",
-            report.summary.min_length, report.summary.max_length
-        );
-        println!(
-            "25th percentile:           {:.2} bytes",
-            report.summary.percentile_25
-        );
-        println!(
-            "75th percentile:           {:.2} bytes",
-            report.summary.percentile_75
-        );
-        println!(
-            "95th percentile:           {:.2} bytes",
-            report.summary.percentile_95
-        );
-        println!(
-            "Seeds generated:           {} (unique: {})",
-            report.seeds.len(),
-            report.unique_seed_count
-        );
-        println!("Transforms observed:       {}", report.transform_summary());
+        println!("Definitions:");
+        println!("  Size percentile: % of dataset contracts with smaller bytecode.");
+        println!("  Opcode similarity: cosine similarity vs. dataset opcode distribution (0-1).");
+        println!("  Exact match: bloom-filter check of code hash (no false negatives).");
+        println!("  Opcode anomaly: relative deviation from dataset mean for that opcode.");
         println!();
-        for (n, value) in &report.ngram_diversity {
-            println!("{:>2}-byte n-gram diversity: {:>6.2}%", n, value);
+        println!("Bytecode size:            {} bytes", bytecode_bytes.len());
+        println!("Size percentile:          {:.2}%", result.size_percentile);
+        println!("Opcode similarity:        {:.3}", result.opcode_similarity);
+        if result.exact_match_found {
+            println!("Exact match:              yes");
+        } else {
+            println!("Exact match:              no");
+        }
+        if !result.anomalous_opcodes.is_empty() {
+            println!();
+            println!("Top opcode anomalies:");
+            for (opcode, deviation) in result.anomalous_opcodes {
+                let name = Opcode::from(opcode);
+                println!(
+                    "  {} (0x{opcode:02x}): {:+.2}%",
+                    name,
+                    deviation * 100.0
+                );
+            }
         }
         println!("============================================================");
-        println!(
-            "Analysis complete! Report saved to: {}",
-            report.markdown_path.display()
-        );
-
         Ok(())
     }
 }
 
-fn map_analysis_error(err: AnalysisError) -> Box<dyn Error> {
-    match err {
-        AnalysisError::Decode(err) => Box::new(err),
-        AnalysisError::UnknownOpcodes { count } => Box::new(std::io::Error::other(format!(
-            "analysis aborted due to {count} unknown opcode(s)"
-        ))),
-        AnalysisError::InvalidPass(name) => Box::new(ObfuscateError::InvalidPass(name)),
-        AnalysisError::ObfuscationFailure { source, .. } => source,
-        AnalysisError::Io(err) => Box::new(err),
-        AnalysisError::Fmt(err) => Box::new(err),
-        AnalysisError::EmptyIterations => Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "iterations must be positive",
-        )),
-    }
+fn decode_hex(input: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let stripped = input.trim().trim_start_matches("0x").replace('_', "");
+    Ok(hex::decode(stripped)?)
 }
