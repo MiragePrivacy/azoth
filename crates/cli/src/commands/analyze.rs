@@ -86,11 +86,7 @@ impl super::Command for AnalyzeArgs {
             println!("Top opcode anomalies:");
             for (opcode, deviation) in result.anomalous_opcodes {
                 let name = Opcode::from(opcode);
-                println!(
-                    "  {} (0x{opcode:02x}): {:+.2}%",
-                    name,
-                    deviation * 100.0
-                );
+                println!("  {} (0x{opcode:02x}): {:+.2}%", name, deviation * 100.0);
             }
         }
         println!("============================================================");
