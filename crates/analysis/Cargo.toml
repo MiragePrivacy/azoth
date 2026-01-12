@@ -5,17 +5,21 @@ edition = "2024"
 
 [dependencies]
 azoth-core.workspace = true
-azoth-transform.workspace = true
 petgraph.workspace = true
 serde.workspace = true
 tokio.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-hex.workspace = true
 thiserror.workspace = true
-chrono.workspace = true
+serde_json.workspace = true
 
 alloy = "1.1"
 heimdall-decompiler = { git = "https://github.com/Jon-Becker/heimdall-rs", tag = "0.9.0" }
 imara-diff = "0.2"
 owo-colors = "4"
+arrow = "54"
+parquet = "54"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+md-5 = "0.10"
+indicatif = "0.17"
+bloomfilter = { version = "1", features = ["serde"] }
+tiny-keccak.workspace = true

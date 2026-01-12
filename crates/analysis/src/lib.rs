@@ -1,18 +1,15 @@
-//! Analytical utilities for assessing Azoth obfuscation results. The crate exposes:
-//! - Core metrics for bytecode size, control-flow structure, stack usage, and dominator overlap to
-//!   estimate transform potency and gas impact.
+//! Analytical utilities for Azoth. The crate exposes:
+//! - Core metrics for bytecode size, control-flow structure, stack usage, and dominator overlap.
 //! - Comparison helpers that derive before/after deltas directly from a `CfgIrBundle` and
 //!   `CleanReport`.
-//! - An obfuscation study that repeatedly obfuscates bytecode with randomized seeds,
-//!   aggregates longest preserved byte sequences, emits percentile summaries, tracks top repeated
-//!   motifs, and measures n-gram diversity for multiple n values before producing a Markdown
-//!   report.
+//! - Dataset analysis helpers for comparing bytecode against deployed contract corpora.
 
 pub mod decompile_diff;
 pub mod metrics;
 pub use metrics::{Metrics, collect_metrics, compare};
 
-pub mod obfuscation;
+pub mod comparison;
+pub mod dataset;
 
 use thiserror::Error;
 
