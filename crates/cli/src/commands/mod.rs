@@ -4,6 +4,7 @@ use std::error::Error;
 
 pub mod analyze;
 pub mod cfg;
+pub mod dataset;
 pub mod decode;
 pub mod decompile_diff;
 pub mod fuzz;
@@ -49,8 +50,10 @@ pub enum Cmd {
     Cfg(cfg::CfgArgs),
     /// Obfuscate bytecode with specified transforms.
     Obfuscate(obfuscate::ObfuscateArgs),
-    /// Run obfuscation analysis across multiple seeds.
+    /// Compare runtime bytecode against the Ethereum contracts dataset.
     Analyze(analyze::AnalyzeArgs),
+    /// Manage the Ethereum contracts dataset.
+    Dataset(dataset::DatasetArgs),
     /// Compare decompiled output before and after obfuscation.
     DecompileDiff(decompile_diff::DecompileDiffArgs),
     /// View obfuscation debug traces in a TUI.
@@ -82,6 +85,7 @@ impl Command for Cmd {
             Cmd::Obfuscate(args) => args.execute().await,
             Cmd::Analyze(args) => args.execute().await,
             Cmd::DecompileDiff(args) => args.execute().await,
+            Cmd::Dataset(args) => args.execute().await,
             Cmd::Tui(args) => args.execute().await,
             Cmd::Fuzz(args) => args.execute().await,
         }
