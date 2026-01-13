@@ -22,6 +22,8 @@ pub enum DatasetCommand {
     Download,
     /// Show dataset status and cached index info.
     Status,
+    /// Show dataset statistics from the cached index.
+    Stats,
     /// Verify downloaded files against the manifest.
     Verify,
     /// Rebuild the dataset comparison index.
@@ -43,6 +45,7 @@ impl super::Command for DatasetArgs {
         match command {
             DatasetCommand::Download => download(root).await?,
             DatasetCommand::Status => status(root)?,
+            DatasetCommand::Stats => stats(root)?,
             DatasetCommand::Verify => verify(root)?,
             DatasetCommand::Reindex => reindex(root)?,
         }
@@ -106,6 +109,52 @@ fn status(root: PathBuf) -> DatasetResult<()> {
             "missing"
         }
     );
+
+    Ok(())
+}
+
+fn stats(root: PathBuf) -> DatasetResult<()> {
+    let index = dataset::load_index(Some(root))?;
+    println!("Total contracts: {}", index.total_count);
+    println!("Size bucket:     {} bytes", index.size_bucket_bytes);
+    println!("Block bucket:    {} blocks", index.block_bucket_size);
+
+    if !index.runtime_size_buckets.is_empty() {
+        println!();
+        println!("Runtime size distribution:");
+        for bucket in &index.runtime_size_buckets {
+            let end = bucket.start as u64 + index.size_bucket_bytes - 1;
+            println!("  {}-{} bytes: {}", bucket.start, end, bucket.count);
+        }
+    }
+
+    if !index.init_size_buckets.is_empty() {
+        println!();
+        println!("Init code size distribution:");
+        for bucket in &index.init_size_buckets {
+            let end = bucket.start as u64 + index.size_bucket_bytes - 1;
+            println!("  {}-{} bytes: {}", bucket.start, end, bucket.count);
+        }
+    }
+
+    if !index.block_buckets.is_empty() {
+        println!();
+        println!("Deployment block distribution:");
+        for bucket in &index.block_buckets {
+            let end = bucket.start + index.block_bucket_size - 1;
+            println!("  {}-{}: {}", bucket.start, end, bucket.count);
+        }
+    }
+
+    if !index.compiler_versions.is_empty() {
+        println!();
+        println!("Compiler versions (top 20):");
+        let mut versions = index.compiler_versions.clone();
+        versions.sort_by(|a, b| b.count.cmp(&a.count));
+        for entry in versions.into_iter().take(20) {
+            println!("  {}: {}", entry.version, entry.count);
+        }
+    }
 
     Ok(())
 }
