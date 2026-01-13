@@ -1,5 +1,8 @@
 use crate::dataset::{DatasetError, Result};
-use arrow::array::{Array, ArrayRef, BinaryArray, LargeBinaryArray};
+use arrow::array::{
+    Array, ArrayRef, BinaryArray, Int32Array, Int64Array, LargeBinaryArray, UInt32Array,
+    UInt64Array,
+};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::fs::File;
 use std::path::Path;
@@ -16,6 +19,10 @@ pub struct ContractRecord {
     pub code: Vec<u8>,
     /// Optional keccak hash of runtime bytecode.
     pub code_hash: Option<[u8; 32]>,
+    /// Optional init bytecode.
+    pub init_code: Option<Vec<u8>>,
+    /// Optional deployment block number.
+    pub block_number: Option<u64>,
 }
 
 impl ParquetContractReader {
@@ -85,6 +92,8 @@ impl Iterator for ParquetContractIter {
 
             let code_col = batch.column_by_name("code");
             let hash_col = batch.column_by_name("code_hash");
+            let init_col = batch.column_by_name("init_code");
+            let block_col = batch.column_by_name("block_number");
             if code_col.is_none() {
                 return Some(Err(DatasetError::Format(
                     "missing `code` column".to_string(),
@@ -108,7 +117,18 @@ impl Iterator for ParquetContractIter {
                     }
                 });
 
-            return Some(Ok(ContractRecord { code, code_hash }));
+            let init_code = init_col
+                .and_then(|col| read_binary(col, row))
+                .map(|bytes| bytes.to_vec());
+
+            let block_number = block_col.and_then(|col| read_u64(col, row));
+
+            return Some(Ok(ContractRecord {
+                code,
+                code_hash,
+                init_code,
+                block_number,
+            }));
         }
     }
 }
@@ -125,6 +145,36 @@ fn read_binary(array: &ArrayRef, row: usize) -> Option<&[u8]> {
             None
         } else {
             Some(binary.value(row))
+        }
+    } else {
+        None
+    }
+}
+
+fn read_u64(array: &ArrayRef, row: usize) -> Option<u64> {
+    if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
+        if values.is_null(row) {
+            None
+        } else {
+            Some(values.value(row))
+        }
+    } else if let Some(values) = array.as_any().downcast_ref::<UInt32Array>() {
+        if values.is_null(row) {
+            None
+        } else {
+            Some(values.value(row) as u64)
+        }
+    } else if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
+        if values.is_null(row) {
+            None
+        } else {
+            Some(values.value(row) as u64)
+        }
+    } else if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
+        if values.is_null(row) {
+            None
+        } else {
+            Some(values.value(row) as u64)
         }
     } else {
         None
