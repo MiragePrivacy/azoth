@@ -18,6 +18,12 @@ pub struct AnalyzeArgs {
     /// Rebuild the dataset index before comparing.
     #[arg(long)]
     reindex: bool,
+    /// Start block for filtered comparison.
+    #[arg(long, value_name = "BLOCK")]
+    block_start: Option<u64>,
+    /// Block range length for filtered comparison.
+    #[arg(long, value_name = "BLOCKS")]
+    block_range: Option<u64>,
 }
 
 #[async_trait]
@@ -27,6 +33,8 @@ impl super::Command for AnalyzeArgs {
             bytecode,
             dataset_root,
             reindex,
+            block_start,
+            block_range,
         } = self;
 
         let input_hex = read_input(&bytecode)?;
@@ -42,22 +50,39 @@ impl super::Command for AnalyzeArgs {
             dataset::save_index(Some(root.clone()), &index)?;
         }
 
-        let index = match dataset::load_index(Some(root.clone())) {
-            Ok(index) => index,
-            Err(DatasetError::MissingIndex) => {
-                println!(
+        let index = if let Some(start) = block_start {
+            let range = block_range.unwrap_or(0);
+            if range == 0 {
+                println!("Block range must be greater than 0.");
+                return Ok(());
+            }
+            let end = start.saturating_add(range.saturating_sub(1));
+            println!("Using block range: {}-{}", start, end);
+            let dataset = Dataset::load(Some(root.clone()))?;
+            dataset::index::build_index_filtered(
+                &dataset,
+                Some(dataset::BlockFilter { start, end }),
+            )?
+        } else {
+            match dataset::load_index(Some(root.clone())) {
+                Ok(index) => index,
+                Err(DatasetError::MissingIndex) => {
+                    println!(
                     "Dataset index not found at {}. Run `azoth dataset download` and `azoth dataset reindex` first.",
                     dataset::index_path(Some(root)).display()
                 );
-                return Ok(());
+                    return Ok(());
+                }
+                Err(err) => return Err(Box::new(err)),
             }
-            Err(err) => return Err(Box::new(err)),
         };
 
-        if let Ok(dataset) = Dataset::load(Some(root.clone())) {
-            if let Ok(manifest_hash) = dataset.manifest_hash() {
-                if manifest_hash != index.manifest_hash {
-                    println!("Warning: dataset index is out of date with the manifest. Run `azoth dataset reindex`.");
+        if block_start.is_none() {
+            if let Ok(dataset) = Dataset::load(Some(root.clone())) {
+                if let Ok(manifest_hash) = dataset.manifest_hash() {
+                    if manifest_hash != index.manifest_hash {
+                        println!("Warning: dataset index is out of date with the manifest. Run `azoth dataset reindex`.");
+                    }
                 }
             }
         }
@@ -75,18 +100,31 @@ impl super::Command for AnalyzeArgs {
         println!();
         println!("Bytecode size:            {} bytes", bytecode_bytes.len());
         println!("Size percentile:          {:.2}%", result.size_percentile);
-        println!("Opcode similarity:        {:.3}", result.opcode_similarity);
+        println!(
+            "Size rank:                {} smaller, {} same size",
+            result.size_rank, result.size_equal_count
+        );
+        println!(
+            "Opcode similarity:        {:.3} (1.0 = identical to dataset)",
+            result.opcode_similarity
+        );
         if result.exact_match_found {
-            println!("Exact match:              yes");
+            println!("Exact match:              yes (bloom filter)");
         } else {
-            println!("Exact match:              no");
+            println!("Exact match:              no (bloom filter)");
         }
         if !result.anomalous_opcodes.is_empty() {
             println!();
-            println!("Top opcode anomalies:");
+            println!("Top opcode anomalies (relative to dataset mean):");
+            println!("  Opcode                 Deviation");
+            println!("  (deviation = (sample_freq - dataset_freq) / dataset_freq)");
             for (opcode, deviation) in result.anomalous_opcodes {
                 let name = Opcode::from(opcode);
-                println!("  {} (0x{opcode:02x}): {:+.2}%", name, deviation * 100.0);
+                println!(
+                    "  {:<22} {:+.2}%",
+                    format!("{name} (0x{opcode:02x})"),
+                    deviation * 100.0
+                );
             }
         }
         println!("============================================================");
