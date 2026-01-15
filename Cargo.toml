@@ -1,5 +1,6 @@
 [workspace]
 members = [ "crates/*", "tests", "examples"]
+exclude = ["vendor/heimdall-rs"]
 resolver = "2"
 
 [workspace.package]
@@ -93,3 +94,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Formal verification
 z3 = "0.12.1"
+
+[patch."https://github.com/Jon-Becker/heimdall-rs"]
+heimdall-decompiler = { path = "vendor/heimdall-rs/crates/decompile" }
+heimdall-disassembler = { path = "vendor/heimdall-rs/crates/disassemble" }
+heimdall-common = { path = "vendor/heimdall-rs/crates/common" }
+heimdall-config = { path = "vendor/heimdall-rs/crates/config" }
+heimdall-cache = { path = "vendor/heimdall-rs/crates/cache" }
+heimdall-decoder = { path = "vendor/heimdall-rs/crates/decode" }
+heimdall-vm = { path = "vendor/heimdall-rs/crates/vm" }
