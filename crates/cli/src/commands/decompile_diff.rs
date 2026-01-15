@@ -275,11 +275,7 @@ impl DecompileDiffArgs {
     }
 
     /// Prints the structured diff to stdout with colors (no summary, just diffs).
-    fn print_structured_diff(
-        &self,
-        result: &StructuredDiffResult,
-        attribution: &PcAttribution,
-    ) {
+    fn print_structured_diff(&self, result: &StructuredDiffResult, attribution: &PcAttribution) {
         // Each item
         for item in &result.items {
             if self.changed_only && !item.has_changes() {
@@ -669,27 +665,24 @@ fn build_pc_attribution(trace: &[TraceEvent]) -> PcAttribution {
             _ => {}
         }
 
-        match &event.diff {
-            CfgIrDiff::BlockChanges(changes) => {
-                let Some(cause) = active else {
-                    continue;
-                };
-                for change in &changes.changes {
-                    let (before_changed, after_changed) = diff_instruction_pcs(
-                        &change.before.instructions,
-                        &change.after.instructions,
-                        &pc_origin,
-                    );
-                    for origin in before_changed {
-                        attribution.pre.entry(origin).or_default().insert(cause);
-                    }
-                    for origin in after_changed {
-                        let final_pc = origin_to_final.get(&origin).copied().unwrap_or(origin);
-                        attribution.post.entry(final_pc).or_default().insert(cause);
-                    }
+        if let CfgIrDiff::BlockChanges(changes) = &event.diff {
+            let Some(cause) = active else {
+                continue;
+            };
+            for change in &changes.changes {
+                let (before_changed, after_changed) = diff_instruction_pcs(
+                    &change.before.instructions,
+                    &change.after.instructions,
+                    &pc_origin,
+                );
+                for origin in before_changed {
+                    attribution.pre.entry(origin).or_default().insert(cause);
+                }
+                for origin in after_changed {
+                    let final_pc = origin_to_final.get(&origin).copied().unwrap_or(origin);
+                    attribution.post.entry(final_pc).or_default().insert(cause);
                 }
             }
-            _ => {}
         }
     }
 
@@ -751,7 +744,7 @@ fn diff_instruction_pcs(
         }
     }
 
-    for (origin, _) in &after_by_origin {
+    for origin in after_by_origin.keys() {
         if !before_by_origin.contains_key(origin) {
             after_changed.insert(*origin);
         }
