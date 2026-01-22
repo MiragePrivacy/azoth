@@ -267,8 +267,7 @@ fn sstore_slot_push_index(instructions: &[Instruction], idx: usize) -> Option<us
         if parse_slot_candidate(instructions, slot_idx).is_some() {
             debug!(
                 "SlotShuffle: matched SSTORE slot push (slot_pc=0x{:04x}, sstore_pc=0x{:04x})",
-                instructions[slot_idx].pc,
-                instr.pc
+                instructions[slot_idx].pc, instr.pc
             );
             return Some(slot_idx);
         }
@@ -277,8 +276,7 @@ fn sstore_slot_push_index(instructions: &[Instruction], idx: usize) -> Option<us
         if parse_slot_candidate(instructions, slot_idx).is_some() {
             debug!(
                 "SlotShuffle: matched SSTORE slot push (slot_pc=0x{:04x}, sstore_pc=0x{:04x})",
-                instructions[slot_idx].pc,
-                instr.pc
+                instructions[slot_idx].pc, instr.pc
             );
             return Some(slot_idx);
         }
