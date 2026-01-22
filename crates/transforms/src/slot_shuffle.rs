@@ -321,17 +321,6 @@ fn format_slot_immediate(bytes: &[u8], width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Once;
-
-    fn init_tracing() {
-        static INIT: Once = Once::new();
-        INIT.call_once(|| {
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter("debug")
-                .with_test_writer()
-                .try_init();
-        });
-    }
 
     fn instr(pc: usize, op: Opcode, imm: Option<&str>) -> Instruction {
         Instruction {
@@ -404,7 +393,6 @@ mod tests {
 
     #[test]
     fn detects_sstore_slot_push_indices() {
-        init_tracing();
         let sstore = vec![
             instr(0, Opcode::PUSH(1), Some("01")),
             instr(2, Opcode::PUSH(1), Some("0a")),
