@@ -55,6 +55,7 @@ impl Transform for SlotShuffle {
         let protected_pcs = collect_protected_pcs(ir);
         let mut slots_by_width: HashMap<usize, Vec<Vec<u8>>> = HashMap::new();
         let mut seen_by_width: HashMap<usize, HashSet<Vec<u8>>> = HashMap::new();
+        let mut unsupported_sstores: Vec<usize> = Vec::new();
 
         let nodes: Vec<_> = ir.cfg.node_indices().collect();
         for node in &nodes {
@@ -64,6 +65,22 @@ impl Transform for SlotShuffle {
 
             for idx in 0..body.instructions.len() {
                 let instr = &body.instructions[idx];
+
+                if matches!(instr.op, Opcode::SSTORE) {
+                    if protected_pcs.contains(&instr.pc) {
+                        continue;
+                    }
+                    match sstore_slot_push_index(&body.instructions, idx) {
+                        Some(slot_idx) => {
+                            let slot_instr = &body.instructions[slot_idx];
+                            if protected_pcs.contains(&slot_instr.pc) {
+                                continue;
+                            }
+                        }
+                        None => unsupported_sstores.push(instr.pc),
+                    }
+                }
+
                 if protected_pcs.contains(&instr.pc) {
                     continue;
                 }
@@ -77,6 +94,19 @@ impl Transform for SlotShuffle {
                     slots_by_width.entry(width).or_default().push(slot_bytes);
                 }
             }
+        }
+
+        if !unsupported_sstores.is_empty() {
+            unsupported_sstores.sort_unstable();
+            unsupported_sstores.dedup();
+            let pcs = unsupported_sstores
+                .iter()
+                .map(|pc| format!("0x{pc:04x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::Generic(format!(
+                "SlotShuffle: unsupported SSTORE(s) without literal slot immediate at pc(s): {pcs}"
+            )));
         }
 
         if slots_by_width.is_empty() {
@@ -228,6 +258,34 @@ fn is_storage_slot_push(instructions: &[Instruction], idx: usize) -> bool {
     false
 }
 
+fn sstore_slot_push_index(instructions: &[Instruction], idx: usize) -> Option<usize> {
+    let instr = instructions.get(idx)?;
+    if !matches!(instr.op, Opcode::SSTORE) {
+        return None;
+    }
+    if let Some(slot_idx) = idx.checked_sub(1) {
+        if parse_slot_candidate(instructions, slot_idx).is_some() {
+            debug!(
+                "SlotShuffle: matched SSTORE slot push (slot_pc=0x{:04x}, sstore_pc=0x{:04x})",
+                instructions[slot_idx].pc,
+                instr.pc
+            );
+            return Some(slot_idx);
+        }
+    }
+    if let Some(slot_idx) = idx.checked_sub(2) {
+        if parse_slot_candidate(instructions, slot_idx).is_some() {
+            debug!(
+                "SlotShuffle: matched SSTORE slot push (slot_pc=0x{:04x}, sstore_pc=0x{:04x})",
+                instructions[slot_idx].pc,
+                instr.pc
+            );
+            return Some(slot_idx);
+        }
+    }
+    None
+}
+
 fn is_push_any(op: &Opcode) -> bool {
     matches!(op, Opcode::PUSH(_) | Opcode::PUSH0)
 }
@@ -265,6 +323,17 @@ fn format_slot_immediate(bytes: &[u8], width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Once;
+
+    fn init_tracing() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter("debug")
+                .with_test_writer()
+                .try_init();
+        });
+    }
 
     fn instr(pc: usize, op: Opcode, imm: Option<&str>) -> Instruction {
         Instruction {
@@ -333,5 +402,28 @@ mod tests {
         let parsed = parse_slot_candidate(&sstore, 0).expect("slot candidate");
         assert_eq!(parsed.0, 2);
         assert_eq!(parsed.1, vec![0x00, 0x02]);
+    }
+
+    #[test]
+    fn detects_sstore_slot_push_indices() {
+        init_tracing();
+        let sstore = vec![
+            instr(0, Opcode::PUSH(1), Some("01")),
+            instr(2, Opcode::PUSH(1), Some("0a")),
+            instr(4, Opcode::SSTORE, None),
+        ];
+        assert_eq!(sstore_slot_push_index(&sstore, 2), Some(0));
+
+        let sstore_no_prev_push = vec![
+            instr(0, Opcode::PUSH(1), Some("01")),
+            instr(2, Opcode::SSTORE, None),
+        ];
+        assert_eq!(sstore_slot_push_index(&sstore_no_prev_push, 1), Some(0));
+
+        let sstore_dynamic = vec![
+            instr(0, Opcode::DUP(1), None),
+            instr(1, Opcode::SSTORE, None),
+        ];
+        assert_eq!(sstore_slot_push_index(&sstore_dynamic, 1), None);
     }
 }
