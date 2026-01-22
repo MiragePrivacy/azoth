@@ -10,7 +10,7 @@
 //!
 //! We only touch obvious literal slot patterns:
 //! - `PUSH <slot> ; SLOAD`
-//! - `PUSH <slot> ; PUSH <value> ; SSTORE`
+//! - `PUSH <value> ; PUSH <slot> ; SSTORE` (slot is on top of stack for SSTORE)
 //! - `PUSH <slot> ; SSTORE` (when the value is already on the stack)
 //!   and we skip protected PCs (dispatcher/controller regions).
 //!
@@ -181,6 +181,9 @@ impl Transform for SlotShuffle {
                 if new_slot == &slot_bytes {
                     continue;
                 }
+                if matches!(rewritten[idx].op, Opcode::PUSH0) {
+                    continue;
+                }
 
                 debug!(
                     "SlotShuffle: block_pc=0x{:x} instr_pc=0x{:x} width={} 0x{} -> 0x{}",
@@ -215,18 +218,22 @@ impl Transform for SlotShuffle {
 
 fn parse_slot_candidate(instructions: &[Instruction], idx: usize) -> Option<(usize, Vec<u8>)> {
     let instr = instructions.get(idx)?;
-    let width = match instr.op {
-        Opcode::PUSH(width) => width as usize,
-        _ => return None,
-    };
     if !is_storage_slot_push(instructions, idx) {
         return None;
     }
-    let imm = instr.imm.as_deref()?;
-    normalize_slot_immediate(imm, width).map(|bytes| (width, bytes))
+    match instr.op {
+        Opcode::PUSH(width) => {
+            let width = width as usize;
+            let imm = instr.imm.as_deref()?;
+            normalize_slot_immediate(imm, width).map(|bytes| (width, bytes))
+        }
+        Opcode::PUSH0 => Some((0, Vec::new())),
+        _ => None,
+    }
 }
 
 fn is_storage_slot_push(instructions: &[Instruction], idx: usize) -> bool {
+    // Pattern 1: PUSH <slot> ; SLOAD
     if instructions
         .get(idx + 1)
         .is_some_and(|next| matches!(next.op, Opcode::SLOAD))
@@ -234,25 +241,16 @@ fn is_storage_slot_push(instructions: &[Instruction], idx: usize) -> bool {
         return true;
     }
 
-    if instructions
-        .get(idx + 2)
-        .is_some_and(|next| matches!(next.op, Opcode::SSTORE))
-        && instructions
-            .get(idx + 1)
-            .is_some_and(|next| is_push_any(&next.op))
-    {
-        return true;
-    }
-
+    // Pattern 2: PUSH <slot> ; SSTORE
+    // SSTORE takes slot from µs[0] (top of stack), so the PUSH immediately
+    // before SSTORE is always the slot. This handles both:
+    // - `PUSH <slot> ; SSTORE` (value already on stack)
+    // - `PUSH <value> ; PUSH <slot> ; SSTORE` (we match the second PUSH)
     if instructions
         .get(idx + 1)
         .is_some_and(|next| matches!(next.op, Opcode::SSTORE))
     {
-        let prev_is_push = idx
-            .checked_sub(1)
-            .and_then(|prev| instructions.get(prev))
-            .is_some_and(|prev| is_push_any(&prev.op));
-        return !prev_is_push;
+        return true;
     }
 
     false
@@ -263,29 +261,17 @@ fn sstore_slot_push_index(instructions: &[Instruction], idx: usize) -> Option<us
     if !matches!(instr.op, Opcode::SSTORE) {
         return None;
     }
-    if let Some(slot_idx) = idx.checked_sub(1) {
-        if parse_slot_candidate(instructions, slot_idx).is_some() {
-            debug!(
-                "SlotShuffle: matched SSTORE slot push (slot_pc=0x{:04x}, sstore_pc=0x{:04x})",
-                instructions[slot_idx].pc, instr.pc
-            );
-            return Some(slot_idx);
-        }
-    }
-    if let Some(slot_idx) = idx.checked_sub(2) {
-        if parse_slot_candidate(instructions, slot_idx).is_some() {
-            debug!(
-                "SlotShuffle: matched SSTORE slot push (slot_pc=0x{:04x}, sstore_pc=0x{:04x})",
-                instructions[slot_idx].pc, instr.pc
-            );
-            return Some(slot_idx);
-        }
+    // The slot is always at idx-1 (immediately before SSTORE)
+    // since SSTORE takes slot from µs[0] (top of stack)
+    let slot_idx = idx.checked_sub(1)?;
+    if parse_slot_candidate(instructions, slot_idx).is_some() {
+        debug!(
+            "SlotShuffle: matched SSTORE slot push (slot_pc=0x{:04x}, sstore_pc=0x{:04x})",
+            instructions[slot_idx].pc, instr.pc
+        );
+        return Some(slot_idx);
     }
     None
-}
-
-fn is_push_any(op: &Opcode) -> bool {
-    matches!(op, Opcode::PUSH(_) | Opcode::PUSH0)
 }
 
 fn normalize_slot_immediate(imm: &str, width: usize) -> Option<Vec<u8>> {
@@ -306,6 +292,9 @@ fn normalize_slot_immediate(imm: &str, width: usize) -> Option<Vec<u8>> {
 }
 
 fn format_slot_immediate(bytes: &[u8], width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
     if bytes.len() == width {
         return hex::encode(bytes);
     }
@@ -350,20 +339,24 @@ mod tests {
 
     #[test]
     fn detects_storage_slot_push_patterns() {
+        // Pattern: PUSH <slot> ; SLOAD
         let sload = vec![
             instr(0, Opcode::PUSH(1), Some("01")),
             instr(2, Opcode::SLOAD, None),
         ];
         assert!(is_storage_slot_push(&sload, 0));
 
+        // Pattern: PUSH <value> ; PUSH <slot> ; SSTORE
+        // The slot is the PUSH immediately before SSTORE (idx 1), not the value (idx 0)
         let sstore = vec![
-            instr(0, Opcode::PUSH(1), Some("01")),
-            instr(2, Opcode::PUSH(1), Some("0a")),
+            instr(0, Opcode::PUSH(1), Some("01")), // value
+            instr(2, Opcode::PUSH(1), Some("0a")), // slot
             instr(4, Opcode::SSTORE, None),
         ];
-        assert!(is_storage_slot_push(&sstore, 0));
-        assert!(!is_storage_slot_push(&sstore, 1));
+        assert!(!is_storage_slot_push(&sstore, 0)); // value push is NOT a slot
+        assert!(is_storage_slot_push(&sstore, 1)); // slot push IS a slot
 
+        // Pattern: PUSH <slot> ; SSTORE (value already on stack)
         let sstore_no_prev_push = vec![
             instr(0, Opcode::PUSH(1), Some("01")),
             instr(2, Opcode::SSTORE, None),
@@ -373,6 +366,7 @@ mod tests {
 
     #[test]
     fn parses_slot_candidates_from_instructions() {
+        // SLOAD pattern
         let sload = vec![
             instr(0, Opcode::PUSH(1), Some("01")),
             instr(2, Opcode::SLOAD, None),
@@ -381,31 +375,46 @@ mod tests {
         assert_eq!(parsed.0, 1);
         assert_eq!(parsed.1, vec![0x01]);
 
+        // SSTORE pattern: PUSH <value> ; PUSH <slot> ; SSTORE
+        // The slot is at idx 1 (immediately before SSTORE), not idx 0
         let sstore = vec![
-            instr(0, Opcode::PUSH(2), Some("0002")),
-            instr(3, Opcode::PUSH(1), Some("0a")),
+            instr(0, Opcode::PUSH(2), Some("0002")), // value
+            instr(3, Opcode::PUSH(1), Some("0a")),   // slot
             instr(5, Opcode::SSTORE, None),
         ];
-        let parsed = parse_slot_candidate(&sstore, 0).expect("slot candidate");
-        assert_eq!(parsed.0, 2);
-        assert_eq!(parsed.1, vec![0x00, 0x02]);
+        assert!(parse_slot_candidate(&sstore, 0).is_none()); // value is not a slot candidate
+        let parsed = parse_slot_candidate(&sstore, 1).expect("slot candidate");
+        assert_eq!(parsed.0, 1);
+        assert_eq!(parsed.1, vec![0x0a]);
+
+        // PUSH0 as slot
+        let sstore_zero = vec![
+            instr(0, Opcode::PUSH0, None),
+            instr(1, Opcode::SSTORE, None),
+        ];
+        let parsed = parse_slot_candidate(&sstore_zero, 0).expect("slot candidate");
+        assert_eq!(parsed.0, 0);
+        assert!(parsed.1.is_empty());
     }
 
     #[test]
     fn detects_sstore_slot_push_indices() {
+        // PUSH <value> ; PUSH <slot> ; SSTORE - slot is at idx 1
         let sstore = vec![
-            instr(0, Opcode::PUSH(1), Some("01")),
-            instr(2, Opcode::PUSH(1), Some("0a")),
+            instr(0, Opcode::PUSH(1), Some("01")), // value
+            instr(2, Opcode::PUSH(1), Some("0a")), // slot
             instr(4, Opcode::SSTORE, None),
         ];
-        assert_eq!(sstore_slot_push_index(&sstore, 2), Some(0));
+        assert_eq!(sstore_slot_push_index(&sstore, 2), Some(1)); // slot is idx 1, not 0
 
+        // PUSH <slot> ; SSTORE - slot is at idx 0
         let sstore_no_prev_push = vec![
             instr(0, Opcode::PUSH(1), Some("01")),
             instr(2, Opcode::SSTORE, None),
         ];
         assert_eq!(sstore_slot_push_index(&sstore_no_prev_push, 1), Some(0));
 
+        // Dynamic slot (DUP) - cannot identify literal slot
         let sstore_dynamic = vec![
             instr(0, Opcode::DUP(1), None),
             instr(1, Opcode::SSTORE, None),
