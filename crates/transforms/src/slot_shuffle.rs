@@ -104,9 +104,13 @@ impl Transform for SlotShuffle {
                 .map(|pc| format!("0x{pc:04x}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Err(Error::Generic(format!(
-                "SlotShuffle: unsupported SSTORE(s) without literal slot immediate at pc(s): {pcs}"
-            )));
+            // Cross-block patterns (e.g., Solidity's counter++) can't be safely traced.
+            // Skip shuffling to avoid breaking contracts where we can't track all slot refs.
+            debug!(
+                "SlotShuffle: skipping due to untraced SSTORE(s) at pc(s): {}",
+                pcs
+            );
+            return Ok(false);
         }
 
         if slots_by_width.is_empty() {
@@ -261,8 +265,7 @@ fn sstore_slot_push_index(instructions: &[Instruction], idx: usize) -> Option<us
     if !matches!(instr.op, Opcode::SSTORE) {
         return None;
     }
-    // The slot is always at idx-1 (immediately before SSTORE)
-    // since SSTORE takes slot from µs[0] (top of stack)
+    // First try direct match: PUSH immediately before SSTORE
     let slot_idx = idx.checked_sub(1)?;
     if parse_slot_candidate(instructions, slot_idx).is_some() {
         debug!(
@@ -271,6 +274,191 @@ fn sstore_slot_push_index(instructions: &[Instruction], idx: usize) -> Option<us
         );
         return Some(slot_idx);
     }
+
+    // Fallback: trace backwards through stack operations to find the slot PUSH
+    if let Some(traced_idx) = trace_slot_source(instructions, idx) {
+        // Verify the traced instruction is a valid slot candidate for SLOAD/SSTORE
+        let traced_instr = &instructions[traced_idx];
+        if matches!(traced_instr.op, Opcode::PUSH(_) | Opcode::PUSH0) {
+            debug!(
+                "SlotShuffle: traced SSTORE slot push (slot_pc=0x{:04x}, sstore_pc=0x{:04x})",
+                traced_instr.pc, instr.pc
+            );
+            return Some(traced_idx);
+        }
+    }
+    None
+}
+
+/// Trace backwards from an SSTORE to find the PUSH instruction that provides the slot.
+///
+/// SSTORE takes the slot from stack position 0 (top of stack). This function traces
+/// backwards through DUP, SWAP, and other stack operations to find the original PUSH
+/// that provided the slot value.
+///
+/// Returns the index of the PUSH instruction, or None if we can't determine it.
+fn trace_slot_source(instructions: &[Instruction], sstore_idx: usize) -> Option<usize> {
+    if sstore_idx == 0 {
+        return None;
+    }
+
+    // Start tracing: slot is at stack position 0 at SSTORE
+    let mut pos = 0usize;
+
+    for idx in (0..sstore_idx).rev() {
+        let op = &instructions[idx].op;
+
+        match op {
+            // PUSH operations: if we're tracking position 0, this is our source
+            Opcode::PUSH(_) | Opcode::PUSH0 => {
+                if pos == 0 {
+                    return Some(idx);
+                }
+                pos = pos.checked_sub(1)?;
+            }
+
+            // DUP(n): copies stack[n-1] to stack[0], shifts everything else up
+            Opcode::DUP(n) => {
+                let n = *n as usize;
+                if pos == 0 {
+                    // Value at position 0 was copied from position (n-1)
+                    pos = n - 1;
+                } else {
+                    pos = pos.checked_sub(1)?;
+                }
+            }
+
+            // SWAP(n): exchanges stack[0] with stack[n]
+            Opcode::SWAP(n) => {
+                let n = *n as usize;
+                if pos == 0 {
+                    pos = n;
+                } else if pos == n {
+                    pos = 0;
+                }
+            }
+
+            // Operations that pop 1, push 1 (net 0): position unchanged
+            Opcode::ISZERO
+            | Opcode::NOT
+            | Opcode::BALANCE
+            | Opcode::CALLDATALOAD
+            | Opcode::EXTCODESIZE
+            | Opcode::BLOCKHASH
+            | Opcode::MLOAD
+            | Opcode::SLOAD
+            | Opcode::EXTCODEHASH => {}
+
+            // Binary operations: pop 2, push 1 (net -1)
+            Opcode::ADD
+            | Opcode::SUB
+            | Opcode::MUL
+            | Opcode::DIV
+            | Opcode::SDIV
+            | Opcode::MOD
+            | Opcode::SMOD
+            | Opcode::EXP
+            | Opcode::SIGNEXTEND
+            | Opcode::LT
+            | Opcode::GT
+            | Opcode::SLT
+            | Opcode::SGT
+            | Opcode::EQ
+            | Opcode::AND
+            | Opcode::OR
+            | Opcode::XOR
+            | Opcode::BYTE
+            | Opcode::SHL
+            | Opcode::SHR
+            | Opcode::SAR
+            | Opcode::KECCAK256 => {
+                if pos == 0 {
+                    // Result came from computation, not a literal - give up
+                    return None;
+                }
+                pos += 1;
+            }
+
+            // Ternary: pop 3, push 1 (net -2)
+            Opcode::ADDMOD | Opcode::MULMOD => {
+                if pos == 0 {
+                    return None;
+                }
+                pos += 2;
+            }
+
+            // POP: removes from stack (net -1)
+            Opcode::POP => {
+                pos += 1;
+            }
+
+            // Zero-argument pushes (net +1)
+            Opcode::ADDRESS
+            | Opcode::ORIGIN
+            | Opcode::CALLER
+            | Opcode::CALLVALUE
+            | Opcode::CALLDATASIZE
+            | Opcode::CODESIZE
+            | Opcode::GASPRICE
+            | Opcode::COINBASE
+            | Opcode::TIMESTAMP
+            | Opcode::NUMBER
+            | Opcode::DIFFICULTY
+            | Opcode::GASLIMIT
+            | Opcode::CHAINID
+            | Opcode::SELFBALANCE
+            | Opcode::BASEFEE
+            | Opcode::GAS
+            | Opcode::RETURNDATASIZE
+            | Opcode::PC
+            | Opcode::MSIZE => {
+                if pos == 0 {
+                    return None; // Value from runtime, not literal
+                }
+                pos = pos.checked_sub(1)?;
+            }
+
+            // Memory/storage writes: pop 2, push 0 (net -2)
+            Opcode::MSTORE | Opcode::MSTORE8 | Opcode::SSTORE => {
+                pos += 2;
+            }
+
+            // Copy operations: pop 3, push 0 (net -3)
+            Opcode::CODECOPY
+            | Opcode::CALLDATACOPY
+            | Opcode::EXTCODECOPY
+            | Opcode::RETURNDATACOPY => {
+                pos += 3;
+            }
+
+            // LOG0-4: pop 2+n, push 0
+            Opcode::LOG0 => pos += 2,
+            Opcode::LOG1 => pos += 3,
+            Opcode::LOG2 => pos += 4,
+            Opcode::LOG3 => pos += 5,
+            Opcode::LOG4 => pos += 6,
+
+            // Control flow: stop tracing
+            Opcode::JUMP
+            | Opcode::JUMPI
+            | Opcode::STOP
+            | Opcode::RETURN
+            | Opcode::REVERT
+            | Opcode::INVALID
+            | Opcode::SELFDESTRUCT => {
+                return None;
+            }
+
+            // JUMPDEST: no stack effect, continue
+            Opcode::JUMPDEST => {}
+
+            // Complex operations or unknown: give up
+            _ => {
+                return None;
+            }
+        }
+    }
+
     None
 }
 
@@ -420,5 +608,93 @@ mod tests {
             instr(1, Opcode::SSTORE, None),
         ];
         assert_eq!(sstore_slot_push_index(&sstore_dynamic, 1), None);
+    }
+
+    #[test]
+    fn traces_slot_through_dup() {
+        // PUSH0 ; DUP1 ; SSTORE - slot is PUSH0 at idx 0, traced through DUP1
+        // Stack: PUSH0 -> [0], DUP1 -> [0, 0], SSTORE(slot=0, val=0)
+        let instructions = vec![
+            instr(0, Opcode::PUSH0, None),
+            instr(1, Opcode::DUP(1), None),
+            instr(2, Opcode::SSTORE, None),
+        ];
+        assert_eq!(trace_slot_source(&instructions, 2), Some(0));
+        assert_eq!(sstore_slot_push_index(&instructions, 2), Some(0));
+    }
+
+    #[test]
+    fn traces_slot_through_multiple_dups() {
+        // PUSH0 ; DUP1 ; DUP1 ; SSTORE - slot traced through two DUPs
+        // Stack: PUSH0 -> [0], DUP1 -> [0, 0], DUP1 -> [0, 0, 0], SSTORE(slot=0, val=0)
+        let instructions = vec![
+            instr(0, Opcode::PUSH0, None),
+            instr(1, Opcode::DUP(1), None),
+            instr(2, Opcode::DUP(1), None),
+            instr(3, Opcode::SSTORE, None),
+        ];
+        assert_eq!(trace_slot_source(&instructions, 3), Some(0));
+        assert_eq!(sstore_slot_push_index(&instructions, 3), Some(0));
+    }
+
+    #[test]
+    fn traces_slot_through_swap() {
+        // Read-modify-write pattern: PUSH slot ; DUP1 ; SLOAD ; NOT ; AND ; SWAP1 ; SSTORE
+        // This clears bits in a storage slot
+        // Array indices: 0=PUSH, 1=DUP, 2=SLOAD, 3=PUSH, 4=NOT, 5=AND, 6=SWAP, 7=SSTORE
+        let instructions = vec![
+            instr(0, Opcode::PUSH(1), Some("07")), // idx 0: slot = 7
+            instr(2, Opcode::DUP(1), None),        // idx 1: [7, 7]
+            instr(3, Opcode::SLOAD, None),         // idx 2: [7, old_val]
+            instr(4, Opcode::PUSH(1), Some("ff")), // idx 3: [7, old_val, 0xff]
+            instr(6, Opcode::NOT, None),           // idx 4: [7, old_val, ~0xff]
+            instr(7, Opcode::AND, None),           // idx 5: [7, masked_val]
+            instr(8, Opcode::SWAP(1), None),       // idx 6: [masked_val, 7]
+            instr(9, Opcode::SSTORE, None),        // idx 7: SSTORE(7, masked_val)
+        ];
+        // SSTORE is at index 7, should trace back to PUSH at index 0
+        assert_eq!(trace_slot_source(&instructions, 7), Some(0));
+        assert_eq!(sstore_slot_push_index(&instructions, 7), Some(0));
+    }
+
+    #[test]
+    fn traces_slot_through_dup2() {
+        // Pattern where slot is accessed via DUP2
+        // PUSH slot ; PUSH other ; DUP2 ; SSTORE
+        // [slot], [slot, other], DUP2 copies position 1 (slot) -> [slot, other, slot]
+        // SSTORE(slot, other)
+        // Array indices: 0=PUSH(slot), 1=PUSH(val), 2=DUP2, 3=SSTORE
+        let instructions = vec![
+            instr(0, Opcode::PUSH(1), Some("07")), // idx 0: slot
+            instr(2, Opcode::PUSH(1), Some("ff")), // idx 1: some value
+            instr(4, Opcode::DUP(2), None),        // idx 2: copies slot to top
+            instr(5, Opcode::SSTORE, None),        // idx 3: SSTORE
+        ];
+        // SSTORE is at index 3, should trace back to PUSH at index 0
+        assert_eq!(trace_slot_source(&instructions, 3), Some(0));
+        assert_eq!(sstore_slot_push_index(&instructions, 3), Some(0));
+    }
+
+    #[test]
+    fn trace_fails_for_computed_slot() {
+        // If slot comes from computation (ADD), we can't trace it
+        let instructions = vec![
+            instr(0, Opcode::PUSH(1), Some("01")),
+            instr(2, Opcode::PUSH(1), Some("02")),
+            instr(4, Opcode::ADD, None), // slot = 1 + 2 = 3, but computed
+            instr(5, Opcode::SSTORE, None),
+        ];
+        assert_eq!(trace_slot_source(&instructions, 4), None);
+    }
+
+    #[test]
+    fn trace_fails_for_runtime_value() {
+        // If slot comes from CALLER or similar, we can't trace it
+        let instructions = vec![
+            instr(0, Opcode::PUSH(1), Some("ff")), // value
+            instr(2, Opcode::CALLER, None),        // slot = caller address (runtime)
+            instr(3, Opcode::SSTORE, None),
+        ];
+        assert_eq!(trace_slot_source(&instructions, 3), None);
     }
 }
