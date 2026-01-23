@@ -72,8 +72,6 @@ Options:
 - `--emit-debug <PATH>` - Path to emit detailed CFG trace debug report as JSON
 - `--tui` - Launch TUI to view debug trace after obfuscation
 
-Available transforms: `shuffle`, `jump_transform`, `opaque_pred`
-
 Note: `function_dispatcher` is always applied automatically.
 
 ### `azoth analyze`
