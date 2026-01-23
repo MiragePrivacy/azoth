@@ -4,58 +4,103 @@
 //! dispatcher/controllers set a slot, later controllers verify it before
 //! routing, forcing stateful execution order.
 //!
-//! Only controllers whose reachable blocks contain at least
-//! one of `SSTORE`, `CALL`, `DELEGATECALL`, `CREATE`, or `CREATE2` can be
-//! selected as setters or checkers. (Static calls and logs do not qualify.)
-//! This prevents gating view/read-only functions (which would make them revert
-//! before any state mutation) and avoids turning view calls into SSTORE-heavy
-//! setters that break `eth_call` expectations.
+//! ## Auto-Generated Policy
+//!
+//! The transform auto-generates a `GatePolicy` by randomly splitting the selectors
+//! from `dispatcher_controller_pcs` into setters (must be called first) and checkers
+//! (require setters to be called first). This avoids the need to trace through
+//! obfuscated dispatcher chains to detect state-mutating functions.
+//!
+//! ## Gate Injection at Controller Level
+//!
+//! Gates are injected at the controller block level, before the controller jumps
+//! into the stub/decoy chain. This avoids the need to trace through the obfuscated
+//! control flow to find the actual function body.
 //!
 //! Assembly example:
 //! ```assembly
-//! // Dispatcher path for `transfer` (sets gate)
+//! // Controller for setter selector (sets gate before jumping to stub)
+//! JUMPDEST
 //! PUSH1  0x01
 //! PUSH32 gate_slot
 //! SSTORE           // mark slot
-//! JUMP controller_transfer
+//! PUSH2  stub_pc   // original controller code continues
+//! JUMP
 //!
-//! // Controller head for `withdraw` (checks gate)
+//! // Controller for checker selector (checks gate before jumping to stub)
+//! JUMPDEST
 //! PUSH32 gate_slot
 //! SLOAD
 //! ISZERO
-//! PUSH2 revert_pc  // if unset
+//! PUSH2 revert_pc  // if unset, revert
 //! JUMPI
-//! JUMP controller_withdraw
+//! PUSH2  stub_pc   // original controller code continues
+//! JUMP
 //! ```
 
 use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, BlockBody, BlockControl, CfgIrBundle};
 use azoth_core::decoder::Instruction;
-use azoth_core::{is_terminal_opcode, Opcode};
+use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
-use petgraph::visit::EdgeRef;
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
 use rand::RngCore;
-use std::collections::HashSet;
 use tracing::debug;
 
+/// Policy defining which selectors are setters and which are checkers.
+///
+/// Setters must be called before checkers. When a checker is called without
+/// a prior setter call, the transaction reverts.
+#[derive(Debug, Clone, Default)]
+pub struct GatePolicy {
+    /// Selectors that set the gate (must be called first).
+    pub setters: Vec<u32>,
+    /// Selectors that check the gate (require setters to be called first).
+    pub checkers: Vec<u32>,
+}
+
+impl GatePolicy {
+    /// Creates a new gate policy with the specified setters and checkers.
+    pub fn new(setters: Vec<u32>, checkers: Vec<u32>) -> Self {
+        Self { setters, checkers }
+    }
+}
+
 /// Storage mutation + gate insertion.
+///
+/// Auto-generates a `GatePolicy` by randomly splitting selectors from
+/// `dispatcher_controller_pcs` into setters and checkers. This avoids
+/// unreliable traversal-based detection that fails after FunctionDispatcher
+/// obfuscation.
 #[derive(Default)]
 pub struct StorageGates;
 
 impl StorageGates {
     const JUMP_WIDTH: u8 = 4;
-    const STATE_MUTATING_OPCODES: &'static [Opcode] = &[
-        Opcode::SSTORE,
-        Opcode::CALL,
-        Opcode::DELEGATECALL,
-        Opcode::CREATE,
-        Opcode::CREATE2,
-    ];
 
+    /// Creates a new StorageGates transform.
     pub fn new() -> Self {
         Self
+    }
+
+    /// Auto-generates a gate policy by randomly picking one setter and one checker.
+    ///
+    /// Only picks ONE setter and ONE checker to minimize impact on contract behavior.
+    /// Other selectors remain ungated.
+    fn generate_policy(selectors: &[u32], rng: &mut StdRng) -> GatePolicy {
+        use rand::seq::SliceRandom;
+
+        let mut selectors: Vec<u32> = selectors.to_vec();
+        selectors.shuffle(rng);
+
+        // Pick only ONE setter and ONE checker to minimize breakage
+        if selectors.len() >= 2 {
+            let setters = vec![selectors[0]];
+            let checkers = vec![selectors[1]];
+            GatePolicy::new(setters, checkers)
+        } else {
+            GatePolicy::default()
+        }
     }
 
     fn next_available_pc(ir: &CfgIrBundle) -> usize {
@@ -289,286 +334,6 @@ impl StorageGates {
             control: BlockControl::Terminal,
         }
     }
-
-    fn controller_is_state_mutating(ir: &CfgIrBundle, entry: NodeIndex) -> bool {
-        let mut visited = HashSet::new();
-        let mut stack = vec![entry];
-        visited.insert(entry);
-
-        while let Some(node) = stack.pop() {
-            if let Block::Body(body) = &ir.cfg[node] {
-                if body
-                    .instructions
-                    .iter()
-                    .any(|instr| Self::STATE_MUTATING_OPCODES.contains(&instr.op))
-                {
-                    return true;
-                }
-            }
-
-            let edges: Vec<_> = ir.cfg.edges_directed(node, petgraph::Outgoing).collect();
-            let mut successors = Vec::new();
-            if edges.is_empty() {
-                if let Block::Body(body) = &ir.cfg[node] {
-                    successors.extend(Self::infer_successors(ir, body));
-                }
-            } else {
-                successors.extend(edges.into_iter().map(|edge| edge.target()));
-            }
-
-            for target in successors {
-                if visited.insert(target) {
-                    stack.push(target);
-                }
-            }
-        }
-
-        false
-    }
-
-    fn controller_entry_is_state_mutating(
-        ir: &CfgIrBundle,
-        selector: u32,
-        controller_node: NodeIndex,
-    ) -> bool {
-        if let Some(target_node) = Self::controller_target_node_from_patches(ir, controller_node) {
-            debug!(
-                "selector 0x{:08x} uses controller patch target node {} for mutation scan",
-                selector,
-                target_node.index()
-            );
-            return Self::controller_is_state_mutating(ir, target_node);
-        }
-
-        debug!(
-            "selector 0x{:08x} falling back to controller node {}",
-            selector,
-            controller_node.index()
-        );
-        Self::controller_is_state_mutating(ir, controller_node)
-    }
-
-    /// Trace the full dispatcher chain to find the original function entry.
-    ///
-    /// The dispatcher creates a chain: controller → stub → decoy → original function.
-    /// - controller_patches: (controller_node, _, _, stub_pc)
-    /// - stub_patches: (stub_node, _, _, decoy_node)
-    /// - decoy_patches: (decoy_node, _, _, original_pc)
-    fn controller_target_node_from_patches(
-        ir: &CfgIrBundle,
-        controller_node: NodeIndex,
-    ) -> Option<NodeIndex> {
-        // Step 1: controller → stub_pc
-        let controller_patches = ir.controller_patches.as_ref()?;
-        let stub_pc = controller_patches
-            .iter()
-            .find(|(node, _, _, _)| *node == controller_node)
-            .map(|(_, _, _, target_pc)| *target_pc)?;
-
-        // Find stub node from stub_pc
-        let stub_node = Self::find_node_by_pc(ir, stub_pc)?;
-
-        // Step 2: stub → decoy_node
-        let stub_patches = ir.stub_patches.as_ref()?;
-        let decoy_node = stub_patches
-            .iter()
-            .find(|(node, _, _, _)| *node == stub_node)
-            .map(|(_, _, _, decoy)| *decoy)?;
-
-        // Step 3: decoy → original_pc
-        let decoy_patches = ir.decoy_patches.as_ref()?;
-        let original_pc = decoy_patches
-            .iter()
-            .find(|(node, _, _, _)| *node == decoy_node)
-            .map(|(_, _, _, target_pc)| *target_pc)?;
-
-        // Find original function node
-        let result = Self::find_node_by_pc(ir, original_pc);
-        if result.is_some() {
-            debug!(
-                "controller {} -> stub 0x{:x} -> decoy {} -> original 0x{:x}",
-                controller_node.index(),
-                stub_pc,
-                decoy_node.index(),
-                original_pc
-            );
-        } else {
-            debug!(
-                "controller {} chain traced to original_pc 0x{:x} but node not found",
-                controller_node.index(),
-                original_pc
-            );
-        }
-        result
-    }
-
-    fn find_node_by_pc(ir: &CfgIrBundle, pc: usize) -> Option<NodeIndex> {
-        // Try direct lookup first
-        if let Some(node) = ir.pc_to_block.get(&pc).copied() {
-            return Some(node);
-        }
-        // Try with runtime offset
-        if let Some((start, _)) = ir.runtime_bounds {
-            let adjusted = start.saturating_add(pc);
-            if let Some(node) = ir.pc_to_block.get(&adjusted).copied() {
-                return Some(node);
-            }
-            // Try finding block containing the PC
-            if let Some(node) = Self::node_containing_pc(ir, adjusted) {
-                return Some(node);
-            }
-        }
-        // Try finding block containing the raw PC
-        Self::node_containing_pc(ir, pc)
-    }
-
-    fn infer_successors(ir: &CfgIrBundle, body: &BlockBody) -> Vec<NodeIndex> {
-        let mut successors = Vec::new();
-        if body.instructions.is_empty() {
-            if let Some(next) = Self::next_body_node(ir, body.start_pc) {
-                successors.push(next);
-            }
-            return successors;
-        }
-
-        let mut jump_targets = Self::collect_jump_targets(ir, body);
-        if !jump_targets.is_empty() {
-            successors.append(&mut jump_targets);
-            if let Some(next) = Self::next_body_node(ir, body.start_pc) {
-                successors.push(next);
-            }
-            successors.sort_by_key(|node| node.index());
-            successors.dedup();
-            return successors;
-        }
-
-        let last = body.instructions.last().unwrap();
-        match last.op {
-            Opcode::JUMP => {
-                if let Some(target) =
-                    Self::resolve_jump_target(ir, body, body.instructions.len().saturating_sub(1))
-                {
-                    successors.push(target);
-                }
-            }
-            Opcode::JUMPI => {
-                if let Some(target) =
-                    Self::resolve_jump_target(ir, body, body.instructions.len().saturating_sub(1))
-                {
-                    successors.push(target);
-                }
-                if let Some(next) = Self::next_body_node(ir, body.start_pc) {
-                    successors.push(next);
-                }
-            }
-            opcode if is_terminal_opcode(opcode) => {}
-            _ => {
-                if let Some(next) = Self::next_body_node(ir, body.start_pc) {
-                    successors.push(next);
-                }
-            }
-        }
-
-        successors
-    }
-
-    fn collect_jump_targets(ir: &CfgIrBundle, body: &BlockBody) -> Vec<NodeIndex> {
-        let mut targets = Vec::new();
-        for (idx, instr) in body.instructions.iter().enumerate() {
-            if matches!(instr.op, Opcode::JUMP | Opcode::JUMPI) {
-                if let Some(target) = Self::resolve_jump_target(ir, body, idx) {
-                    targets.push(target);
-                }
-            }
-        }
-        targets.sort_by_key(|node| node.index());
-        targets.dedup();
-        targets
-    }
-
-    fn resolve_jump_target(
-        ir: &CfgIrBundle,
-        body: &BlockBody,
-        jump_idx: usize,
-    ) -> Option<NodeIndex> {
-        if jump_idx == 0 {
-            return None;
-        }
-        let instructions = &body.instructions;
-        let immediate = if jump_idx >= 1
-            && matches!(
-                instructions[jump_idx - 1].op,
-                Opcode::PUSH(_) | Opcode::PUSH0
-            ) {
-            Self::parse_immediate(&instructions[jump_idx - 1])
-        } else if jump_idx >= 3
-            && instructions[jump_idx - 1].op == Opcode::ADD
-            && matches!(
-                instructions[jump_idx - 2].op,
-                Opcode::PUSH(_) | Opcode::PUSH0
-            )
-            && matches!(
-                instructions[jump_idx - 3].op,
-                Opcode::PUSH(_) | Opcode::PUSH0
-            )
-        {
-            let first = Self::parse_immediate(&instructions[jump_idx - 3])?;
-            let second = Self::parse_immediate(&instructions[jump_idx - 2])?;
-            first.checked_add(second)
-        } else {
-            None
-        }?;
-
-        let absolute = if let Some((start, end)) = ir.runtime_bounds {
-            if body.start_pc >= start && body.start_pc < end {
-                start + immediate
-            } else {
-                immediate
-            }
-        } else {
-            immediate
-        };
-
-        ir.pc_to_block.get(&absolute).copied()
-    }
-
-    fn parse_immediate(instr: &Instruction) -> Option<usize> {
-        instr
-            .imm
-            .as_ref()
-            .and_then(|imm| usize::from_str_radix(imm, 16).ok())
-    }
-
-    fn next_body_node(ir: &CfgIrBundle, start_pc: usize) -> Option<NodeIndex> {
-        let mut bodies: Vec<_> = ir
-            .cfg
-            .node_indices()
-            .filter_map(|idx| match &ir.cfg[idx] {
-                Block::Body(body) => Some((idx, body.start_pc)),
-                _ => None,
-            })
-            .collect();
-        bodies.sort_by_key(|(_, pc)| *pc);
-        for (i, (_, pc)) in bodies.iter().enumerate() {
-            if *pc == start_pc {
-                return bodies.get(i + 1).map(|(idx, _)| *idx);
-            }
-        }
-        None
-    }
-
-    fn node_containing_pc(ir: &CfgIrBundle, pc: usize) -> Option<NodeIndex> {
-        for idx in ir.cfg.node_indices() {
-            if let Block::Body(body) = &ir.cfg[idx] {
-                let size: usize = body.instructions.iter().map(|i| i.byte_size()).sum();
-                let end = body.start_pc + size;
-                if pc >= body.start_pc && pc < end {
-                    return Some(idx);
-                }
-            }
-        }
-        None
-    }
 }
 
 impl Transform for StorageGates {
@@ -579,30 +344,16 @@ impl Transform for StorageGates {
     fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
         debug!("=== StorageGates Transform Start ===");
 
-        // Find all blocks with state-mutating opcodes (used for fallback heuristic)
-        let mutating_block_count = ir
-            .cfg
-            .node_indices()
-            .filter(|node| {
-                if let Block::Body(body) = &ir.cfg[*node] {
-                    body.instructions
-                        .iter()
-                        .any(|instr| Self::STATE_MUTATING_OPCODES.contains(&instr.op))
-                } else {
-                    false
-                }
-            })
-            .count();
-
         let Some(controller_pcs) = ir.dispatcher_controller_pcs.clone() else {
             debug!("StorageGates: no dispatcher controller map; skipping");
             return Ok(false);
         };
 
+        // Build controller lookup: selector -> (pc, node)
         let mut controllers = Vec::new();
-        for (selector, pc) in controller_pcs {
-            if let Some(node) = ir.pc_to_block.get(&pc).copied() {
-                controllers.push((selector, pc, node));
+        for (selector, pc) in &controller_pcs {
+            if let Some(node) = ir.pc_to_block.get(pc).copied() {
+                controllers.push((*selector, *pc, node));
             }
         }
 
@@ -614,52 +365,49 @@ impl Transform for StorageGates {
             return Ok(false);
         }
 
-        // Try traversal-based detection first
-        let mut eligible_checkers: Vec<_> = controllers
-            .iter()
-            .copied()
-            .filter(|(selector, _, node)| {
-                Self::controller_entry_is_state_mutating(ir, *selector, *node)
-            })
-            .collect();
+        // Auto-generate policy by randomly splitting selectors
+        let selectors: Vec<u32> = controller_pcs.keys().copied().collect();
+        let policy = Self::generate_policy(&selectors, rng);
 
-        // Note: We intentionally do NOT use a fallback heuristic here. If traversal
-        // cannot find state-mutating controllers, we skip the transform rather than
-        // risk gating arbitrary functions which can break call order assumptions.
-        // The traversal may fail to find controllers after FunctionDispatcher because
-        // the controller target PCs from dispatcher patches don't map cleanly in the CFG.
-        if eligible_checkers.is_empty() {
-            if mutating_block_count > 0 {
+        if policy.setters.is_empty() || policy.checkers.is_empty() {
+            debug!("StorageGates: generated policy has empty setters or checkers; skipping");
+            return Ok(false);
+        }
+
+        debug!(
+            "StorageGates: auto-generated policy with {} setters, {} checkers",
+            policy.setters.len(),
+            policy.checkers.len()
+        );
+
+        // Find first valid setter from policy
+        let setter = policy.setters.iter().find_map(|sel| {
+            controller_pcs
+                .get(sel)
+                .and_then(|pc| ir.pc_to_block.get(pc).map(|node| (*sel, *node)))
+        });
+
+        // Find first valid checker from policy
+        let checker = policy.checkers.iter().find_map(|sel| {
+            controller_pcs
+                .get(sel)
+                .and_then(|pc| ir.pc_to_block.get(pc).map(|node| (*sel, *node)))
+        });
+
+        let (setter_selector, setter_node, checker_selector, checker_node) = match (setter, checker)
+        {
+            (Some((set_sel, set_node)), Some((chk_sel, chk_node))) => {
                 debug!(
-                    "StorageGates: traversal found 0 eligible controllers despite {} state-mutating blocks; skipping (traversal limitation)",
-                    mutating_block_count
+                    "StorageGates: setter=0x{:08x}, checker=0x{:08x}",
+                    set_sel, chk_sel
                 );
-            } else {
-                debug!("StorageGates: no state-mutating controllers available; skipping");
+                (set_sel, set_node, chk_sel, chk_node)
             }
-            return Ok(false);
-        }
-
-        eligible_checkers.shuffle(rng);
-        let (checker_selector, _, checker_node) = eligible_checkers[0];
-
-        // Find setters: state-mutating controllers that are not the checker
-        let mut eligible_setters: Vec<_> = controllers
-            .iter()
-            .copied()
-            .filter(|(selector, _, node)| {
-                *selector != checker_selector
-                    && Self::controller_entry_is_state_mutating(ir, *selector, *node)
-            })
-            .collect();
-
-        if eligible_setters.is_empty() {
-            debug!("StorageGates: no distinct state-mutating setter available; skipping");
-            return Ok(false);
-        }
-
-        eligible_setters.shuffle(rng);
-        let (setter_selector, _, setter_node) = eligible_setters[0];
+            _ => {
+                debug!("StorageGates: selectors not found in controller map; skipping");
+                return Ok(false);
+            }
+        };
 
         let gate_slot = Self::gate_slot_hex(rng);
         debug!(
@@ -1034,83 +782,6 @@ mod tests {
         assert!(
             !changed,
             "storage gates should skip when only one controller exists"
-        );
-    }
-
-    #[tokio::test]
-    async fn storage_gates_skips_with_only_readonly_controllers() {
-        let bytecode = STORAGE_BYTECODE.trim();
-        let (mut cfg_ir, _, _, _) = process_bytecode_to_cfg(bytecode, false, bytecode, false)
-            .await
-            .unwrap();
-
-        // Create two read-only controllers (no state-mutating opcodes)
-        let mut next_pc = StorageGates::next_available_pc(&cfg_ir);
-
-        let make_readonly_block = |start_pc: usize| BlockBody {
-            start_pc,
-            instructions: vec![
-                Instruction {
-                    pc: start_pc,
-                    op: Opcode::JUMPDEST,
-                    imm: None,
-                },
-                Instruction {
-                    pc: start_pc + 1,
-                    op: Opcode::PUSH(1),
-                    imm: Some("00".to_string()),
-                },
-                Instruction {
-                    pc: start_pc + 3,
-                    op: Opcode::SLOAD, // Read-only, not SSTORE
-                    imm: None,
-                },
-                Instruction {
-                    pc: start_pc + 4,
-                    op: Opcode::STOP,
-                    imm: None,
-                },
-            ],
-            max_stack: 1,
-            control: BlockControl::Terminal,
-        };
-
-        let block_a = make_readonly_block(next_pc);
-        next_pc += block_a
-            .instructions
-            .iter()
-            .map(|i| i.byte_size())
-            .sum::<usize>();
-        let block_b = make_readonly_block(next_pc);
-
-        let node_a = cfg_ir.add_block(Block::Body(block_a));
-        cfg_ir.pc_to_block.insert(
-            StorageGates::block_start_pc(&cfg_ir, node_a).unwrap(),
-            node_a,
-        );
-        let node_b = cfg_ir.add_block(Block::Body(block_b));
-        cfg_ir.pc_to_block.insert(
-            StorageGates::block_start_pc(&cfg_ir, node_b).unwrap(),
-            node_b,
-        );
-
-        let mut controller_pcs = HashMap::new();
-        controller_pcs.insert(
-            0xaaaaaaaa,
-            StorageGates::block_start_pc(&cfg_ir, node_a).unwrap(),
-        );
-        controller_pcs.insert(
-            0xbbbbbbbb,
-            StorageGates::block_start_pc(&cfg_ir, node_b).unwrap(),
-        );
-        cfg_ir.dispatcher_controller_pcs = Some(controller_pcs);
-
-        let mut rng = StdRng::seed_from_u64(42);
-        let changed = StorageGates::new().apply(&mut cfg_ir, &mut rng).unwrap();
-
-        assert!(
-            !changed,
-            "storage gates should skip when all controllers are read-only"
         );
     }
 
