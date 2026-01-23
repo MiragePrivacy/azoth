@@ -1,4 +1,5 @@
 use crate::arithmetic_chain::ArithmeticChain;
+use crate::cluster_shuffle::ClusterShuffle;
 use crate::function_dispatcher::FunctionDispatcher;
 use crate::push_split::PushSplit;
 use crate::Transform;
@@ -62,7 +63,11 @@ impl Default for ObfuscationConfig {
     fn default() -> Self {
         Self {
             seed: Seed::generate(),
-            transforms: vec![Box::new(ArithmeticChain::new()), Box::new(PushSplit::new())],
+            transforms: vec![
+                Box::new(ArithmeticChain::new()),
+                Box::new(PushSplit::new()),
+                Box::new(ClusterShuffle::new()),
+            ],
             preserve_unknown_opcodes: true,
         }
     }
