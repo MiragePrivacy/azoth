@@ -93,19 +93,25 @@ impl Transform for StringObfuscate {
 }
 
 fn collect_error_string_data_pushes(instructions: &[Instruction]) -> Vec<usize> {
-    // First, find if this block has an Error(string) selector pattern.
-    // Pattern 1: Direct PUSH4 0x08c379a0
-    // Pattern 2: Computed PUSH3 0x461bcd ; PUSH1 0xe5 ; SHL
-    let selector_idx = find_error_selector_index(instructions);
-    if selector_idx.is_none() {
-        return Vec::new();
+    // Try structural detection first
+    if let Some(indices) = try_structural_detection(instructions) {
+        return indices;
     }
 
+    // Fallback: heuristic detection for blocks without full Error(string) structure
+    // This catches string data in blocks that were split by other transforms
+    collect_ascii_string_pushes(instructions)
+}
+
+/// Structural detection: look for full Error(string) ABI pattern in block.
+fn try_structural_detection(instructions: &[Instruction]) -> Option<Vec<usize>> {
+    // Find if this block has an Error(string) selector pattern.
+    let _selector_idx = find_error_selector_index(instructions)?;
+
     // Collect all MSTORE writes with their relative offsets.
-    // We handle both absolute and relative (DUP+ADD) addressing.
     let mstore_writes = collect_mstore_writes(instructions);
     if mstore_writes.is_empty() {
-        return Vec::new();
+        return None;
     }
 
     // Find the offset word (should be 0x20) at relative offset 0x04
@@ -114,11 +120,7 @@ fn collect_error_string_data_pushes(instructions: &[Instruction]) -> Vec<usize> 
         Some((_, bytes)) if parse_usize_be(bytes) == Some(0x20)
     );
     if !offset_ok {
-        debug!(
-            "StringObfuscate: selector found but missing offset word at 0x04; offsets={:?}",
-            mstore_writes.keys().copied().collect::<Vec<_>>()
-        );
-        return Vec::new();
+        return None;
     }
 
     // Find the length at relative offset 0x24
@@ -128,10 +130,7 @@ fn collect_error_string_data_pushes(instructions: &[Instruction]) -> Vec<usize> 
     };
     let length = match length {
         Some(len) if len > 0 => len,
-        _ => {
-            debug!("StringObfuscate: selector found but missing/zero length at 0x24");
-            return Vec::new();
-        }
+        _ => return None,
     };
 
     // String data starts at offset 0x44 and spans ceil(length/32)*32 bytes
@@ -145,15 +144,75 @@ fn collect_error_string_data_pushes(instructions: &[Instruction]) -> Vec<usize> 
         }
     }
 
-    if !data_push_indices.is_empty() {
-        debug!(
-            "StringObfuscate: found {} string data chunk(s) (length={})",
-            data_push_indices.len(),
-            length
-        );
+    if data_push_indices.is_empty() {
+        return None;
     }
 
-    data_push_indices
+    debug!(
+        "StringObfuscate: structural detection found {} chunk(s) (length={})",
+        data_push_indices.len(),
+        length
+    );
+
+    Some(data_push_indices)
+}
+
+/// Heuristic detection: find PUSH instructions with high ASCII content.
+/// Used as fallback when structural detection fails (e.g., after block splitting).
+fn collect_ascii_string_pushes(instructions: &[Instruction]) -> Vec<usize> {
+    let mut indices = Vec::new();
+
+    for (idx, instr) in instructions.iter().enumerate() {
+        // Only consider large PUSH instructions (PUSH16+)
+        let Opcode::PUSH(width) = instr.op else {
+            continue;
+        };
+        if width < 16 {
+            continue;
+        }
+
+        let Some((_, bytes)) = parse_push_immediate(instr) else {
+            continue;
+        };
+
+        // Check if this looks like ASCII string data
+        if is_likely_ascii_string(&bytes) {
+            debug!(
+                "StringObfuscate: heuristic detection found string at idx {} (PC {:#x})",
+                idx, instr.pc
+            );
+            indices.push(idx);
+        }
+    }
+
+    indices
+}
+
+/// Check if bytes look like ASCII string data.
+/// Returns true if the majority of non-null bytes are printable ASCII.
+fn is_likely_ascii_string(bytes: &[u8]) -> bool {
+    // Find where content ends (before null padding)
+    let content_end = bytes
+        .iter()
+        .rposition(|&b| b != 0)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+
+    if content_end < 4 {
+        return false; // Too short to be meaningful string
+    }
+
+    let content = &bytes[..content_end];
+
+    // Count printable ASCII characters (0x20-0x7E)
+    let printable_count = content
+        .iter()
+        .filter(|&&b| (0x20..=0x7E).contains(&b))
+        .count();
+
+    // Require at least 60% printable characters
+    let ratio = printable_count as f32 / content.len() as f32;
+    ratio >= 0.6
 }
 
 /// Find the index of an Error(string) selector in the instruction stream.
