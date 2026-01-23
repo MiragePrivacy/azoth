@@ -168,6 +168,7 @@ pub(crate) fn build_passes(list: &str) -> Result<Vec<Box<dyn Transform>>, Box<dy
             "push_split" => {
                 Ok(Box::new(azoth_transform::push_split::PushSplit::new()) as Box<dyn Transform>)
             }
+            "mba" => Ok(Box::new(azoth_transform::mba::Mba::new()) as Box<dyn Transform>),
             "storage_gates" => Ok(
                 Box::new(azoth_transform::storage_gates::StorageGates::new()) as Box<dyn Transform>,
             ),

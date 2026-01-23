@@ -2,6 +2,7 @@ pub mod arithmetic_chain;
 pub mod cluster_shuffle;
 pub mod function_dispatcher;
 pub mod jump_address_transformer;
+pub mod mba;
 pub mod obfuscator;
 pub mod opaque_predicate;
 pub mod push_split;

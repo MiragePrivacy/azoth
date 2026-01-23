@@ -1,3 +1,7 @@
+[files]
+# Exclude generated output/log files
+extend-exclude = ["output", "*.log"]
+
 [default.extend-words]
 # function selectors (4-byte hex strings)
 ede = "ede"
