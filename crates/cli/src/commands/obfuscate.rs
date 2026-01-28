@@ -175,6 +175,9 @@ pub(crate) fn build_passes(list: &str) -> Result<Vec<Box<dyn Transform>>, Box<dy
                 Ok(Box::new(azoth_transform::slot_shuffle::SlotShuffle::new())
                     as Box<dyn Transform>)
             }
+            "string_obfuscate" | "string_obf" => Ok(Box::new(
+                azoth_transform::string_obfuscate::StringObfuscate::new(),
+            ) as Box<dyn Transform>),
             "cluster_shuffle" => Ok(
                 Box::new(azoth_transform::cluster_shuffle::ClusterShuffle::new())
                     as Box<dyn Transform>,

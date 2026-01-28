@@ -13,7 +13,7 @@ pub mod tui;
 
 use thiserror::Error;
 
-pub const DEFAULT_PASSES: &str = "arithmetic_chain, push_split";
+pub const DEFAULT_PASSES: &str = "arithmetic_chain, push_split, string_obfuscate";
 
 /// Errors that can occur during obfuscation.
 #[derive(Debug, Error)]
