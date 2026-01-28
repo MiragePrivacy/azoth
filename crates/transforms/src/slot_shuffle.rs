@@ -32,7 +32,7 @@ use azoth_core::Opcode;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use std::collections::{HashMap, HashSet};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Late-stage storage slot permutation.
 #[derive(Default)]
@@ -106,7 +106,7 @@ impl Transform for SlotShuffle {
                 .join(", ");
             // Cross-block patterns (e.g., Solidity's counter++) can't be safely traced.
             // Skip shuffling to avoid breaking contracts where we can't track all slot refs.
-            debug!(
+            warn!(
                 "SlotShuffle: skipping due to untraced SSTORE(s) at pc(s): {}",
                 pcs
             );
@@ -114,7 +114,7 @@ impl Transform for SlotShuffle {
         }
 
         if slots_by_width.is_empty() {
-            debug!("SlotShuffle: no eligible slot literals found");
+            warn!("SlotShuffle: no eligible slot literals found");
             return Ok(false);
         }
 
