@@ -15,11 +15,16 @@ pub struct ComparisonResult {
     pub anomalous_opcodes: Vec<(u8, f64)>,
     /// Whether the bytecode hash is present in the dataset bloom filter.
     pub exact_match_found: bool,
+    /// Number of contracts with smaller bytecode than the input.
+    pub size_rank: u64,
+    /// Number of contracts with the same bytecode size as the input.
+    pub size_equal_count: u64,
 }
 
 /// Compare a bytecode blob to a dataset index.
 pub fn compare_to_dataset(bytecode: &[u8], index: &DatasetIndex) -> Result<ComparisonResult> {
     let size_percentile = size_percentile(bytecode.len(), &index.size_counts, index.total_count);
+    let (size_rank, size_equal_count) = size_rank_counts(bytecode.len(), &index.size_counts);
     let input_freq = opcode_frequency(bytecode);
     let opcode_similarity = cosine_similarity(&input_freq, &index.opcode_freq);
     let opcode_deviations = deviation_map(&input_freq, &index.opcode_freq);
@@ -32,6 +37,8 @@ pub fn compare_to_dataset(bytecode: &[u8], index: &DatasetIndex) -> Result<Compa
         opcode_deviations,
         anomalous_opcodes,
         exact_match_found,
+        size_rank,
+        size_equal_count,
     })
 }
 
@@ -97,6 +104,20 @@ pub fn size_percentile(size: usize, sizes: &[SizeCount], total: u64) -> f64 {
         }
     }
     below as f64 / total as f64 * 100.0
+}
+
+/// Count contracts smaller than and equal to the given size.
+fn size_rank_counts(size: usize, sizes: &[SizeCount]) -> (u64, u64) {
+    let mut below = 0u64;
+    let mut equal = 0u64;
+    for entry in sizes {
+        if entry.size < size {
+            below += entry.count;
+        } else if entry.size == size {
+            equal += entry.count;
+        }
+    }
+    (below, equal)
 }
 
 fn deviation_map(sample: &[f64], baseline: &[f64]) -> HashMap<u8, f64> {

@@ -1,5 +1,5 @@
 use crate::dataset::{DatasetError, Result};
-use arrow::array::{Array, ArrayRef, BinaryArray, LargeBinaryArray};
+use arrow::array::{Array, ArrayRef, BinaryArray, LargeBinaryArray, UInt64Array};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::fs::File;
 use std::path::Path;
@@ -16,6 +16,10 @@ pub struct ContractRecord {
     pub code: Vec<u8>,
     /// Optional keccak hash of runtime bytecode.
     pub code_hash: Option<[u8; 32]>,
+    /// Optional init (creation) bytecode.
+    pub init_code: Option<Vec<u8>>,
+    /// Optional block number when the contract was deployed.
+    pub block_number: Option<u64>,
 }
 
 impl ParquetContractReader {
@@ -85,6 +89,8 @@ impl Iterator for ParquetContractIter {
 
             let code_col = batch.column_by_name("code");
             let hash_col = batch.column_by_name("code_hash");
+            let init_col = batch.column_by_name("init_code");
+            let block_col = batch.column_by_name("block_number");
             if code_col.is_none() {
                 return Some(Err(DatasetError::Format(
                     "missing `code` column".to_string(),
@@ -108,7 +114,26 @@ impl Iterator for ParquetContractIter {
                     }
                 });
 
-            return Some(Ok(ContractRecord { code, code_hash }));
+            let init_code = init_col
+                .and_then(|col| read_binary(col, row))
+                .map(|bytes| bytes.to_vec());
+
+            let block_number = block_col.and_then(|col| {
+                col.as_any().downcast_ref::<UInt64Array>().and_then(|arr| {
+                    if arr.is_null(row) {
+                        None
+                    } else {
+                        Some(arr.value(row))
+                    }
+                })
+            });
+
+            return Some(Ok(ContractRecord {
+                code,
+                code_hash,
+                init_code,
+                block_number,
+            }));
         }
     }
 }

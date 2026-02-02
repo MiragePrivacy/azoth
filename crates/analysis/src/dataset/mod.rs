@@ -9,7 +9,7 @@ pub mod parquet;
 pub mod storage;
 
 pub use download::DownloadManager;
-pub use index::{DatasetIndex, SizeCount};
+pub use index::{BlockFilter, DatasetIndex, SizeCount};
 pub use manifest::{Manifest, ManifestFile};
 
 /// Errors returned by dataset management helpers.
