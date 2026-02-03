@@ -21,11 +21,6 @@ pub fn ensure_dataset_dir() -> std::io::Result<PathBuf> {
     Ok(root)
 }
 
-/// Resolve the manifest file path under the dataset root.
-pub fn manifest_path(root: &Path) -> PathBuf {
-    root.join("dataset_manifest.json")
-}
-
 /// Resolve the cached index path under the dataset root.
 pub fn index_path(root: &Path) -> PathBuf {
     root.join("index.json")
@@ -48,4 +43,18 @@ pub fn list_parquet_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
 
     files.sort();
     Ok(files)
+}
+
+/// Parse a block range from a dataset parquet filename.
+pub fn parse_file_block_range(name: &str) -> Option<(u64, u64)> {
+    let range = if let Some(pos) = name.rfind("__") {
+        &name[pos + 2..]
+    } else {
+        return None;
+    };
+    let range = range.strip_suffix(".parquet")?;
+    let mut parts = range.split("_to_");
+    let start = parts.next()?.parse::<u64>().ok()?;
+    let end = parts.next()?.parse::<u64>().ok()?;
+    Some((start, end))
 }
