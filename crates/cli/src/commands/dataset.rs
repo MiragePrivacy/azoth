@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use azoth_analysis::dataset::{self, Dataset, DatasetError, DownloadManager, Result as DatasetResult};
+use azoth_analysis::dataset::{
+    self, Dataset, DatasetError, DownloadManager, Result as DatasetResult,
+};
 use clap::{Args, Subcommand};
 use std::{collections::HashSet, error::Error, path::PathBuf};
 
@@ -110,12 +112,7 @@ which is incomplete and covers blocks 0 to 16,000,000."
             println!("Skip (exists): {}", file.name);
             continue;
         }
-        println!(
-            "Downloading [{}/{}]: {}",
-            idx + 1,
-            files.len(),
-            file.name
-        );
+        println!("Downloading [{}/{}]: {}", idx + 1, files.len(), file.name);
         downloader.download_file(file).await.map_err(|err| {
             DatasetError::Format(format!("download failed for {}: {err}", file.name))
         })?;

@@ -68,7 +68,6 @@ impl Dataset {
     pub fn parquet_files(&self) -> Result<Vec<PathBuf>> {
         Ok(storage::list_parquet_files(&self.root)?)
     }
-
 }
 
 /// Load the cached dataset index from disk.

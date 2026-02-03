@@ -111,10 +111,10 @@ pub fn build_index_filtered(
     println!("Found {} parquet files", files.len());
     for (idx, path) in files.iter().enumerate() {
         if let Some(range) = filter
-            && let Some((file_start, file_end)) =
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .and_then(storage::parse_file_block_range)
+            && let Some((file_start, file_end)) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(storage::parse_file_block_range)
             && (range.end < file_start || range.start > file_end)
         {
             continue;

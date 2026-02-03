@@ -99,7 +99,6 @@ impl DownloadManager {
         }
         Ok(())
     }
-
 }
 
 fn file_url(name: &str) -> String {
