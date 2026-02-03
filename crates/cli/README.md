@@ -87,6 +87,9 @@ Options:
 - `--block-start <block>` - Start block for filtered comparison
 - `--block-range <blocks>` - Block range length for filtered comparison (required with `--block-start`)
 
+Note: `azoth dataset download` currently fetches the Paradigm dataset only, which is incomplete and
+covers blocks 0 to 16,000,000.
+
 ## Input Formats
 
 The CLI supports:

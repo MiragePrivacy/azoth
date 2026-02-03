@@ -1,9 +1,7 @@
 use async_trait::async_trait;
-use azoth_analysis::dataset::{
-    self, Dataset, DatasetError, DownloadManager, Manifest, Result as DatasetResult,
-};
+use azoth_analysis::dataset::{self, Dataset, DatasetError, DownloadManager, Result as DatasetResult};
 use clap::{Args, Subcommand};
-use std::{error::Error, path::PathBuf};
+use std::{collections::HashSet, error::Error, path::PathBuf};
 
 /// Manage the Ethereum contracts dataset.
 #[derive(Args)]
@@ -18,14 +16,19 @@ pub struct DatasetArgs {
 /// Subcommands for dataset management.
 #[derive(Subcommand)]
 pub enum DatasetCommand {
-    /// Download the dataset and manifest.
-    Download,
+    /// Download the dataset files.
+    Download {
+        /// Start block for download selection.
+        #[arg(long, value_name = "BLOCK")]
+        block_start: Option<u64>,
+        /// Block range length for download selection.
+        #[arg(long, value_name = "BLOCKS")]
+        block_range: Option<u64>,
+    },
     /// Show dataset status and cached index info.
     Status,
     /// Show dataset statistics from the cached index.
     Stats,
-    /// Verify downloaded files against the manifest.
-    Verify,
     /// Rebuild the dataset comparison index.
     Reindex,
 }
@@ -43,10 +46,12 @@ impl super::Command for DatasetArgs {
             .unwrap_or_else(dataset::storage::dataset_root);
 
         match command {
-            DatasetCommand::Download => download(root).await?,
+            DatasetCommand::Download {
+                block_start,
+                block_range,
+            } => download(root, block_start, block_range).await?,
             DatasetCommand::Status => status(root)?,
             DatasetCommand::Stats => stats(root)?,
-            DatasetCommand::Verify => verify(root)?,
             DatasetCommand::Reindex => reindex(root)?,
         }
 
@@ -54,12 +59,45 @@ impl super::Command for DatasetArgs {
     }
 }
 
-async fn download(root: PathBuf) -> DatasetResult<()> {
+async fn download(
+    root: PathBuf,
+    block_start: Option<u64>,
+    block_range: Option<u64>,
+) -> DatasetResult<()> {
+    println!(
+        "Note: `azoth dataset download` currently fetches the Paradigm dataset only, \
+which is incomplete and covers blocks 0 to 16,000,000."
+    );
     std::fs::create_dir_all(&root)?;
     let manifest = dataset::manifest::fetch_manifest().await?;
-    persist_manifest(&root, &manifest)?;
-    println!("Files to download: {}", manifest.files.len());
-    for file in &manifest.files {
+    let mut files = manifest.files;
+
+    if let Some(start) = block_start {
+        let range = block_range.unwrap_or(0);
+        if range == 0 {
+            println!("Block range must be greater than 0.");
+            return Ok(());
+        }
+        let end = start.saturating_add(range.saturating_sub(1));
+        println!("Using block range: {}-{}", start, end);
+        files.retain(|file| {
+            dataset::storage::parse_file_block_range(&file.name)
+                .map(|(file_start, file_end)| !(end < file_start || start > file_end))
+                .unwrap_or(false)
+        });
+    } else if block_range.is_some() {
+        println!("Block range ignored without --block-start.");
+    }
+
+    let local_files = dataset::storage::list_parquet_files(&root)?;
+    let local_names = local_files
+        .iter()
+        .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+        .map(|name| name.to_string())
+        .collect::<HashSet<_>>();
+
+    println!("Files to download: {}", files.len());
+    for file in &files {
         if let Some(size) = file.size {
             println!("  {} ({} bytes)", file.name, size);
         } else {
@@ -67,15 +105,15 @@ async fn download(root: PathBuf) -> DatasetResult<()> {
         }
     }
     let downloader = DownloadManager::new(root, true);
-    for (idx, file) in manifest.files.iter().enumerate() {
-        if downloader.verify_file(file)? {
-            println!("Skip (hash ok): {}", file.name);
+    for (idx, file) in files.iter().enumerate() {
+        if local_names.contains(&file.name) {
+            println!("Skip (exists): {}", file.name);
             continue;
         }
         println!(
             "Downloading [{}/{}]: {}",
             idx + 1,
-            manifest.files.len(),
+            files.len(),
             file.name
         );
         downloader.download_file(file).await.map_err(|err| {
@@ -87,19 +125,10 @@ async fn download(root: PathBuf) -> DatasetResult<()> {
 }
 
 fn status(root: PathBuf) -> DatasetResult<()> {
-    let manifest_path = dataset::storage::manifest_path(&root);
     let index_path = dataset::index_path(Some(root.clone()));
     let parquet_files = dataset::storage::list_parquet_files(&root)?;
 
     println!("Dataset root:   {}", root.display());
-    println!(
-        "Manifest:       {}",
-        if manifest_path.exists() {
-            "present"
-        } else {
-            "missing"
-        }
-    );
     println!("Parquet files:  {}", parquet_files.len());
     println!(
         "Index:          {}",
@@ -159,41 +188,9 @@ fn stats(root: PathBuf) -> DatasetResult<()> {
     Ok(())
 }
 
-fn verify(root: PathBuf) -> DatasetResult<()> {
-    let manifest_path = dataset::storage::manifest_path(&root);
-    let manifest = dataset::manifest::load_local_manifest(&manifest_path)?
-        .ok_or(DatasetError::MissingManifest)?;
-    let downloader = DownloadManager::new(root, false);
-
-    let mut ok = 0usize;
-    let mut missing = 0usize;
-    let mut bad = 0usize;
-
-    for file in &manifest.files {
-        match downloader.verify_file(file) {
-            Ok(true) => ok += 1,
-            Ok(false) => missing += 1,
-            Err(_) => bad += 1,
-        }
-    }
-
-    println!("Verified: {ok}");
-    println!("Missing:  {missing}");
-    println!("Bad:      {bad}");
-
-    Ok(())
-}
-
 fn reindex(root: PathBuf) -> DatasetResult<()> {
     let dataset = Dataset::load(Some(root.clone()))?;
     let index = dataset::index::build_index(&dataset)?;
     dataset::save_index(Some(root), &index)?;
-    Ok(())
-}
-
-fn persist_manifest(root: &std::path::Path, manifest: &Manifest) -> DatasetResult<()> {
-    let path = dataset::storage::manifest_path(root);
-    let data = serde_json::to_string_pretty(manifest)?;
-    std::fs::write(path, data)?;
     Ok(())
 }

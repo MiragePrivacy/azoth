@@ -77,16 +77,6 @@ impl super::Command for AnalyzeArgs {
             }
         };
 
-        if block_start.is_none() {
-            if let Ok(dataset) = Dataset::load(Some(root.clone())) {
-                if let Ok(manifest_hash) = dataset.manifest_hash() {
-                    if manifest_hash != index.manifest_hash {
-                        println!("Warning: dataset index is out of date with the manifest. Run `azoth dataset reindex`.");
-                    }
-                }
-            }
-        }
-
         let result = compare_to_dataset(&bytecode_bytes, &index)?;
 
         println!("============================================================");
