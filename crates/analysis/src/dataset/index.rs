@@ -221,7 +221,7 @@ fn default_block_bucket_size() -> u64 {
     BLOCK_BUCKET_SIZE
 }
 
-fn extract_solc_version(code: &[u8]) -> Option<String> {
+pub fn extract_solc_version(code: &[u8]) -> Option<String> {
     let meta = extract_cbor_metadata(code)?;
     let map = match meta {
         ciborium::value::Value::Map(map) => map,

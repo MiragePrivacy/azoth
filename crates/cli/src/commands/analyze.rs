@@ -103,6 +103,57 @@ impl super::Command for AnalyzeArgs {
         } else {
             println!("Exact match:              no (bloom filter)");
         }
+
+        if !index.compiler_versions.is_empty() {
+            println!();
+            println!("Compiler versions:");
+            let inferred = dataset::index::extract_solc_version(&bytecode_bytes);
+            match inferred {
+                Some(version) => {
+                    println!("  Inferred:              {}", version);
+                    let mut versions = index.compiler_versions.clone();
+                    versions.sort_by(|a, b| b.count.cmp(&a.count));
+                    if let Some((rank, entry)) = versions
+                        .iter()
+                        .enumerate()
+                        .find(|(_, entry)| entry.version == version)
+                    {
+                        let percent = if index.total_count > 0 {
+                            (entry.count as f64 / index.total_count as f64) * 100.0
+                        } else {
+                            0.0
+                        };
+                        println!(
+                            "  Dataset rank:          {} ({} contracts, {:.2}%)",
+                            rank + 1,
+                            entry.count,
+                            percent
+                        );
+                    } else {
+                        println!("  Dataset rank:          not in dataset index");
+                    }
+                }
+                None => {
+                    println!("  Inferred:              unknown");
+                }
+            }
+
+            let mut versions = index.compiler_versions.clone();
+            versions.sort_by(|a, b| b.count.cmp(&a.count));
+            println!("  Top 5 versions:");
+            for entry in versions.into_iter().take(5) {
+                let percent = if index.total_count > 0 {
+                    (entry.count as f64 / index.total_count as f64) * 100.0
+                } else {
+                    0.0
+                };
+                println!(
+                    "    {:<20} {:>10} ({:.2}%)",
+                    entry.version, entry.count, percent
+                );
+            }
+        }
+
         if !result.anomalous_opcodes.is_empty() {
             println!();
             println!("Top opcode anomalies (relative to dataset mean):");
