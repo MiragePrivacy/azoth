@@ -1,5 +1,5 @@
 use crate::comparison::opcode_histogram_counts;
-use crate::dataset::{Dataset, DatasetError, Result, parquet::ParquetContractReader};
+use crate::dataset::{Dataset, DatasetError, Result, parquet::ParquetContractReader, storage};
 use bloomfilter::Bloom;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -48,10 +48,6 @@ pub struct VersionCount {
 /// Cached dataset statistics for comparison.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetIndex {
-    /// MD5 hash of the manifest used to build this index.
-    pub manifest_hash: String,
-    /// Optional dataset version from the manifest.
-    pub dataset_version: Option<String>,
     /// Total contracts indexed.
     pub total_count: u64,
     /// Normalized opcode frequencies across the dataset.
@@ -115,7 +111,10 @@ pub fn build_index_filtered(
     println!("Found {} parquet files", files.len());
     for (idx, path) in files.iter().enumerate() {
         if let Some(range) = filter
-            && let Some((file_start, file_end)) = parse_file_block_range(path)
+            && let Some((file_start, file_end)) =
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(storage::parse_file_block_range)
             && (range.end < file_start || range.start > file_end)
         {
             continue;
@@ -192,8 +191,6 @@ pub fn build_index_filtered(
         .collect::<Vec<_>>();
 
     Ok(DatasetIndex {
-        manifest_hash: dataset.manifest_hash()?,
-        dataset_version: dataset.manifest.version.clone(),
         total_count,
         opcode_freq,
         size_counts,
@@ -205,14 +202,6 @@ pub fn build_index_filtered(
         block_bucket_size: BLOCK_BUCKET_SIZE,
         bloom,
     })
-}
-
-/// Compute MD5 hash hex for byte slices.
-pub fn md5_hex(bytes: &[u8]) -> String {
-    use md5::{Digest, Md5};
-    let mut hasher = Md5::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
 }
 
 fn normalize_counts(counts: [u64; 256], total: u64) -> Vec<f64> {
@@ -307,15 +296,4 @@ fn extract_cbor_metadata(code: &[u8]) -> Option<ciborium::value::Value> {
     let metadata = &code[start..code.len() - 2];
     let mut cursor = std::io::Cursor::new(metadata);
     ciborium::de::from_reader(&mut cursor).ok()
-}
-
-fn parse_file_block_range(path: &std::path::Path) -> Option<(u64, u64)> {
-    let name = path.file_name()?.to_str()?;
-    let marker = "__v1_0_0__";
-    let range = name.split(marker).nth(1)?;
-    let range = range.strip_suffix(".parquet")?;
-    let mut parts = range.split("_to_");
-    let start = parts.next()?.parse::<u64>().ok()?;
-    let end = parts.next()?.parse::<u64>().ok()?;
-    Some((start, end))
 }

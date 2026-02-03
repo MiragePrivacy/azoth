@@ -1,4 +1,4 @@
-use crate::dataset::{DatasetError, Result, manifest::ManifestFile};
+use crate::dataset::{Result, manifest::ManifestFile};
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::header::{HeaderMap, RANGE};
@@ -28,11 +28,11 @@ impl DownloadManager {
         &self.root
     }
 
-    /// Download a single parquet file, resuming if possible and verifying its MD5 hash.
+    /// Download a single parquet file, resuming if possible.
     pub async fn download_file(&self, file: &ManifestFile) -> Result<()> {
         std::fs::create_dir_all(&self.root)?;
         let path = self.root.join(&file.name);
-        if path.exists() && verify_md5(&path, &file.md5)? {
+        if path.exists() {
             return Ok(());
         }
 
@@ -88,10 +88,6 @@ impl DownloadManager {
             bar.finish_and_clear();
         }
 
-        if !verify_md5(&path, &file.md5)? {
-            return Err(DatasetError::Integrity(file.name.clone()));
-        }
-
         Ok(())
     }
 
@@ -104,34 +100,10 @@ impl DownloadManager {
         Ok(())
     }
 
-    /// Verify a local file against the manifest hash.
-    pub fn verify_file(&self, file: &ManifestFile) -> Result<bool> {
-        let path = self.root.join(&file.name);
-        if !path.exists() {
-            return Ok(false);
-        }
-        verify_md5(&path, &file.md5)
-    }
 }
 
 fn file_url(name: &str) -> String {
     format!("https://datasets.paradigm.xyz/datasets/ethereum_contracts/{name}")
-}
-
-fn verify_md5(path: &Path, expected: &str) -> Result<bool> {
-    use md5::{Digest, Md5};
-    let mut hasher = Md5::new();
-    let mut file = std::fs::File::open(path)?;
-    let mut buf = [0u8; 1024 * 1024];
-    loop {
-        let read = std::io::Read::read(&mut file, &mut buf)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buf[..read]);
-    }
-    let actual = format!("{:x}", hasher.finalize());
-    Ok(actual == expected)
 }
 
 async fn open_output(path: &Path, mode: DownloadMode) -> Result<tokio::fs::File> {

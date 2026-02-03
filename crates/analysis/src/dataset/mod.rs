@@ -10,7 +10,6 @@ pub mod storage;
 
 pub use download::DownloadManager;
 pub use index::{BlockFilter, DatasetIndex, SizeCount};
-pub use manifest::{Manifest, ManifestFile};
 
 /// Errors returned by dataset management helpers.
 #[derive(Debug, Error)]
@@ -30,9 +29,6 @@ pub enum DatasetError {
     /// Arrow decoding error.
     #[error("dataset arrow error: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
-    /// Manifest is missing from the dataset directory.
-    #[error("dataset manifest missing")]
-    MissingManifest,
     /// Index is missing from the dataset directory.
     #[error("dataset index missing")]
     MissingIndex,
@@ -52,23 +48,20 @@ pub type Result<T> = std::result::Result<T, DatasetError>;
 pub struct Dataset {
     /// Dataset root directory.
     pub root: PathBuf,
-    /// Manifest metadata.
-    pub manifest: Manifest,
 }
 
 impl Dataset {
-    /// Load the dataset manifest from the local cache.
+    /// Load the dataset configuration from the local cache.
     pub fn load(root: Option<PathBuf>) -> Result<Self> {
         let root = root.unwrap_or_else(storage::dataset_root);
-        let manifest_path = storage::manifest_path(&root);
-        let manifest =
-            manifest::load_local_manifest(&manifest_path)?.ok_or(DatasetError::MissingManifest)?;
-        Ok(Self { root, manifest })
+        Ok(Self { root })
     }
 
     pub fn is_available(root: Option<PathBuf>) -> bool {
         let root = root.unwrap_or_else(storage::dataset_root);
-        storage::manifest_path(&root).exists()
+        !storage::list_parquet_files(&root)
+            .map(|files| files.is_empty())
+            .unwrap_or(true)
     }
 
     /// List parquet files in the dataset cache.
@@ -76,15 +69,6 @@ impl Dataset {
         Ok(storage::list_parquet_files(&self.root)?)
     }
 
-    /// Compute an MD5 hash of the local manifest for cache validation.
-    pub fn manifest_hash(&self) -> Result<String> {
-        let path = storage::manifest_path(&self.root);
-        if !path.exists() {
-            return Err(DatasetError::MissingManifest);
-        }
-        let bytes = std::fs::read(path)?;
-        Ok(crate::dataset::index::md5_hex(&bytes))
-    }
 }
 
 /// Load the cached dataset index from disk.

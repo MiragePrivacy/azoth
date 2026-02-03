@@ -1,7 +1,5 @@
 use crate::dataset::DatasetError;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-
 const MANIFEST_URL: &str = "https://raw.githubusercontent.com/paradigmxyz/paradigm-data-portal/main/datasets/ethereum_contracts/dataset_manifest.json";
 
 /// Dataset manifest metadata.
@@ -32,12 +30,5 @@ pub async fn fetch_manifest() -> Result<Manifest, DatasetError> {
     Ok(manifest)
 }
 
-/// Load the manifest from a local path, if present.
-pub fn load_local_manifest(path: &Path) -> Result<Option<Manifest>, DatasetError> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let data = std::fs::read_to_string(path)?;
-    let manifest = serde_json::from_str::<Manifest>(&data)?;
-    Ok(Some(manifest))
-}
+// Intentionally no local manifest helpers: downloads should be driven by
+// parquet filenames and requested block ranges.
