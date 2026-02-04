@@ -75,21 +75,22 @@ Options:
 Note: `function_dispatcher` is always applied automatically.
 
 ### `azoth analyze`
-Generates multiple obfuscated variants and reports how much of the original bytecode survives unchanged.
+Compare runtime bytecode against the Ethereum contracts dataset.
 
 ```bash
-azoth analyze <ITERATIONS> -D <DEPLOYMENT_BYTECODE> -R <RUNTIME_BYTECODE>
-azoth analyze 50 --deployment path/to/deployment.hex --runtime path/to/runtime.hex
-azoth analyze 25 -D 0x6080... -R 0x6080... --output reports/analysis.md
+azoth analyze <RUNTIME_BYTECODE> --reindex --dataset-root <PATH_TO_DATASET> -block-start 20000000 --block-range 100000
 ```
 
 Options:
-- `-D, --deployment <BYTECODE>` - Input deployment bytecode (default: examples/escrow-bytecode/artifacts/deployment_bytecode.hex)
-- `-R, --runtime <BYTECODE>` - Input runtime bytecode (default: examples/escrow-bytecode/artifacts/runtime_bytecode.hex)
-- `--output <path>` - Where to write the markdown report (default: ./obfuscation_analysis_report.md)
-- `--max-attempts <n>` - Retry budget per iteration when a seed fails (default: 5)
+- `--dataset-root <path>` - Override dataset root (default: ~/.azoth/datasets/ethereum_contracts)
+- `--reindex` - Rebuild the dataset index before comparing
+- `--block-start <block>` - Start block for filtered comparison
+- `--block-range <blocks>` - Block range length for filtered comparison (required with `--block-start`)
+- `--match-compiler-version` - Compare against contracts with the same compiler version
+- `--match-bytecode-size` - Compare against contracts with the same runtime bytecode size
 
-The analysis runs with the dispatcher when detected and otherwise mirrors the obfuscator's default transform selection (no extra passes are forced). The summary printed to stdout mirrors the generated report and includes average/percentile longest preserved block sizes plus n-gram diversity metrics.
+Note: `azoth dataset download` currently fetches the Paradigm dataset only, which is incomplete and
+covers blocks 0 to 16,000,000.
 
 ## Input Formats
 
