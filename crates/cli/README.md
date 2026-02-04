@@ -86,6 +86,8 @@ Options:
 - `--reindex` - Rebuild the dataset index before comparing
 - `--block-start <block>` - Start block for filtered comparison
 - `--block-range <blocks>` - Block range length for filtered comparison (required with `--block-start`)
+- `--match-compiler-version` - Compare against contracts with the same compiler version
+- `--match-bytecode-size` - Compare against contracts with the same runtime bytecode size
 
 Note: `azoth dataset download` currently fetches the Paradigm dataset only, which is incomplete and
 covers blocks 0 to 16,000,000.

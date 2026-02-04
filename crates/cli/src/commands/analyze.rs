@@ -24,6 +24,12 @@ pub struct AnalyzeArgs {
     /// Block range length for filtered comparison.
     #[arg(long, value_name = "BLOCKS")]
     block_range: Option<u64>,
+    /// Match dataset records by inferred compiler version only.
+    #[arg(long)]
+    match_compiler_version: bool,
+    /// Match dataset records by runtime bytecode size only.
+    #[arg(long)]
+    match_bytecode_size: bool,
 }
 
 #[async_trait]
@@ -35,6 +41,8 @@ impl super::Command for AnalyzeArgs {
             reindex,
             block_start,
             block_range,
+            match_compiler_version,
+            match_bytecode_size,
         } = self;
 
         let input_hex = read_input(&bytecode)?;
@@ -50,7 +58,94 @@ impl super::Command for AnalyzeArgs {
             dataset::save_index(Some(root.clone()), &index)?;
         }
 
-        let index = if let Some(start) = block_start {
+        let inferred_version = dataset::index::extract_solc_version(&bytecode_bytes);
+
+        let mut compiler_report = None;
+        let index = if match_compiler_version || match_bytecode_size {
+            let index_path = dataset::index_path(Some(root.clone()));
+            if !index_path.exists() {
+                println!(
+                    "Dataset index not found at {}. Run `azoth dataset reindex` first.",
+                    index_path.display()
+                );
+                return Ok(());
+            }
+            if match_bytecode_size {
+                if block_start.is_none() && block_range.is_some() {
+                    println!("Block range ignored without --block-start.");
+                }
+                let range = if let Some(start) = block_start {
+                    let blocks = block_range.unwrap_or(0);
+                    if blocks == 0 {
+                        println!("Block range must be greater than 0.");
+                        return Ok(());
+                    }
+                    let end = start.saturating_add(blocks.saturating_sub(1));
+                    println!("Using block range: {}-{}", start, end);
+                    Some(dataset::BlockFilter { start, end })
+                } else {
+                    None
+                };
+
+                let dataset = Dataset::load(Some(root.clone()))?;
+                let filter = dataset::index::IndexFilter {
+                    block_filter: range,
+                    compiler_version: None,
+                    runtime_size: Some(bytecode_bytes.len()),
+                };
+                match dataset::index::build_index_filtered_with_filter(&dataset, filter) {
+                    Ok((filtered, _report)) => {
+                        println!("Filtered dataset contracts: {}", filtered.total_count);
+                        println!("Comparison scope: size matched subset");
+                        filtered
+                    }
+                    Err(DatasetError::Format(msg)) if msg == "no opcodes indexed" => {
+                        println!("No matching contracts found for size filter.");
+                        return Ok(());
+                    }
+                    Err(err) => return Err(Box::new(err)),
+                }
+            } else if let Some(version) = inferred_version.clone() {
+                if block_start.is_none() && block_range.is_some() {
+                    println!("Block range ignored without --block-start.");
+                }
+                let range = if let Some(start) = block_start {
+                    let blocks = block_range.unwrap_or(0);
+                    if blocks == 0 {
+                        println!("Block range must be greater than 0.");
+                        return Ok(());
+                    }
+                    let end = start.saturating_add(blocks.saturating_sub(1));
+                    println!("Using block range: {}-{}", start, end);
+                    Some(dataset::BlockFilter { start, end })
+                } else {
+                    None
+                };
+
+                let dataset = Dataset::load(Some(root.clone()))?;
+                let filter = dataset::index::IndexFilter {
+                    block_filter: range,
+                    compiler_version: Some(version),
+                    runtime_size: None,
+                };
+                match dataset::index::build_index_filtered_with_filter(&dataset, filter) {
+                    Ok((filtered, report)) => {
+                        compiler_report = Some(report);
+                        println!("Filtered dataset contracts: {}", filtered.total_count);
+                        println!("Comparison scope: compiler matched subset");
+                        filtered
+                    }
+                    Err(DatasetError::Format(msg)) if msg == "no opcodes indexed" => {
+                        println!("No matching contracts found for compiler+size filter.");
+                        return Ok(());
+                    }
+                    Err(err) => return Err(Box::new(err)),
+                }
+            } else {
+                println!("No compiler metadata found in bytecode; skipping compiler match.");
+                dataset::load_index(Some(root.clone()))?
+            }
+        } else if let Some(start) = block_start {
             let range = block_range.unwrap_or(0);
             if range == 0 {
                 println!("Block range must be greater than 0.");
@@ -104,22 +199,38 @@ impl super::Command for AnalyzeArgs {
             println!("Exact match:              no (bloom filter)");
         }
 
-        if !index.compiler_versions.is_empty() {
+        let compiler_stats_index = if match_compiler_version {
+            dataset::load_index(Some(root.clone())).ok().or_else(|| {
+                if !index.compiler_versions.is_empty() {
+                    Some(index.clone())
+                } else {
+                    None
+                }
+            })
+        } else if !index.compiler_versions.is_empty() {
+            Some(index.clone())
+        } else {
+            dataset::load_index(Some(root.clone())).ok()
+        };
+
+        if let Some(stats_index) = compiler_stats_index.as_ref() {
             println!();
             println!("Compiler versions:");
-            let inferred = dataset::index::extract_solc_version(&bytecode_bytes);
-            match inferred {
+            match inferred_version.clone() {
                 Some(version) => {
                     println!("  Inferred:              {}", version);
-                    let mut versions = index.compiler_versions.clone();
+                    if match_compiler_version {
+                        println!("  Comparison subset:     {} contracts", index.total_count);
+                    }
+                    let mut versions = stats_index.compiler_versions.clone();
                     versions.sort_by(|a, b| b.count.cmp(&a.count));
                     if let Some((rank, entry)) = versions
                         .iter()
                         .enumerate()
                         .find(|(_, entry)| entry.version == version)
                     {
-                        let percent = if index.total_count > 0 {
-                            (entry.count as f64 / index.total_count as f64) * 100.0
+                        let percent = if stats_index.total_count > 0 {
+                            (entry.count as f64 / stats_index.total_count as f64) * 100.0
                         } else {
                             0.0
                         };
@@ -132,18 +243,25 @@ impl super::Command for AnalyzeArgs {
                     } else {
                         println!("  Dataset rank:          not in dataset index");
                     }
+                    if let Some(report) = compiler_report.as_ref() {
+                        if let Some(min_block) = report.compiler_min_block {
+                            println!("  First seen block:      {} (local dataset)", min_block);
+                        } else if report.compiler_total > 0 {
+                            println!("  First seen block:      unknown (local dataset)");
+                        }
+                    }
                 }
                 None => {
                     println!("  Inferred:              unknown");
                 }
             }
 
-            let mut versions = index.compiler_versions.clone();
+            let mut versions = stats_index.compiler_versions.clone();
             versions.sort_by(|a, b| b.count.cmp(&a.count));
-            println!("  Top 5 versions:");
-            for entry in versions.into_iter().take(5) {
-                let percent = if index.total_count > 0 {
-                    (entry.count as f64 / index.total_count as f64) * 100.0
+            println!("  All versions (full dataset index):");
+            for entry in versions {
+                let percent = if stats_index.total_count > 0 {
+                    (entry.count as f64 / stats_index.total_count as f64) * 100.0
                 } else {
                     0.0
                 };

@@ -83,9 +83,24 @@ pub struct BlockFilter {
     pub end: u64,
 }
 
+/// Optional filters applied when building a dataset index.
+#[derive(Debug, Clone, Default)]
+pub struct IndexFilter {
+    pub block_filter: Option<BlockFilter>,
+    pub compiler_version: Option<String>,
+    pub runtime_size: Option<usize>,
+}
+
+/// Additional metadata captured during index builds.
+#[derive(Debug, Clone, Default)]
+pub struct IndexReport {
+    pub compiler_min_block: Option<u64>,
+    pub compiler_total: u64,
+}
+
 /// Build a dataset index by scanning all cached parquet files.
 pub fn build_index(dataset: &Dataset) -> Result<DatasetIndex> {
-    build_index_filtered(dataset, None)
+    Ok(build_index_filtered_with_filter(dataset, IndexFilter::default())?.0)
 }
 
 /// Build a dataset index for a specific block range.
@@ -93,10 +108,29 @@ pub fn build_index_filtered(
     dataset: &Dataset,
     filter: Option<BlockFilter>,
 ) -> Result<DatasetIndex> {
+    let filter = IndexFilter {
+        block_filter: filter,
+        ..IndexFilter::default()
+    };
+    Ok(build_index_filtered_with_filter(dataset, filter)?.0)
+}
+
+/// Build a dataset index with optional filters and report metadata.
+pub fn build_index_filtered_with_filter(
+    dataset: &Dataset,
+    filter: IndexFilter,
+) -> Result<(DatasetIndex, IndexReport)> {
     println!("Indexing dataset at {}", dataset.root.display());
-    if let Some(range) = filter {
+    if let Some(range) = filter.block_filter {
         println!("Block filter: {}-{}", range.start, range.end);
     }
+    if let Some(ref version) = filter.compiler_version {
+        println!("Compiler filter: {}", version);
+    }
+    if let Some(size) = filter.runtime_size {
+        println!("Runtime size filter: {} bytes", size);
+    }
+
     let mut opcode_counts = [0u64; 256];
     let mut opcode_total = 0u64;
     let mut size_counts = BTreeMap::<usize, u64>::new();
@@ -106,11 +140,12 @@ pub fn build_index_filtered(
     let mut compiler_versions = BTreeMap::<String, u64>::new();
     let mut bloom = Bloom::new_for_fp_rate(EXPECTED_CONTRACTS, BLOOM_FP_RATE);
     let mut total_count = 0u64;
+    let mut report = IndexReport::default();
 
     let files = dataset.parquet_files()?;
     println!("Found {} parquet files", files.len());
     for (idx, path) in files.iter().enumerate() {
-        if let Some(range) = filter
+        if let Some(range) = filter.block_filter
             && let Some((file_start, file_end)) = path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -130,7 +165,23 @@ pub fn build_index_filtered(
         let reader = ParquetContractReader::open(path)?;
         for record in reader.iter() {
             let record = record?;
-            if let Some(range) = filter {
+            let version = extract_solc_version(&record.code);
+
+            if let Some(ref target) = filter.compiler_version
+                && version.as_deref() == Some(target.as_str())
+            {
+                report.compiler_total += 1;
+                if let Some(block) = record.block_number {
+                    report.compiler_min_block = Some(
+                        report
+                            .compiler_min_block
+                            .map(|min| min.min(block))
+                            .unwrap_or(block),
+                    );
+                }
+            }
+
+            if let Some(range) = filter.block_filter {
                 if let Some(block) = record.block_number {
                     if block < range.start || block > range.end {
                         continue;
@@ -139,6 +190,19 @@ pub fn build_index_filtered(
                     continue;
                 }
             }
+
+            if let Some(ref target) = filter.compiler_version
+                && version.as_deref() != Some(target.as_str())
+            {
+                continue;
+            }
+
+            if let Some(size) = filter.runtime_size
+                && record.code.len() != size
+            {
+                continue;
+            }
+
             let len = record.code.len();
             *size_counts.entry(len).or_insert(0) += 1;
             let bucket = (len / SIZE_BUCKET_BYTES) * SIZE_BUCKET_BYTES;
@@ -152,7 +216,7 @@ pub fn build_index_filtered(
                 let block_bucket = (block / BLOCK_BUCKET_SIZE) * BLOCK_BUCKET_SIZE;
                 *block_buckets.entry(block_bucket).or_insert(0) += 1;
             }
-            if let Some(version) = extract_solc_version(&record.code) {
+            if let Some(version) = version {
                 *compiler_versions.entry(version).or_insert(0) += 1;
             }
             total_count += 1;
@@ -190,18 +254,21 @@ pub fn build_index_filtered(
         .map(|(version, count)| VersionCount { version, count })
         .collect::<Vec<_>>();
 
-    Ok(DatasetIndex {
-        total_count,
-        opcode_freq,
-        size_counts,
-        runtime_size_buckets,
-        init_size_buckets,
-        block_buckets,
-        compiler_versions,
-        size_bucket_bytes: SIZE_BUCKET_BYTES as u64,
-        block_bucket_size: BLOCK_BUCKET_SIZE,
-        bloom,
-    })
+    Ok((
+        DatasetIndex {
+            total_count,
+            opcode_freq,
+            size_counts,
+            runtime_size_buckets,
+            init_size_buckets,
+            block_buckets,
+            compiler_versions,
+            size_bucket_bytes: SIZE_BUCKET_BYTES as u64,
+            block_bucket_size: BLOCK_BUCKET_SIZE,
+            bloom,
+        },
+        report,
+    ))
 }
 
 fn normalize_counts(counts: [u64; 256], total: u64) -> Vec<f64> {
