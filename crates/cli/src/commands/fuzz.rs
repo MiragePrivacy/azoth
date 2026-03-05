@@ -90,9 +90,9 @@ impl<'a> MakeWriter<'a> for LogCapture {
 
 // Contract bytecodes
 const ESCROW_DEPLOYMENT: &str =
-    include_str!("../../../../examples/escrow-bytecode/artifacts/deployment_bytecode.hex");
+    include_str!("../../../../examples/escrow-bytecode/artifacts/erc20_deployment.hex");
 const ESCROW_RUNTIME: &str =
-    include_str!("../../../../examples/escrow-bytecode/artifacts/runtime_bytecode.hex");
+    include_str!("../../../../examples/escrow-bytecode/artifacts/erc20_runtime.hex");
 const COUNTER_DEPLOYMENT: &str =
     include_str!("../../../../tests/bytecode/counter/counter_deployment.hex");
 const COUNTER_RUNTIME: &str =

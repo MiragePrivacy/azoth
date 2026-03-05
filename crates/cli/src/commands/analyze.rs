@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use azoth_analysis::obfuscation::{analyze_obfuscation, AnalysisConfig, AnalysisError};
 use clap::Args;
 use std::{error::Error, path::PathBuf};
-const DEFAULT_DEPLOYMENT_PATH: &str = "examples/escrow-bytecode/artifacts/deployment_bytecode.hex";
-const DEFAULT_RUNTIME_PATH: &str = "examples/escrow-bytecode/artifacts/runtime_bytecode.hex";
+const DEFAULT_DEPLOYMENT_PATH: &str = "examples/escrow-bytecode/artifacts/erc20_deployment.hex";
+const DEFAULT_RUNTIME_PATH: &str = "examples/escrow-bytecode/artifacts/erc20_runtime.hex";
 
 /// Analyze how much bytecode survives obfuscation across multiple seeds.
 #[derive(Args)]

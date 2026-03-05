@@ -35,11 +35,11 @@ pub fn mock_token_bytecode() -> Bytes {
 
 #[allow(dead_code)]
 pub const ESCROW_CONTRACT_DEPLOYMENT_BYTECODE: &str =
-    include_str!("../../../examples/escrow-bytecode/artifacts/deployment_bytecode.hex");
+    include_str!("../../../examples/escrow-bytecode/artifacts/erc20_deployment.hex");
 
 #[allow(dead_code)]
 pub const ESCROW_CONTRACT_RUNTIME_BYTECODE: &str =
-    include_str!("../../../examples/escrow-bytecode/artifacts/runtime_bytecode.hex");
+    include_str!("../../../examples/escrow-bytecode/artifacts/erc20_runtime.hex");
 
 /// Prepare escrow contract bytecode with constructor arguments
 #[allow(dead_code)]
@@ -224,11 +224,11 @@ define_contract_selectors!(Escrow {
     is_bonded: "cb766a56",
     withdraw: "3ccfd60b",
     current_reward_amount: "5a4fd645",
-    bond_amount: "8bd03d0a",
+    bond_amount: "80f323a7",
     original_reward_amount: "d415b3f9",
     bonded_executor: "1aa7c0ec",
     execution_deadline: "33ee5f35",
-    current_payment_amount: "80f323a7",
+    current_payment_amount: "8bd03d0a",
     total_bonds_deposited: "fe03a460",
     cancellation_request: "308657d7",
     funded: "f3a504f2",
