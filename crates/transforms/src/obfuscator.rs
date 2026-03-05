@@ -329,6 +329,30 @@ pub async fn obfuscate_bytecode(
         tracing::debug!("  {}", log_entry);
     }
 
+    // Capture old instruction layout before reindexing (needed for immutable ref patching).
+    // For each runtime instruction, record (old_pc, byte_size) so we can build a byte-level
+    // displacement map after reindex_pcs remaps instruction PCs.
+    let old_runtime_start = cfg_ir.runtime_bounds.map(|(s, _)| s).unwrap_or(0);
+    let old_instr_layout: Vec<(usize, usize)> = {
+        let mut layout = Vec::new();
+        let rt_bounds = cfg_ir.runtime_bounds;
+        for node_idx in cfg_ir.cfg.node_indices() {
+            if let cfg_ir::Block::Body(body) = &cfg_ir.cfg[node_idx] {
+                let in_runtime = match rt_bounds {
+                    Some((start, end)) => body.start_pc >= start && body.start_pc < end,
+                    None => true,
+                };
+                if in_runtime {
+                    for instr in &body.instructions {
+                        layout.push((instr.pc, instr.byte_size()));
+                    }
+                }
+            }
+        }
+        layout.sort_by_key(|(pc, _)| *pc);
+        layout
+    };
+
     // Step 5: Reindex PCs
     tracing::debug!("  Reindexing PCs to normalize to 0-based addressing");
     let (pc_mapping, old_runtime_bounds) = cfg_ir
@@ -341,6 +365,12 @@ pub async fn obfuscate_bytecode(
         .patch_jump_immediates(&pc_mapping, old_runtime_bounds)
         .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
     tracing::debug!("  Patched jump immediates after PC reindexing");
+
+    // Remap orphan jump-address PUSHes (e.g. return addresses for internal function calls)
+    // that are not part of any recognized jump pattern.
+    cfg_ir
+        .remap_orphan_jump_pushes(&pc_mapping, old_runtime_bounds)
+        .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
 
     // Re-apply dispatcher jump target patches with OLD controller PCs (before updating)
     // NOTE: These patches update the PUSH2 instructions (jump targets), not the PUSH4 token instructions
@@ -579,6 +609,52 @@ pub async fn obfuscate_bytecode(
             "  Runtime bytecode size with data section: {} bytes",
             obfuscated_bytes.len()
         );
+    }
+
+    // Step 7b: Patch immutable reference offsets in init code.
+    // When transforms grow the runtime (e.g., PushSplit), the init code's hardcoded byte
+    // offsets for writing immutable variables become stale. Build a byte-level displacement
+    // map from the old instruction layout and pc_mapping, then patch the init code.
+    {
+        let new_runtime_start = cfg_ir.runtime_bounds.map(|(s, _)| s).unwrap_or(0);
+        // Build byte-level remap: for each byte in the old runtime, compute where it lands
+        // in the new runtime. We build a sorted list of (old_rel_offset, new_rel_offset) for
+        // each instruction start, then for any query offset, find the containing instruction
+        // and compute the intra-instruction delta.
+        let mut byte_remap_entries: Vec<(usize, usize, usize)> = Vec::new(); // (old_rel, new_rel, size)
+        for &(old_pc, byte_size) in &old_instr_layout {
+            if let Some(&new_pc) = pc_mapping.get(&old_pc) {
+                let old_rel = old_pc.saturating_sub(old_runtime_start);
+                let new_rel = new_pc.saturating_sub(new_runtime_start);
+                byte_remap_entries.push((old_rel, new_rel, byte_size));
+            }
+        }
+        byte_remap_entries.sort_by_key(|(old_rel, _, _)| *old_rel);
+
+        let remap = |old_offset: usize| -> Option<usize> {
+            // Binary search for the instruction containing this byte offset
+            match byte_remap_entries.binary_search_by_key(&old_offset, |(old_rel, _, _)| *old_rel) {
+                Ok(i) => {
+                    // Exact match on instruction start
+                    Some(byte_remap_entries[i].1)
+                }
+                Err(i) if i > 0 => {
+                    // old_offset falls within the instruction at index i-1
+                    let (old_rel, new_rel, size) = byte_remap_entries[i - 1];
+                    let delta = old_offset - old_rel;
+                    if delta < size {
+                        Some(new_rel + delta)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+
+        if let Err(e) = cfg_ir.clean_report.patch_init_immutable_refs(&remap) {
+            tracing::warn!("Failed to patch init immutable refs: {}", e);
+        }
     }
 
     // Step 8: Reassemble final bytecode (init + runtime with data section + auxdata)
