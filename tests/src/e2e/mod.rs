@@ -35,11 +35,11 @@ pub fn mock_token_bytecode() -> Bytes {
 
 #[allow(dead_code)]
 pub const ESCROW_CONTRACT_DEPLOYMENT_BYTECODE: &str =
-    include_str!("../../../examples/escrow-bytecode/artifacts/deployment_bytecode.hex");
+    include_str!("../../../examples/escrow-bytecode/artifacts/erc20_deployment.hex");
 
 #[allow(dead_code)]
 pub const ESCROW_CONTRACT_RUNTIME_BYTECODE: &str =
-    include_str!("../../../examples/escrow-bytecode/artifacts/runtime_bytecode.hex");
+    include_str!("../../../examples/escrow-bytecode/artifacts/erc20_runtime.hex");
 
 /// Prepare escrow contract bytecode with constructor arguments
 #[allow(dead_code)]

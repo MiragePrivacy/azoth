@@ -5,8 +5,8 @@ use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig, Obfusca
 use serde_json::json;
 use std::fs;
 
-const MIRAGE_ESCROW_DEPLOYMENT_PATH: &str = "escrow-bytecode/artifacts/deployment_bytecode.hex";
-const MIRAGE_ESCROW_RUNTIME_PATH: &str = "escrow-bytecode/artifacts/runtime_bytecode.hex";
+const MIRAGE_ESCROW_DEPLOYMENT_PATH: &str = "escrow-bytecode/artifacts/erc20_deployment.hex";
+const MIRAGE_ESCROW_RUNTIME_PATH: &str = "escrow-bytecode/artifacts/erc20_runtime.hex";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

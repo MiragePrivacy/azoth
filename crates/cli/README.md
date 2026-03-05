@@ -84,8 +84,8 @@ azoth analyze 25 -D 0x6080... -R 0x6080... --output reports/analysis.md
 ```
 
 Options:
-- `-D, --deployment <BYTECODE>` - Input deployment bytecode (default: examples/escrow-bytecode/artifacts/deployment_bytecode.hex)
-- `-R, --runtime <BYTECODE>` - Input runtime bytecode (default: examples/escrow-bytecode/artifacts/runtime_bytecode.hex)
+- `-D, --deployment <BYTECODE>` - Input deployment bytecode (default: examples/escrow-bytecode/artifacts/erc20_deployment.hex)
+- `-R, --runtime <BYTECODE>` - Input runtime bytecode (default: examples/escrow-bytecode/artifacts/erc20_runtime.hex)
 - `--output <path>` - Where to write the markdown report (default: ./obfuscation_analysis_report.md)
 - `--max-attempts <n>` - Retry budget per iteration when a seed fails (default: 5)
 

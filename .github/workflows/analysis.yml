@@ -31,8 +31,8 @@ jobs:
       - name: Run decompile-diff analysis
         id: analysis
         run: |
-          DEPLOYMENT="examples/escrow-bytecode/artifacts/deployment_bytecode.hex"
-          RUNTIME="examples/escrow-bytecode/artifacts/runtime_bytecode.hex"
+          DEPLOYMENT="examples/escrow-bytecode/artifacts/erc20_deployment.hex"
+          RUNTIME="examples/escrow-bytecode/artifacts/erc20_runtime.hex"
 
           if [[ ! -f "$DEPLOYMENT" ]] || [[ ! -f "$RUNTIME" ]]; then
             echo "::error::Bytecode artifacts not found"
