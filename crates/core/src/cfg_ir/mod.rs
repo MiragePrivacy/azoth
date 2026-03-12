@@ -751,6 +751,216 @@ impl CfgIrBundle {
         Ok(())
     }
 
+    /// Remap return-address PUSH instructions in Solidity internal function call patterns.
+    ///
+    /// After `reindex_pcs` shifts PCs, `write_symbolic_immediates` and `patch_jump_immediates`
+    /// update PUSH values that feed directly into JUMP/JUMPI. However, return addresses pushed
+    /// earlier in a block (the `PUSH ret_addr` in `PUSH ret_addr; PUSH func_entry; JUMP`) are
+    /// not part of any recognized jump pattern and become stale. This pass finds those specific
+    /// return-address PUSHes and remaps them.
+    pub fn remap_orphan_jump_pushes(
+        &mut self,
+        pc_mapping: &HashMap<usize, usize>,
+        old_runtime_bounds: Option<(usize, usize)>,
+    ) -> Result<(), Error> {
+        let old_runtime_start = old_runtime_bounds.map(|(s, _)| s);
+        let new_runtime_start = self.runtime_bounds.map(|(s, _)| s);
+
+        // Build set of old JUMPDEST PCs so we can verify candidates are real jump targets.
+        let inverse: HashMap<usize, usize> =
+            pc_mapping.iter().map(|(&old, &new)| (new, old)).collect();
+        let mut old_jumpdest_pcs: HashSet<usize> = HashSet::new();
+        for node in self.cfg.node_indices() {
+            if let Some(Block::Body(body)) = self.cfg.node_weight(node) {
+                for instr in &body.instructions {
+                    if matches!(instr.op, Opcode::JUMPDEST)
+                        && let Some(&old_pc) = inverse.get(&instr.pc)
+                    {
+                        old_jumpdest_pcs.insert(old_pc);
+                    }
+                }
+            }
+        }
+
+        if old_jumpdest_pcs.is_empty() {
+            return Ok(());
+        }
+
+        // First pass: collect (node, instruction_index) pairs that need remapping.
+        // We look for the internal call pattern: PUSH ret_addr; PUSH func_entry; JUMP
+        // The return address PUSH is at push_idx - 1 in a Direct pattern.
+        let nodes: Vec<_> = self.cfg.node_indices().collect();
+        let mut edits: Vec<(NodeIndex, usize, usize)> = Vec::new(); // (node, instr_idx, new_value)
+
+        for &node in &nodes {
+            let Some(Block::Body(body)) = self.cfg.node_weight(node) else {
+                continue;
+            };
+
+            let in_runtime = body.is_runtime(self.runtime_bounds);
+
+            // compute the remapped value for a PUSH instruction
+            let try_remap = |push_value: usize| -> Option<usize> {
+                let old_pc_abs = if in_runtime {
+                    old_runtime_start.unwrap_or(0).saturating_add(push_value)
+                } else {
+                    push_value
+                };
+                if !old_jumpdest_pcs.contains(&old_pc_abs) {
+                    return None;
+                }
+                let &new_pc_abs = pc_mapping.get(&old_pc_abs)?;
+                let new_value = if in_runtime {
+                    new_runtime_start
+                        .map(|s| new_pc_abs.saturating_sub(s))
+                        .unwrap_or(new_pc_abs)
+                } else {
+                    new_pc_abs
+                };
+                if push_value != new_value {
+                    Some(new_value)
+                } else {
+                    None
+                }
+            };
+
+            // Find the terminal jump pattern
+            let pattern = detect_jump_pattern(&body.instructions);
+
+            if let Some(ref pat) = pattern {
+                // check the PUSH immediately before the jump pattern
+                let pattern_first_push_idx = match pat {
+                    JumpPattern::Direct { push_idx } => *push_idx,
+                    JumpPattern::SplitAdd { push_a_idx, .. } => *push_a_idx,
+                    JumpPattern::PcRelative { push_idx, .. } => *push_idx,
+                };
+
+                if pattern_first_push_idx > 0 {
+                    let ret_idx = pattern_first_push_idx - 1;
+                    let ret_instr = &body.instructions[ret_idx];
+                    if matches!(ret_instr.op, Opcode::PUSH(_))
+                        && let Some(imm) = &ret_instr.imm
+                        && let Ok(push_value) = usize::from_str_radix(imm, 16)
+                        && let Some(new_value) = try_remap(push_value)
+                    {
+                        let old_pc_abs = if in_runtime {
+                            old_runtime_start.unwrap_or(0).saturating_add(push_value)
+                        } else {
+                            push_value
+                        };
+                        let new_pc_abs = pc_mapping.get(&old_pc_abs).copied().unwrap_or(0);
+                        tracing::debug!(
+                            "remap_orphan_jump_pushes: block {} instr {} at pc=0x{:x}: \
+                             0x{:x} -> 0x{:x} (abs: 0x{:x} -> 0x{:x})",
+                            node.index(),
+                            ret_idx,
+                            ret_instr.pc,
+                            push_value,
+                            new_value,
+                            old_pc_abs,
+                            new_pc_abs,
+                        );
+                        edits.push((node, ret_idx, new_value));
+                    }
+                }
+            }
+
+            // Extended scan: for blocks ending with JUMP/JUMPI (regardless of pattern),
+            // scan ALL PUSH instructions for values matching old JUMPDEST PCs.
+            //
+            // Solidity contracts with inheritance (e.g. EscrowERC20 + EscrowBase) emit
+            // internal function call patterns where the return address PUSH is separated
+            // from the terminal JUMP by several instructions:
+            //
+            //   PUSH ret_addr   ← return address, not adjacent to JUMP
+            //   DUP3
+            //   PUSH2 value
+            //   SWAP4
+            //   PUSH0
+            //   SSTORE
+            //   PUSH1 slot
+            //   SSTORE
+            //   JUMP            ← uses ret_addr still on the stack
+            //
+            // The standard path above only checks the PUSH immediately before a recognized
+            // jump pattern (PUSH+JUMP). This extended scan catches return addresses at
+            // arbitrary positions within the block.
+            let last = body.instructions.last();
+            let ends_with_jump = last.is_some_and(|i| matches!(i.op, Opcode::JUMP | Opcode::JUMPI));
+            if ends_with_jump {
+                // Determine which indices are already part of the recognized jump pattern
+                // to avoid double-remapping
+                let pattern_indices: HashSet<usize> = match &pattern {
+                    Some(JumpPattern::Direct { push_idx }) => {
+                        [*push_idx, push_idx.wrapping_sub(1)].into_iter().collect()
+                    }
+                    Some(JumpPattern::SplitAdd {
+                        push_a_idx,
+                        push_b_idx,
+                    }) => [*push_a_idx, *push_b_idx, push_a_idx.wrapping_sub(1)]
+                        .into_iter()
+                        .collect(),
+                    Some(JumpPattern::PcRelative { push_idx, .. }) => {
+                        [*push_idx, push_idx.wrapping_sub(1)].into_iter().collect()
+                    }
+                    None => HashSet::new(),
+                };
+
+                for (idx, instr) in body.instructions.iter().enumerate() {
+                    if pattern_indices.contains(&idx) {
+                        continue;
+                    }
+                    if !matches!(instr.op, Opcode::PUSH(_)) {
+                        continue;
+                    }
+                    let Some(imm) = &instr.imm else {
+                        continue;
+                    };
+                    let Ok(push_value) = usize::from_str_radix(imm, 16) else {
+                        continue;
+                    };
+                    if let Some(new_value) = try_remap(push_value) {
+                        let old_pc_abs = if in_runtime {
+                            old_runtime_start.unwrap_or(0).saturating_add(push_value)
+                        } else {
+                            push_value
+                        };
+                        let new_pc_abs = pc_mapping.get(&old_pc_abs).copied().unwrap_or(0);
+                        tracing::debug!(
+                            "remap_orphan_jump_pushes: block {} instr {} at pc=0x{:x}: \
+                             0x{:x} -> 0x{:x} (abs: 0x{:x} -> 0x{:x}) [extended scan]",
+                            node.index(),
+                            idx,
+                            instr.pc,
+                            push_value,
+                            new_value,
+                            old_pc_abs,
+                            new_pc_abs,
+                        );
+                        edits.push((node, idx, new_value));
+                    }
+                }
+            }
+        }
+
+        // Second pass: apply the edits
+        let total_remapped = edits.len();
+        for (node, instr_idx, new_value) in edits {
+            if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
+                apply_immediate(&mut body.instructions[instr_idx], new_value)?;
+            }
+        }
+
+        if total_remapped > 0 {
+            tracing::debug!(
+                "remap_orphan_jump_pushes: remapped {} internal-call return address PUSHes",
+                total_remapped
+            );
+        }
+
+        Ok(())
+    }
+
     /// Remap all stored metadata that references absolute PCs using the supplied mapping.
     ///
     /// This should be called any time a transform invokes `reindex_pcs` directly so that

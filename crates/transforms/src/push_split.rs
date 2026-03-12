@@ -80,6 +80,14 @@ impl Transform for PushSplit {
                 continue;
             }
 
+            if !matches!(body.control, BlockControl::Terminal) {
+                debug!(
+                    "PushSplit: skipping non-terminal block at PC 0x{:x}",
+                    body.start_pc
+                );
+                continue;
+            }
+
             if has_raw_jump_target(body) {
                 debug!(
                     "PushSplit: skipping block with raw jump target at PC 0x{:x}",
@@ -262,32 +270,12 @@ enum CombineOp {
 /// Generate a randomized chain of (push, combine-op) pairs whose reduction yields `value`.
 fn generate_chain(value: u128, width_bytes: u8, rng: &mut StdRng) -> Vec<(u128, CombineOp)> {
     let bits = (width_bytes as u32) * 8;
-    let full_width = bits == 128;
-    let modulus = (!full_width).then(|| 1u128 << bits);
-    let mask = modulus.map(|m| m - 1).unwrap_or(u128::MAX);
-    let sample = |rng: &mut StdRng| -> u128 {
-        if let Some(m) = modulus {
-            rng.random_range(0..m)
-        } else {
-            rng.random::<u128>()
-        }
+    let max_value = if bits == 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
     };
-
-    let add_mod = |acc: u128, part: u128| -> u128 {
-        if let Some(m) = modulus {
-            (acc + part) % m
-        } else {
-            acc.wrapping_add(part)
-        }
-    };
-
-    let sub_mod = |acc: u128, part: u128| -> u128 {
-        if let Some(m) = modulus {
-            (acc + m - part) % m
-        } else {
-            acc.wrapping_sub(part)
-        }
-    };
+    let sample = |rng: &mut StdRng| -> u128 { rng.random_range(0..=max_value) };
     let parts = rng.random_range(2..=4);
 
     let prefer_xor = rng.random_bool(0.4);
@@ -296,66 +284,44 @@ fn generate_chain(value: u128, width_bytes: u8, rng: &mut StdRng) -> Vec<(u128, 
         let mut acc = 0u128;
         for i in 0..parts {
             if i + 1 == parts {
-                pushes.push(((acc ^ value) & mask, CombineOp::Xor));
+                pushes.push((acc ^ value, CombineOp::Xor));
             } else {
                 let part = sample(rng);
                 acc ^= part;
-                pushes.push((part & mask, CombineOp::Xor));
+                pushes.push((part, CombineOp::Xor));
             }
         }
         return pushes;
     }
 
-    // Mixed add/sub chain: (((p1 (+|-) p2) (+|-) p3) ... ) == value mod modulus
+    // Build add/sub chains without modular wraparound.
+    // This preserves exact 256-bit EVM semantics for these <=16-byte literals.
     let mut pushes = Vec::with_capacity(parts);
     let mut acc = 0u128;
-    let mut ops: Vec<CombineOp> = Vec::with_capacity(parts.saturating_sub(1));
 
-    for _ in 0..parts.saturating_sub(2) {
-        ops.push(if rng.random_bool(0.7) {
-            CombineOp::Add
+    for i in 0..parts {
+        if i + 1 == parts {
+            if acc <= value {
+                pushes.push((value - acc, CombineOp::Add));
+            } else {
+                pushes.push((acc - value, CombineOp::Sub));
+            }
+            break;
+        }
+
+        let can_sub = acc > 0;
+        let use_sub = can_sub && rng.random_bool(0.3);
+        if use_sub {
+            let part = rng.random_range(0..=acc);
+            pushes.push((part, CombineOp::Sub));
+            acc -= part;
         } else {
-            CombineOp::Sub
-        });
-    }
-    ops.push(if rng.random_bool(0.5) {
-        CombineOp::Add
-    } else {
-        CombineOp::Sub
-    });
-
-    for (i, op) in ops.iter().enumerate() {
-        let part = sample(rng) & mask;
-        pushes.push((part, *op));
-        acc = match op {
-            CombineOp::Add => add_mod(acc, part),
-            CombineOp::Sub => sub_mod(acc, part),
-            CombineOp::Xor => unreachable!(),
-        };
-
-        if i + 1 == ops.len() {
-            let final_op = *op;
-            let final_part = match final_op {
-                CombineOp::Add => {
-                    if let Some(m) = modulus {
-                        (value + m - acc) % m
-                    } else {
-                        value.wrapping_sub(acc)
-                    }
-                }
-                CombineOp::Sub => {
-                    if let Some(m) = modulus {
-                        (acc + m - value) % m
-                    } else {
-                        acc.wrapping_sub(value)
-                    }
-                }
-                CombineOp::Xor => unreachable!(),
-            };
-            pushes.push((final_part & mask, final_op));
+            let max_add = max_value.saturating_sub(acc);
+            let part = rng.random_range(0..=max_add);
+            pushes.push((part, CombineOp::Add));
+            acc += part;
         }
     }
-
     pushes
 }
 
@@ -424,6 +390,7 @@ mod tests {
     use super::*;
     use azoth_core::process_bytecode_to_cfg;
     use azoth_core::seed::Seed;
+    use rand::SeedableRng;
 
     const STORAGE_BYTECODE: &str = include_str!("../../../tests/bytecode/storage.hex");
     const FIXED_SEED: &str = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -479,5 +446,32 @@ mod tests {
             .count();
         assert!(combine_count >= 1, "expected at least one combine op");
         assert!(push_count >= 2, "expected multiple pushes in split chain");
+    }
+
+    #[test]
+    fn generated_chains_preserve_literal_value() {
+        let mut rng = StdRng::seed_from_u64(7);
+        for width in 4u8..=16 {
+            let bits = (width as u32) * 8;
+            let max_value = if bits == 128 {
+                u128::MAX
+            } else {
+                (1u128 << bits) - 1
+            };
+
+            for _ in 0..256 {
+                let value = rng.random_range(0..=max_value);
+                let chain = generate_chain(value, width, &mut rng);
+                let mut acc = 0u128;
+                for (part, op) in &chain {
+                    acc = match op {
+                        CombineOp::Add => acc + part,
+                        CombineOp::Sub => acc - part,
+                        CombineOp::Xor => acc ^ part,
+                    };
+                }
+                assert_eq!(acc, value, "width={width} value=0x{value:x}");
+            }
+        }
     }
 }

@@ -135,10 +135,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
 
     // obfuscate contract
     println!("\n=== Proceeding with Obfuscated Deployment ===");
-    let mut config = ObfuscationConfig::default();
-    // TEMPORARY: PushSplit can rewrite jump-related immediates in this escrow runtime,
-    // causing invalid jump targets and REVM InvalidJump halts in this e2e test.
-    config.transforms.retain(|t| t.name() != "PushSplit");
+    let config = ObfuscationConfig::default();
 
     let obfuscation_result = obfuscate_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
@@ -376,11 +373,19 @@ async fn test_obfuscated_function_calls() -> Result<()> {
                 i, push_pc, target, jump_type
             );
         }
-        println!("\n=== All Available JUMPDESTs (first 20) ===");
-        let mut jd_list: Vec<_> = jumpdests.iter().collect();
+        println!("\n=== Nearest JUMPDESTs for each invalid target ===");
+        let mut jd_list: Vec<_> = jumpdests.iter().copied().collect::<Vec<_>>();
         jd_list.sort();
-        for (i, jd) in jd_list.iter().take(20).enumerate() {
-            println!("  [{}] JUMPDEST at PC 0x{:x}", i, jd);
+        for (push_pc, target, _) in invalid_jumps.iter().take(10) {
+            let nearest: Vec<_> = jd_list
+                .iter()
+                .filter(|&&jd| (jd as isize - *target as isize).unsigned_abs() < 20)
+                .map(|jd| format!("0x{:x}", jd))
+                .collect();
+            println!(
+                "  target 0x{:x} (from PUSH at 0x{:x}): nearby JUMPDESTs = {:?}",
+                target, push_pc, nearest
+            );
         }
 
         return Err(eyre!(
@@ -461,9 +466,13 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         ..Default::default()
     };
 
-    let fund_result = evm
-        .transact(fund_tx)
-        .map_err(|e| eyre!("Fund transaction failed: {:?}", e))?;
+    let trace_fund = std::env::var("TRACE_FUND").is_ok();
+    let fund_result = if trace_fund {
+        evm.inspect(fund_tx, StepTracer::new(true))
+    } else {
+        evm.transact(fund_tx)
+    }
+    .map_err(|e| eyre!("Fund transaction failed: {:?}", e))?;
 
     // Commit fund state changes to database
     evm.db_mut().commit(fund_result.state.clone());

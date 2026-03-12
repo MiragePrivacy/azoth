@@ -398,6 +398,115 @@ impl CleanReport {
         Ok(())
     }
 
+    /// Patch immutable reference offsets in the init code.
+    ///
+    /// The Solidity compiler's init code writes immutable variable values into the
+    /// runtime bytecode at hardcoded byte offsets. When obfuscation transforms change
+    /// the runtime layout (e.g., PushSplit growing blocks), these offsets become stale.
+    /// This method detects the pattern `PUSH2 <offset>; ... ADD` in the init code and
+    /// updates each offset using the supplied byte-offset remapping closure.
+    ///
+    /// The `remap` closure takes an old byte offset within the runtime and returns the
+    /// new byte offset, or `None` if no mapping is available.
+    pub fn patch_init_immutable_refs(
+        &mut self,
+        remap: &dyn Fn(usize) -> Option<usize>,
+    ) -> Result<(), String> {
+        let runtime_start = self
+            .runtime_layout
+            .iter()
+            .map(|span| span.offset)
+            .min()
+            .ok_or("No runtime layout found")?;
+        let runtime_end = runtime_start + self.clean_len;
+
+        let init_section = self
+            .removed
+            .iter_mut()
+            .find(|r| matches!(r.kind, SectionKind::Init))
+            .ok_or("No Init section found")?;
+
+        let mut init_bytes = init_section.data.to_vec();
+        let mut patched = 0usize;
+        let mut idx = 0usize;
+
+        while idx < init_bytes.len() {
+            let opcode = init_bytes[idx];
+            if !(0x60..=0x7f).contains(&opcode) {
+                idx += 1;
+                continue;
+            }
+
+            let width = (opcode - 0x60 + 1) as usize;
+            if idx + 1 + width > init_bytes.len() {
+                idx += 1;
+                continue;
+            }
+
+            let mut value = 0usize;
+            for &byte in &init_bytes[idx + 1..idx + 1 + width] {
+                value = (value << 8) | byte as usize;
+            }
+
+            // Check if the next non-stack-manipulation opcode is ADD (0x01).
+            // The pattern is: PUSH2 <offset>; (DUP/SWAP ops); ADD
+            let after = idx + 1 + width;
+            let is_add_target = if after < init_bytes.len() {
+                init_bytes[after] == 0x01 // ADD immediately follows
+            } else {
+                false
+            };
+
+            // Only remap values that look like runtime offsets followed by ADD
+            if is_add_target
+                && value >= 1
+                && value < runtime_end.saturating_sub(runtime_start)
+                && let Some(new_value) = remap(value)
+                && new_value != value
+            {
+                // Check that new value fits in the same width
+                let max = if width >= std::mem::size_of::<usize>() {
+                    usize::MAX
+                } else {
+                    (1usize << (width * 8)) - 1
+                };
+                if new_value > max {
+                    tracing::warn!(
+                        "Immutable ref at init offset 0x{:x}: new value 0x{:x} exceeds \
+                         PUSH{} capacity",
+                        idx,
+                        new_value,
+                        width
+                    );
+                } else {
+                    for j in 0..width {
+                        let shift = (width - 1 - j) * 8;
+                        init_bytes[idx + 1 + j] = ((new_value >> shift) & 0xff) as u8;
+                    }
+                    tracing::debug!(
+                        "Patched immutable ref at init offset 0x{:x}: 0x{:x} -> 0x{:x}",
+                        idx,
+                        value,
+                        new_value
+                    );
+                    patched += 1;
+                }
+            }
+
+            idx += 1 + width;
+        }
+
+        if patched > 0 {
+            tracing::debug!(
+                "Patched {} immutable reference offsets in init code",
+                patched
+            );
+            init_section.data = Bytes::from(init_bytes);
+        }
+
+        Ok(())
+    }
+
     /// Reassemble bytecode by placing the clean runtime at original offsets
     /// and filling removed sections with their original data.
     pub fn reassemble(&mut self, clean: &[u8]) -> Vec<u8> {
