@@ -572,6 +572,15 @@ pub async fn obfuscate_bytecode(
         tracing::debug!("  Controller patches re-applied successfully");
     }
 
+    // After all Step 5 dispatcher reapplies may have grown some PUSH widths
+    // post-reindex, recompute the actual runtime length and shift AC-emitted
+    // CODECOPY offsets so the data section still lines up. This is a no-op
+    // when ArithmeticChain didn't run or when the estimate already matches
+    // the real runtime length.
+    cfg_ir
+        .patch_arithmetic_chain_codecopy_offsets()
+        .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
+
     // Step 6: Extract and encode instructions
     let all_instructions = extract_instructions_from_cfg(&cfg_ir);
     tracing::debug!(

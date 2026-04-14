@@ -357,6 +357,12 @@ impl Transform for ArithmeticChain {
             "Runtime length estimate: base={}, growth={}, total={}",
             base_runtime_length, growth, runtime_length
         );
+        // Record the estimate so obfuscator.rs's post-reindex patch pass can
+        // correct CODECOPY offsets if dispatcher reapply passes grow the
+        // runtime after Step 5 — without this, the data section lands past
+        // `runtime_length` in the final encoding and every `CODECOPY` reads
+        // runtime-code bytes instead of scattered chain values.
+        ir.ac_runtime_length_estimate = Some(runtime_length);
 
         for (node_idx, instr_idx, _push_size, chain) in chains.into_iter().rev() {
             self.replace_instruction(

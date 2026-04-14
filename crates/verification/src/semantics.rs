@@ -1215,6 +1215,7 @@ pub mod tests {
             dispatcher_info: None,
             dispatcher_blocks: std::collections::HashSet::new(),
             arithmetic_chain_data: None,
+            ac_runtime_length_estimate: None,
         };
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
 
@@ -1269,6 +1270,7 @@ pub mod tests {
             dispatcher_info: None,
             dispatcher_blocks: std::collections::HashSet::new(),
             arithmetic_chain_data: None,
+            ac_runtime_length_estimate: None,
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
@@ -1297,6 +1299,7 @@ pub mod tests {
             dispatcher_info: None,
             dispatcher_blocks: std::collections::HashSet::new(),
             arithmetic_chain_data: None,
+            ac_runtime_length_estimate: None,
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
