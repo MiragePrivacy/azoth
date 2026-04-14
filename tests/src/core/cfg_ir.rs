@@ -234,7 +234,7 @@ fn push_reaches_jump_direct_jump_target() {
 #[test]
 fn push_reaches_jump_direct_jumpi_target() {
     let instrs = vec![
-        prj_instr(0, Opcode::PUSH(1), Some("01")), // cond
+        prj_instr(0, Opcode::PUSH(1), Some("01")),   // cond
         prj_instr(2, Opcode::PUSH(2), Some("0100")), // target
         prj_instr(5, Opcode::JUMPI, None),
     ];
