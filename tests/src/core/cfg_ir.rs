@@ -1,5 +1,9 @@
-use azoth_core::cfg_ir::{build_cfg_ir, Block, CfgIrBundle, CfgIrDiff, OperationKind};
+use azoth_core::cfg_ir::{
+    build_cfg_ir, push_reaches_jump, Block, CfgIrBundle, CfgIrDiff, OperationKind,
+};
+use azoth_core::decoder::Instruction;
 use azoth_core::detection::{self, SectionKind};
+use azoth_core::Opcode;
 use azoth_core::{decoder, strip};
 use petgraph::visit::EdgeRef;
 use std::collections::HashSet;
@@ -186,4 +190,192 @@ async fn test_storage_cfg_trace_progression() {
             "non-identity PC remap should trigger symbolic immediate writes"
         );
     }
+}
+
+// -----------------------------------------------------------------------
+// push_reaches_jump unit tests
+//
+// `push_reaches_jump` gates `remap_orphan_jump_pushes`'s extended scan so
+// only PUSH literals whose value is *plausibly* a branch target get
+// remapped after a PC-shifting transform. The critical invariants these
+// tests pin down are:
+//
+//   * direct JUMP/JUMPI targets -> true
+//   * values consumed by non-jump ops (arithmetic, MSTORE/SSTORE,
+//     SLOAD as the slot operand, …) -> false
+//   * JUMPI condition (pos == 1 at the JUMPI) -> false, even though
+//     the value happens to be a boolean
+//   * stack-carried values (Solidity internal-function-call pattern
+//     where the return address sits beneath the JUMP's target) ->
+//     true, which is the reason the entire extended scan exists
+//
+// Together these ensure the post-reindex remap cannot silently corrupt
+// a PUSH2 whose 16-bit literal numerically coincides with a JUMPDEST
+// PC but semantically is not a branch target.
+// -----------------------------------------------------------------------
+
+fn prj_instr(pc: usize, op: Opcode, imm: Option<&str>) -> Instruction {
+    Instruction {
+        pc,
+        op,
+        imm: imm.map(|s| s.to_string()),
+    }
+}
+
+#[test]
+fn push_reaches_jump_direct_jump_target() {
+    let instrs = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("0100")),
+        prj_instr(3, Opcode::JUMP, None),
+    ];
+    assert!(push_reaches_jump(&instrs, 0));
+}
+
+#[test]
+fn push_reaches_jump_direct_jumpi_target() {
+    let instrs = vec![
+        prj_instr(0, Opcode::PUSH(1), Some("01")), // cond
+        prj_instr(2, Opcode::PUSH(2), Some("0100")), // target
+        prj_instr(5, Opcode::JUMPI, None),
+    ];
+    assert!(push_reaches_jump(&instrs, 1));
+}
+
+#[test]
+fn push_reaches_jump_jumpi_condition_is_rejected() {
+    // `PUSH 0x0100; PUSH <target>; JUMPI` -> at JUMPI the first PUSH
+    // (0x0100) is at pos 1, which is the JUMPI condition, not the
+    // branch target.
+    let instrs = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("0100")), // value matches a JUMPDEST PC
+        prj_instr(3, Opcode::PUSH(2), Some("0200")), // target
+        prj_instr(6, Opcode::JUMPI, None),
+    ];
+    assert!(!push_reaches_jump(&instrs, 0));
+}
+
+#[test]
+fn push_reaches_jump_consumed_by_add_is_rejected() {
+    // `PUSH 0x0100; PUSH 0x05; ADD` -> ADD pops top two, producing
+    // `0x0105`. Our tracked PUSH at idx 0 is one of the two consumed
+    // positions -> false.
+    let instrs = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("0100")),
+        prj_instr(3, Opcode::PUSH(1), Some("05")),
+        prj_instr(5, Opcode::ADD, None),
+    ];
+    assert!(!push_reaches_jump(&instrs, 0));
+}
+
+#[test]
+fn push_reaches_jump_consumed_by_sstore_as_slot_is_rejected() {
+    // `PUSH <value>; PUSH <slot>; SSTORE` -> SSTORE pops top 2. The
+    // first PUSH ends up at pos 1 when SSTORE runs and is consumed as
+    // the value operand -> false.
+    let instrs = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("00ff")),
+        prj_instr(3, Opcode::PUSH(1), Some("07")),
+        prj_instr(5, Opcode::SSTORE, None),
+    ];
+    assert!(!push_reaches_jump(&instrs, 0));
+}
+
+#[test]
+fn push_reaches_jump_consumed_by_sload_as_slot_is_rejected() {
+    // `PUSH 0x0100; SLOAD` -> SLOAD pops top (our value, used as the
+    // slot). The matching PC might numerically equal a JUMPDEST but
+    // semantically it's a storage slot literal, not a branch target.
+    let instrs = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("0100")),
+        prj_instr(3, Opcode::SLOAD, None),
+    ];
+    assert!(!push_reaches_jump(&instrs, 0));
+}
+
+#[test]
+fn push_reaches_jump_stack_carried_past_internal_call() {
+    // Solidity internal-function-call convention:
+    //
+    //     PUSH ret_addr    ; return address (our tracked PUSH)
+    //     DUP2             ; copy deeper stack arg
+    //     DUP4             ; copy another deeper stack arg
+    //     PUSH func_entry  ; function to call
+    //     JUMP             ; transfer control — `func_entry` is the
+    //                        JUMP target, `ret_addr` is stack-carried
+    //                        and will be consumed by a JUMP inside
+    //                        the callee after it finishes.
+    //
+    // The tracked PUSH must reach this JUMP with pos != 0 and the
+    // function must still return `true` — otherwise the extended scan
+    // would fail to remap return addresses after a PC-shifting
+    // transform grew the callee, recreating the `collect() HALT
+    // InvalidJump` regression from the push_split fix.
+    let instrs = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("0326")), // ret_addr
+        prj_instr(3, Opcode::DUP(2), None),
+        prj_instr(4, Opcode::DUP(4), None),
+        prj_instr(5, Opcode::PUSH(2), Some("0a72")), // func entry
+        prj_instr(8, Opcode::JUMP, None),
+    ];
+    assert!(push_reaches_jump(&instrs, 0));
+}
+
+#[test]
+fn push_reaches_jump_stack_carried_to_block_end() {
+    // No JUMP in this slice. The tracked PUSH survives to the end
+    // and is assumed to flow into the next block via the stack.
+    let instrs = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("0100")),
+        prj_instr(3, Opcode::DUP(2), None),
+        prj_instr(4, Opcode::SWAP(1), None),
+    ];
+    assert!(push_reaches_jump(&instrs, 0));
+}
+
+#[test]
+fn push_reaches_jump_consumed_after_sstore_sequence() {
+    // Mirrors the Solidity pattern where storage slot initializers run
+    // between a return-address PUSH and the callee's JUMP. The
+    // tracked PUSH at idx 0 should survive both SSTOREs and reach
+    // the final JUMP.
+    let instrs = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("05c2")),
+        prj_instr(3, Opcode::DUP(3), None),
+        prj_instr(4, Opcode::PUSH(1), Some("ff")),
+        prj_instr(6, Opcode::SWAP(4), None),
+        prj_instr(7, Opcode::PUSH0, None),
+        prj_instr(8, Opcode::SSTORE, None),
+        prj_instr(9, Opcode::PUSH(1), Some("02")),
+        prj_instr(11, Opcode::SSTORE, None),
+        prj_instr(12, Opcode::JUMP, None),
+    ];
+    assert!(push_reaches_jump(&instrs, 0));
+}
+
+#[test]
+fn push_reaches_jump_terminal_without_jump_is_rejected() {
+    // `PUSH 0x0100; STOP` — the block terminates in STOP without the
+    // tracked value ever being consumed by a JUMP. Even though the
+    // value numerically matches a JUMPDEST PC, it's not a branch
+    // target because execution never branches on it.
+    let instrs = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("0100")),
+        prj_instr(3, Opcode::STOP, None),
+    ];
+    assert!(!push_reaches_jump(&instrs, 0));
+}
+
+#[test]
+fn push_reaches_jump_dup_of_tracked_slot_is_conservative() {
+    // DUP1 with our value at pos 0 duplicates us: one copy sits at
+    // pos 0 (new top) and the original shifts to pos 1. Either copy
+    // could reach a downstream JUMP; returning `true` is the
+    // conservative (no false negative) behavior.
+    let instrs = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("0100")),
+        prj_instr(3, Opcode::DUP(1), None),
+        prj_instr(4, Opcode::POP, None), // consume one copy
+        prj_instr(5, Opcode::JUMP, None),
+    ];
+    assert!(push_reaches_jump(&instrs, 0));
 }
