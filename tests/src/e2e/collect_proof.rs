@@ -25,24 +25,101 @@ use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use hex_literal::hex;
 use revm::bytecode::Bytecode;
+use revm::context::journal::Journal;
 use revm::context::result::{ExecutionResult, Output};
-use revm::context::{BlockEnv, ContextTr, TxEnv};
+use revm::context::{BlockEnv, CfgEnv, ContextTr, TxEnv};
 use revm::database::InMemoryDB;
+use revm::inspector::Inspector;
+use revm::interpreter::interpreter_types::Jumps;
 use revm::primitives::{Address, Bytes, TxKind, B256, U256};
 use revm::state::AccountInfo;
-use revm::{Context, DatabaseCommit, ExecuteEvm, MainBuilder, MainContext};
+use revm::{Context, DatabaseCommit, ExecuteEvm, InspectEvm, MainBuilder, MainContext};
+
+/// Number of most-recent `(pc, opcode)` pairs kept by [`RingTracer`].
+///
+/// Sized to comfortably span a full `collect()` invocation's trailing
+/// execution window — empirically ~300 opcodes between the chain reduction
+/// at the Transfer-topic comparison and any late-path revert — so that when
+/// a `Halt(InvalidJump)` or late `Revert` fires, the buffer contains every
+/// step from the last function boundary up to and including the failing
+/// instruction. Larger capacities don't meaningfully help (the bug is
+/// almost always in the last dozen steps) and smaller ones have missed
+/// the chain emission region in practice.
+const RING_CAPACITY: usize = 400;
+
+thread_local! {
+    /// Backing store for [`RingTracer`]. Using a `thread_local!` rather
+    /// than owning the buffer on the tracer itself lets the `inspect(...)`
+    /// call consume a fresh zero-sized `RingTracer` by value while still
+    /// leaving the captured trace readable by [`dump_ring_buffer`] after
+    /// the EVM returns.
+    static RING_BUFFER: std::cell::RefCell<std::collections::VecDeque<(usize, u8)>> =
+        std::cell::RefCell::new(std::collections::VecDeque::with_capacity(RING_CAPACITY));
+}
+
+/// REVM step inspector that records the last [`RING_CAPACITY`]
+/// `(pc, opcode)` pairs executed before control leaves the interpreter.
+///
+/// Gated by the `TRACE_COLLECT` environment variable (see
+/// [`execute_collect_proof_flow`]), this is a diagnostic aid for
+/// regression probes in this file: when one of the `collect()` transform
+/// tests halts with `InvalidJump` or reverts through an unfamiliar custom
+/// error selector, setting `TRACE_COLLECT=1` and re-running the failing
+/// test prints the most recent steps to stderr so the exact failure PC
+/// and the opcodes leading up to it can be cross-referenced against a
+/// disassembly of the deployed bytecode. In particular this is what
+/// pinpointed PushSplit's cross-block return-address PUSH (a JUMP at
+/// runtime PC `0x07be` consuming a stale PUSH2 from `0x07a6`) and the
+/// ArithmeticChain CODECOPY chain emission block (`0x1b68..0x1bfe`).
+///
+/// The inspector itself is a zero-sized type — all captured state lives
+/// in the thread-local [`RING_BUFFER`] — so constructing one is free and
+/// passing it to `evm.inspect(...)` does not interfere with non-tracing
+/// runs that go through `evm.transact(...)`.
+struct RingTracer;
+
+impl Inspector<Context<BlockEnv, TxEnv, CfgEnv, InMemoryDB, Journal<InMemoryDB>, ()>>
+    for RingTracer
+{
+    fn step(
+        &mut self,
+        interp: &mut revm::interpreter::Interpreter,
+        _context: &mut Context<BlockEnv, TxEnv, CfgEnv, InMemoryDB, Journal<InMemoryDB>, ()>,
+    ) {
+        let pc = interp.bytecode.pc();
+        let opcode = interp.bytecode.opcode();
+        RING_BUFFER.with(|buf| {
+            let mut buf = buf.borrow_mut();
+            if buf.len() == RING_CAPACITY {
+                buf.pop_front();
+            }
+            buf.push_back((pc, opcode));
+        });
+    }
+}
+
+/// Print the current contents of [`RING_BUFFER`] to stderr under the
+/// given test label. Called after an inspected `collect()` transaction
+/// so the trailing execution window is visible regardless of whether
+/// the tx succeeded, reverted, or halted.
+fn dump_ring_buffer(label: &str) {
+    RING_BUFFER.with(|buf| {
+        let buf = buf.borrow();
+        eprintln!("[{label}] RingTracer last {} steps:", buf.len());
+        for (pc, opcode) in buf.iter() {
+            eprintln!("  pc=0x{pc:04x} opcode=0x{opcode:02x}");
+        }
+    });
+}
 
 const TARGET_BLOCK_NUMBER: u64 = 9_084_468;
 const TARGET_BLOCK_HASH: B256 = B256::new(hex!(
     "490a3fc0b0c2170b55ca18ce6c73fc1af50ebe0931b525a3510c048f2b428617"
 ));
 
-const PROOF_TOKEN: Address =
-    Address::new(hex!("Be41a9EC942d5b52bE07cC7F4D7E30E10e9B652A"));
-const PROOF_RECIPIENT: Address =
-    Address::new(hex!("658D9C76ff358984D6436eA11ee1eda08894C818"));
-const PROOF_EXECUTOR: Address =
-    Address::new(hex!("E1A9d9C9abB872dDEF70A4d108Fd8fc3c7cE4dC4"));
+const PROOF_TOKEN: Address = Address::new(hex!("Be41a9EC942d5b52bE07cC7F4D7E30E10e9B652A"));
+const PROOF_RECIPIENT: Address = Address::new(hex!("658D9C76ff358984D6436eA11ee1eda08894C818"));
+const PROOF_EXECUTOR: Address = Address::new(hex!("E1A9d9C9abB872dDEF70A4d108Fd8fc3c7cE4dC4"));
 
 const TRANSFER_AMOUNT: u64 = 0x017d_7840;
 
@@ -106,16 +183,32 @@ fn build_collect_calldata(
 #[allow(dead_code)]
 #[derive(Debug)]
 enum FlowOutcome {
-    Success { gas_used: u64 },
-    BondRevert { selector: Option<u32>, gas_used: u64 },
-    BondHalt { reason: String, gas_used: u64 },
-    CollectRevert { selector: Option<u32>, gas_used: u64 },
-    CollectHalt { reason: String, gas_used: u64 },
+    Success {
+        gas_used: u64,
+    },
+    BondRevert {
+        selector: Option<u32>,
+        gas_used: u64,
+    },
+    BondHalt {
+        reason: String,
+        gas_used: u64,
+    },
+    CollectRevert {
+        selector: Option<u32>,
+        gas_used: u64,
+    },
+    CollectHalt {
+        reason: String,
+        gas_used: u64,
+    },
 }
 
 fn revert_selector(output: &[u8]) -> Option<u32> {
     if output.len() >= 4 {
-        Some(u32::from_be_bytes([output[0], output[1], output[2], output[3]]))
+        Some(u32::from_be_bytes([
+            output[0], output[1], output[2], output[3],
+        ]))
     } else {
         None
     }
@@ -169,7 +262,7 @@ fn execute_collect_proof_flow(
     let mut evm = Context::mainnet()
         .with_db(db)
         .with_block(block_env)
-        .build_mainnet();
+        .build_mainnet_with_inspector(RingTracer);
 
     println!("\n=== [{}] Deploying escrow ===", label);
     println!("  deployment_bytecode: {} bytes", deployment_bytecode.len());
@@ -195,6 +288,21 @@ fn execute_collect_proof_flow(
             ..
         } => {
             println!("✓ [{}] deployed at {} (gas: {})", label, addr, gas_used);
+            if let Ok(dir) = std::env::var("DUMP_OBFUSCATED") {
+                if let Some(account) = evm.db().cache.accounts.get(&addr) {
+                    if let Some(code) = &account.info.code {
+                        let bytes = match code {
+                            revm::bytecode::Bytecode::LegacyAnalyzed(analyzed) => {
+                                analyzed.bytecode().clone()
+                            }
+                            other => Bytes::copy_from_slice(other.original_byte_slice()),
+                        };
+                        let path = format!("{dir}/{label}.runtime.hex");
+                        let _ = std::fs::write(&path, hex::encode(&bytes));
+                        println!("✓ [{}] dumped runtime code to {}", label, path);
+                    }
+                }
+            }
             addr
         }
         ExecutionResult::Success { .. } => {
@@ -245,7 +353,10 @@ fn execute_collect_proof_flow(
         }
     }
 
-    println!("\n=== [{}] Calling collect() with real ReceiptProof ===", label);
+    println!(
+        "\n=== [{}] Calling collect() with real ReceiptProof ===",
+        label
+    );
     let block_header = hex::decode(BLOCK_HEADER_HEX)
         .map_err(|e| eyre!("Failed to decode block_header hex: {}", e))?;
     let receipt_rlp = hex::decode(RECEIPT_RLP_HEX)
@@ -279,9 +390,16 @@ fn execute_collect_proof_flow(
         nonce: 1,
         ..Default::default()
     };
-    let collect_result = evm
-        .transact(collect_tx)
-        .map_err(|e| eyre!("Collect tx failed: {:?}", e))?;
+    let trace_collect = std::env::var("TRACE_COLLECT").is_ok();
+    let collect_result = if trace_collect {
+        RING_BUFFER.with(|buf| buf.borrow_mut().clear());
+        let result = evm.inspect(collect_tx, RingTracer);
+        dump_ring_buffer(label);
+        result
+    } else {
+        evm.transact(collect_tx)
+    }
+    .map_err(|e| eyre!("Collect tx failed: {:?}", e))?;
 
     match collect_result.result {
         ExecutionResult::Success { gas_used, .. } => {
@@ -304,10 +422,8 @@ async fn build_obfuscated_flow_inputs(
     transforms: Vec<Box<dyn Transform>>,
 ) -> Result<(Bytes, Bytes, [u8; 4])> {
     println!("\n=== Obfuscating escrow bytecode for {} ===", label);
-    let seed = Seed::from_hex(
-        "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    )
-    .expect("valid fixed seed");
+    let seed = Seed::from_hex("0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        .expect("valid fixed seed");
     let config = ObfuscationConfig {
         seed,
         transforms,
@@ -334,6 +450,16 @@ async fn build_obfuscated_flow_inputs(
         selector_mapping.len()
     );
 
+    // Optional: dump obfuscated bytecode hex for offline disassembly/debug.
+    if let Ok(dir) = std::env::var("DUMP_OBFUSCATED") {
+        let path = format!("{dir}/{label}.hex");
+        let body = obfuscation_result
+            .obfuscated_bytecode
+            .trim_start_matches("0x");
+        let _ = std::fs::write(&path, body);
+        println!("✓ [{}] dumped obfuscated bytecode to {}", label, path);
+    }
+
     let deployment_bytecode = prepare_bytecode_with_args(
         &obfuscation_result.obfuscated_bytecode,
         PROOF_TOKEN,
@@ -343,11 +469,17 @@ async fn build_obfuscated_flow_inputs(
         U256::from(PAYMENT_AMOUNT),
     )?;
     let bond_calldata = caller.bond_call_data(U256::from(BOND_AMOUNT));
-    let collect_selector: [u8; 4] = caller
-        .collect_call_data()
-        .as_ref()
-        .try_into()
-        .map_err(|_| eyre!("collect_call_data() did not return exactly 4 bytes for {}", label))?;
+    let collect_selector: [u8; 4] =
+        caller
+            .collect_call_data()
+            .as_ref()
+            .try_into()
+            .map_err(|_| {
+                eyre!(
+                    "collect_call_data() did not return exactly 4 bytes for {}",
+                    label
+                )
+            })?;
 
     Ok((deployment_bytecode, bond_calldata, collect_selector))
 }
@@ -355,7 +487,10 @@ async fn build_obfuscated_flow_inputs(
 fn assert_collect_flow_success(label: &str, outcome: FlowOutcome) -> Result<()> {
     match outcome {
         FlowOutcome::Success { gas_used } => {
-            println!("✓ [{}] collect() succeeded end-to-end (gas: {})", label, gas_used);
+            println!(
+                "✓ [{}] collect() succeeded end-to-end (gas: {})",
+                label, gas_used
+            );
             Ok(())
         }
         FlowOutcome::BondRevert { selector, gas_used } => Err(eyre!(
@@ -401,15 +536,25 @@ async fn test_collect_with_erc20_proof_baseline_succeeds() -> Result<()> {
     )?;
     let bond_args = U256::from(BOND_AMOUNT).to_be_bytes::<32>();
     let bond_calldata = build_standard_calldata(ESCROW_BOND, &bond_args);
-    let outcome =
-        execute_collect_proof_flow(deployment_bytecode, bond_calldata, ESCROW_COLLECT.0, "baseline")?;
+    let outcome = execute_collect_proof_flow(
+        deployment_bytecode,
+        bond_calldata,
+        ESCROW_COLLECT.0,
+        "baseline",
+    )?;
 
     match outcome {
         FlowOutcome::Success { gas_used } => {
-            println!("✓ baseline collect() succeeded end-to-end (gas: {})", gas_used);
+            println!(
+                "✓ baseline collect() succeeded end-to-end (gas: {})",
+                gas_used
+            );
             Ok(())
         }
-        other => Err(eyre!("baseline proof flow unexpectedly failed: {:?}", other)),
+        other => Err(eyre!(
+            "baseline proof flow unexpectedly failed: {:?}",
+            other
+        )),
     }
 }
 
@@ -423,6 +568,40 @@ async fn test_collect_with_erc20_proof_dispatcher_only_succeeds() -> Result<()> 
     assert_collect_flow_success(label, outcome)
 }
 
+// todo(g4titanx): create bugs.md and update bug findings, cause and fix, for posterity
+
+/// Regression probe for three distinct bugs in ArithmeticChain that all
+/// manifested as `collect()` reverting with `WrongEventSignature()`
+/// (selector `0x49b4a8ba`) on the ERC20 `Transfer` event topic check:
+///
+/// 1. `scatter.rs::generate_load_instructions` was pushing the CODECOPY
+///    arguments in the wrong stack order. EVM CODECOPY pops `destOffset`
+///    from the top, then `offset`, then `size`, but the generator emitted
+///    them as `PUSH destOffset; PUSH offset; PUSH size; CODECOPY`, leaving
+///    `size` on top. The EVM then interpreted `size` (`0x20`) as
+///    `destOffset` and `destOffset` (`0x00`) as `size`, performing a
+///    zero-byte copy. The subsequent `MLOAD` always returned
+///    zero-initialised memory, so the chain's first OR reduction
+///    collapsed to `V0 | 0 = V0` and the final value diverged from the
+///    backward-computed target.
+///
+/// 2. `CfgIrBundle::patch_arithmetic_chain_codecopy_offsets` did not
+///    exist. AC recorded its `runtime_length` estimate at Step 3 transform
+///    time, then Step 5's dispatcher reapply passes
+///    (`reapply_stub_patches`, `reapply_decoy_patches`,
+///    `reapply_controller_patches`) widened some PUSHes post-`reindex_pcs`
+///    and grew the runtime past the estimate. AC's CODECOPY offsets still
+///    referenced the old estimate, so they pointed into live runtime code
+///    instead of the appended data section — the chain loaded random
+///    bytecode bytes as `V1`.
+///
+/// 3. The post-reindex patch needed the right pattern after fix (1).
+///    With the corrected `PUSH size; PUSH offset; PUSH destOffset;
+///    CODECOPY` ordering, the offset PUSH moved one slot forward in the
+///    instruction window; the scanner was updated to match the new
+///    shape and capped with `old_value >= estimate` to avoid touching
+///    coincidental `PUSH1 0x20; PUSH<n>; PUSH1 0x00; CODECOPY` sequences
+///    the Solidity compiler emits for unrelated code copies.
 #[tokio::test]
 async fn test_collect_with_erc20_proof_dispatcher_plus_arithmetic_chain_succeeds() -> Result<()> {
     let label = "dispatcher_plus_arithmetic_chain";
@@ -433,6 +612,30 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_arithmetic_chain_succeeds
     assert_collect_flow_success(label, outcome)
 }
 
+/// Regression probe for two PushSplit bugs that both made `collect()`
+/// halt with `InvalidJump` at the 30M gas limit:
+///
+/// 1. `push_split.rs` emitted the split chain as `PUSH p1; op; PUSH p2;
+///    op; ...`, where the first `op` consumed whatever value the
+///    preceding code had left on the stack. The generator expected the
+///    chain to start from the identity element (0 for ADD/XOR), but the
+///    replaced PUSH was a pure stack push — so the produced constant was
+///    `(prev_top) ⊕ p1 ⊕ ... ⊕ pn` instead of `p1 ⊕ ... ⊕ pn`, silently
+///    corrupting the literal (in this fixture, the error-selector
+///    constant fed into the `revert CustomError()` emit sequence). Fix
+///    was to prepend a `PUSH0` before the chain so the first op always
+///    starts from zero.
+///
+/// 2. `cfg_ir::remap_orphan_jump_pushes` only scanned blocks ending with
+///    `JUMP`/`JUMPI`. Solidity's inherited-function-call convention
+///    (EscrowERC20 → EscrowBase) pushes the return address in one block
+///    and consumes it from a `JUMP` in a later block, with a `JUMPDEST`
+///    separating them. After PushSplit grew some blocks, those return
+///    addresses were stale but invisible to the extended scan. The fix
+///    drops the JUMP-ending filter and walks every body block, scoped to
+///    `PUSH2+` to avoid false positives on small literals that coincide
+///    with early `JUMPDEST` PCs. This test caught it as a runtime JUMP
+///    at PC `0x07be` consuming a stale PUSH2 from `0x07a6`.
 #[tokio::test]
 async fn test_collect_with_erc20_proof_dispatcher_plus_push_split_succeeds() -> Result<()> {
     let label = "dispatcher_plus_push_split";
@@ -443,6 +646,32 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_push_split_succeeds() -> 
     assert_collect_flow_success(label, outcome)
 }
 
+/// Regression probe for two SlotShuffle bugs that made `bond()` revert
+/// with `NotFunded()` (selector `0xd5ef09ba`) — i.e. the `funded = true`
+/// SSTORE and the runtime `!funded` SLOAD disagreed on which slot
+/// `funded` lived in:
+///
+/// 1. SlotShuffle's collection and rewrite passes used `parse_slot_candidate`,
+///    which only recognised adjacent `PUSH <slot>; SLOAD/SSTORE`. Solidity's
+///    read-modify-write of a packed bool field emits a `PUSH <slot>; DUP1;
+///    SLOAD; ...; SSTORE` pattern that shares the slot via the DUP — the
+///    PUSH itself was never adjacent to the access, so it never made it
+///    into the shuffle mapping and never got rewritten. The fix replaces
+///    the adjacency check with a trace-based scan that runs backward from
+///    every SLOAD/SSTORE via DUP/SWAP/arithmetic to find the source PUSH,
+///    and records per-block `(push_idx, width, slot_bytes)` so the
+///    rewrite phase patches exactly the PUSHes the collection phase saw.
+///
+/// 2. The CFG only contains runtime-section blocks, but Solidity inlines
+///    the constructor's invocation of `fund()` into the **init section**,
+///    which is never seen by any transform. The init-code
+///    `PUSH1 0x07; SSTORE` that sets `funded = true` would still write to
+///    original slot `7`, while the runtime `PUSH1 0x07; SLOAD` got
+///    remapped to some other slot — the two sections disagreed and
+///    `bond()` read zero. Fix: `slot_shuffle.rs::init_literal_slots`
+///    walks the raw init-section bytes, finds every `PUSH; SLOAD/SSTORE`
+///    pair, and excludes those slot literals from the shuffle mapping so
+///    init-touched slots stay at their original indices.
 #[tokio::test]
 async fn test_collect_with_erc20_proof_dispatcher_plus_slot_shuffle_succeeds() -> Result<()> {
     let label = "dispatcher_plus_slot_shuffle";
