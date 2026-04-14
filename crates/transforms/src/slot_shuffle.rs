@@ -136,30 +136,23 @@ impl Transform for SlotShuffle {
             }
         }
 
-        if !unsupported_sstores.is_empty() {
-            unsupported_sstores.sort_unstable();
-            unsupported_sstores.dedup();
-            let pcs = unsupported_sstores
-                .iter()
-                .map(|pc| format!("0x{pc:04x}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            // Cross-block patterns (e.g., Solidity's counter++) can't be safely traced.
-            // Skip shuffling to avoid breaking contracts where we can't track all slot refs.
-            warn!(
-                "SlotShuffle: skipping due to untraced SSTORE(s) at pc(s): {}",
-                pcs
-            );
-            return Ok(false);
-        }
-
-        // Exclude slot literals that init-section bytecode writes to at their
-        // original index. SlotShuffle only rewrites CFG blocks (runtime), so
-        // any slot init touches would end up with init writing slot N and
-        // runtime reading a remapped slot != N unless we leave it alone.
+        // Exclude slot literals that init-section bytecode writes to at
+        // their original index. SlotShuffle only rewrites CFG blocks
+        // (runtime), so any slot init touches would end up with init
+        // writing slot N and runtime reading a remapped slot != N unless
+        // we leave it alone. `init_literal_slots` decodes the raw init
+        // bytes into proper `Instruction`s and runs the same
+        // `trace_slot_source` backward walk that the runtime collection
+        // phase uses, so DUP/SWAP-shared slot sources in init code are
+        // caught too — not just adjacent `PUSH; SLOAD/SSTORE` pairs.
+        // Any SSTORE whose source it still can't resolve is reported as
+        // `unresolved` and added to `unsupported_sstores` below, which
+        // forces the shuffle to bail out rather than silently proceed on
+        // a partial view of the init section.
         if let Some((rt_start, _)) = ir.runtime_bounds {
             let init_bytes = &ir.original_bytecode[..rt_start.min(ir.original_bytecode.len())];
-            let init_touched = init_literal_slots(init_bytes);
+            let (init_touched, init_unresolved) = init_literal_slots(init_bytes);
+            unsupported_sstores.extend(init_unresolved);
             if !init_touched.is_empty() {
                 debug!(
                     "SlotShuffle: init section touches {} distinct slot literal(s); \
@@ -175,6 +168,29 @@ impl Transform for SlotShuffle {
                     }
                 }
             }
+        }
+
+        if !unsupported_sstores.is_empty() {
+            unsupported_sstores.sort_unstable();
+            unsupported_sstores.dedup();
+            let pcs = unsupported_sstores
+                .iter()
+                .map(|pc| format!("0x{pc:04x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            // Cross-block patterns (e.g., Solidity's counter++) and any
+            // init-code SSTOREs whose slot source we can't trace back to
+            // a literal PUSH force us to skip shuffling — remapping a
+            // slot that the init section also writes to with an opaque
+            // source would silently desynchronise init and runtime views
+            // of the same storage variable (the
+            // `dispatcher_plus_slot_shuffle` regression probe catches
+            // exactly this failure mode).
+            warn!(
+                "SlotShuffle: skipping due to untraced SSTORE(s) at pc(s): {}",
+                pcs
+            );
+            return Ok(false);
         }
 
         if slots_by_width.is_empty() {
@@ -332,58 +348,119 @@ fn is_storage_slot_push(instructions: &[Instruction], idx: usize) -> bool {
     false
 }
 
-/// Walk a raw init-section byte slice and return the set of `(width, value)`
-/// pairs that appear as PUSH literals immediately before an `SLOAD` or
-/// `SSTORE` opcode. SlotShuffle only rewrites blocks that live in the CFG,
-/// and the CFG only contains runtime-section blocks; init-section bytecode
-/// (where Solidity inlines constructor-invoked state writes) is invisible to
-/// it. If we shuffle a slot that init-code writes to at its original index,
-/// later runtime reads will go to the remapped slot and find zero — in the
-/// escrow fixture this shows up as `bond() NotFunded()` because the
-/// constructor's inline `funded = true` SSTORE lands on the wrong slot.
-///
-/// Adjacent-PUSH detection is sufficient for the patterns Solidity emits for
-/// direct `s_field = value` writes (`PUSH <slot>; SLOAD; …; PUSH <slot>;
-/// SSTORE`). DUP/SWAP-shared patterns in init code would slip through this
-/// scanner, so if the init section ever grows one, the corresponding slot
-/// value can still be missed — in that case we'd need to either (a) run the
-/// CFG-building backward trace over init instructions too, or (b) refuse to
-/// shuffle and log a warning. For the current escrow fixture, pattern (a) is
-/// sufficient and the test passes; (b) is the fallback the caller still
-/// enforces via `unsupported_sstores` for any traced SSTORE it can't
-/// resolve.
-fn init_literal_slots(bytes: &[u8]) -> HashSet<(usize, Vec<u8>)> {
-    let mut touched = HashSet::new();
-    let mut last_push: Option<(usize, Vec<u8>)> = None;
-
+/// Decode a raw byte slice of EVM bytecode into an [`Instruction`] stream
+/// without involving the async Heimdall disassembler. This is a minimal
+/// sync walker that only needs to be correct for the purpose
+/// [`init_literal_slots`] uses it for: identifying `PUSH<n>`/`PUSH0` /
+/// `SLOAD` / `SSTORE` / `DUP(n)` / `SWAP(n)` / arithmetic opcodes so that
+/// `trace_slot_source` can reason about stack flow. Unknown opcodes are
+/// mapped via `Opcode::from(byte)`, which the upstream `eot` crate resolves
+/// to the appropriate variant (including `INVALID` / `UNKNOWN(_)` for
+/// unassigned bytes), and PUSH immediates are captured so the immediate's
+/// value is available for slot normalisation.
+fn decode_raw_instructions(bytes: &[u8]) -> Vec<Instruction> {
+    let mut instructions = Vec::with_capacity(bytes.len());
     let mut pc = 0usize;
     while pc < bytes.len() {
-        let op = bytes[pc];
-        if op == 0x5f {
+        let byte = bytes[pc];
+        if byte == 0x5f {
             // PUSH0
-            last_push = Some((0, Vec::new()));
+            instructions.push(Instruction {
+                pc,
+                op: Opcode::PUSH0,
+                imm: None,
+            });
             pc += 1;
-        } else if (0x60..=0x7f).contains(&op) {
+        } else if (0x60..=0x7f).contains(&byte) {
             // PUSH1..=PUSH32
-            let size = (op - 0x5f) as usize;
-            let end = pc + 1 + size;
+            let width = (byte - 0x5f) as usize;
+            let end = pc + 1 + width;
             if end > bytes.len() {
+                // Truncated PUSH immediate — stop decoding rather than
+                // silently dropping the tail, since whatever follows
+                // isn't really code.
                 break;
             }
-            last_push = Some((size, bytes[pc + 1..end].to_vec()));
+            instructions.push(Instruction {
+                pc,
+                op: Opcode::PUSH(width as u8),
+                imm: Some(hex::encode(&bytes[pc + 1..end])),
+            });
             pc = end;
         } else {
-            if matches!(op, 0x54 | 0x55) {
-                if let Some(ref prev) = last_push {
-                    touched.insert(prev.clone());
-                }
-            }
-            last_push = None;
+            instructions.push(Instruction {
+                pc,
+                op: Opcode::from(byte),
+                imm: None,
+            });
             pc += 1;
         }
     }
+    instructions
+}
 
-    touched
+/// Decode the raw init-section byte slice, then run the same
+/// `slot_push_index` (adjacency + `trace_slot_source` backward walk) over
+/// every init SLOAD/SSTORE that the runtime collection phase uses. Returns
+/// the set of `(width, slot_bytes)` pairs the init section accesses as
+/// storage slots — these must be excluded from the shuffle mapping so
+/// init writes and subsequent runtime reads agree on the slot index — and
+/// a list of SSTORE PCs whose slot source could not be resolved.
+///
+/// SlotShuffle only rewrites CFG blocks, and the CFG only contains
+/// runtime-section blocks; init bytecode (where Solidity inlines
+/// constructor-invoked state writes such as `EscrowERC20`'s
+/// constructor → `fund()` path) is otherwise invisible. Treating
+/// unresolved init SSTOREs as hard failures (the caller adds them to
+/// `unsupported_sstores` and bails the whole transform) is strictly
+/// stricter than the previous adjacency-only scan: if we can't tell
+/// what slot init is writing to, we refuse to shuffle rather than risk
+/// silently desynchronising init and runtime storage accesses on a
+/// contract shape we haven't seen before.
+///
+/// SLOADs with non-literal slot sources (e.g. a KECCAK256-derived
+/// mapping key) are safe to ignore — remapping literal slots can never
+/// corrupt them, since their slot is computed at runtime and isn't in
+/// `slots_by_width` to begin with.
+#[doc(hidden)]
+pub fn init_literal_slots(bytes: &[u8]) -> (HashSet<(usize, Vec<u8>)>, Vec<usize>) {
+    let mut touched: HashSet<(usize, Vec<u8>)> = HashSet::new();
+    let mut unresolved: Vec<usize> = Vec::new();
+
+    let instructions = decode_raw_instructions(bytes);
+    for (idx, instr) in instructions.iter().enumerate() {
+        if !matches!(instr.op, Opcode::SLOAD | Opcode::SSTORE) {
+            continue;
+        }
+        match slot_push_index(&instructions, idx) {
+            Some(push_idx) => {
+                let push_instr = &instructions[push_idx];
+                let (width, slot_bytes) = match push_instr.op {
+                    Opcode::PUSH(w) => {
+                        let w = w as usize;
+                        let imm = match push_instr.imm.as_deref() {
+                            Some(v) => v,
+                            None => continue,
+                        };
+                        match normalize_slot_immediate(imm, w) {
+                            Some(bytes) => (w, bytes),
+                            None => continue,
+                        }
+                    }
+                    Opcode::PUSH0 => (0, Vec::new()),
+                    _ => continue,
+                };
+                touched.insert((width, slot_bytes));
+            }
+            None => {
+                if matches!(instr.op, Opcode::SSTORE) {
+                    unresolved.push(instr.pc);
+                }
+            }
+        }
+    }
+
+    (touched, unresolved)
 }
 
 /// Find the PUSH index that supplies the slot for an `SLOAD` or `SSTORE` at

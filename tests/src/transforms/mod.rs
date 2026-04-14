@@ -8,3 +8,5 @@ mod jump_address;
 mod opaque_predicate;
 #[cfg(test)]
 mod shuffle;
+#[cfg(test)]
+mod slot_shuffle;
