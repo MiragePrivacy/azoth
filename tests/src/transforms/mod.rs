@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod determinism;
+#[cfg(test)]
 mod function_dispatcher;
 #[cfg(test)]
 mod jump_address;
