@@ -1,6 +1,5 @@
 use super::{
-    mock_token_bytecode, prepare_bytecode, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
-    ESCROW_CONTRACT_RUNTIME_BYTECODE, MOCK_TOKEN_ADDR,
+    deploy_contract, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, ESCROW_CONTRACT_RUNTIME_BYTECODE,
 };
 use azoth_core::seed::Seed;
 use azoth_transform::jump_address_transformer::JumpAddressTransformer;
@@ -10,86 +9,22 @@ use azoth_transform::shuffle::Shuffle;
 use azoth_transform::Transform;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
-use revm::bytecode::Bytecode;
-use revm::context::result::{ExecutionResult, Output};
-use revm::context::TxEnv;
-use revm::database::InMemoryDB;
-use revm::primitives::{Address, TxKind, U256};
-use revm::state::AccountInfo;
-use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
+use revm::primitives::Address;
 
 /// Deploy bytecode and verify it executes without reverting
 fn deploy_and_verify_contract_revm(bytecode_hex: &str, name: &str) -> Result<(Address, u64)> {
-    // Prepare bytecode with constructor arguments
-    let bytecode_bytes = prepare_bytecode(bytecode_hex)?;
+    let outcome = deploy_contract(bytecode_hex)
+        .map_err(|e| eyre!("deployment failed for {}: {}", name, e))?;
 
     println!(
-        "Testing {} contract deployment ({} bytes)",
+        "✓ {} deployed at {} ({} bytes runtime, {} gas)",
         name,
-        bytecode_bytes.len()
+        outcome.address,
+        outcome.runtime.len(),
+        outcome.gas_used
     );
 
-    // Setup EVM with mock token
-    let mut db = InMemoryDB::default();
-    db.insert_account_info(
-        MOCK_TOKEN_ADDR,
-        AccountInfo {
-            balance: U256::ZERO,
-            nonce: 1,
-            code_hash: revm::primitives::KECCAK_EMPTY,
-            code: Some(Bytecode::new_raw(mock_token_bytecode())),
-        },
-    );
-
-    let mut evm = Context::mainnet().with_db(db).build_mainnet();
-
-    let deployer = Address::from([0x42u8; 20]);
-
-    let tx_env = TxEnv {
-        caller: deployer,
-        gas_limit: 30_000_000,
-        kind: TxKind::Create,
-        data: bytecode_bytes,
-        value: U256::ZERO,
-        ..Default::default()
-    };
-
-    let result = evm
-        .transact(tx_env)
-        .map_err(|e| eyre!("REVM execution failed for {}: {:?}", name, e))?;
-
-    match result.result {
-        ExecutionResult::Success {
-            output, gas_used, ..
-        } => match output {
-            Output::Create(bytes, Some(address)) => {
-                println!(
-                    "✓ {} deployed at {} ({} bytes runtime, {} gas)",
-                    name,
-                    address,
-                    bytes.len(),
-                    gas_used
-                );
-                Ok((address, gas_used))
-            }
-            Output::Create(_, None) => Err(eyre!(
-                "Contract deployment failed - no address returned for {}",
-                name
-            )),
-            _ => Err(eyre!(
-                "Unexpected output type for contract deployment: {}",
-                name
-            )),
-        },
-        ExecutionResult::Revert { output, .. } => {
-            Err(eyre!("Deployment reverted for {}: {:?}", name, output))
-        }
-        ExecutionResult::Halt { reason, .. } => Err(eyre!(
-            "Deployment halted for {} with reason: {:?}",
-            name,
-            reason
-        )),
-    }
+    Ok((outcome.address, outcome.gas_used))
 }
 
 fn create_config_with_transforms(
