@@ -136,9 +136,7 @@ pub fn deploy_contract(bytecode_hex: &str) -> Result<DeploymentOutcome> {
         ExecutionResult::Revert { output, .. } => {
             Err(eyre!("deployment reverted: 0x{}", hex::encode(output)))
         }
-        ExecutionResult::Halt { reason, .. } => {
-            Err(eyre!("deployment halted: {:?}", reason))
-        }
+        ExecutionResult::Halt { reason, .. } => Err(eyre!("deployment halted: {:?}", reason)),
     }
 }
 

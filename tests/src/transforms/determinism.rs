@@ -85,8 +85,7 @@ async fn push_split_is_deterministic_for_same_seed() {
         "PushSplit",
         || Box::new(PushSplit::new()),
     )
-    .await
-    ;
+    .await;
     assert_transform_deterministic_for_bytecode(
         "escrow deployment",
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
@@ -104,8 +103,7 @@ async fn slot_shuffle_is_deterministic_for_same_seed() {
         "SlotShuffle",
         || Box::new(SlotShuffle::new()),
     )
-    .await
-    ;
+    .await;
     assert_transform_deterministic_for_bytecode(
         "escrow deployment",
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
