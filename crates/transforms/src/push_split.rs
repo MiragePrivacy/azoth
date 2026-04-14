@@ -182,7 +182,7 @@ impl Transform for PushSplit {
                             // `acc` starts at 0). Without this, the first op would
                             // combine the chain's first PUSH with whatever value the
                             // preceding code left on the stack, giving
-                            // `(prev_top) ⊕ p1 ⊕ … ⊕ pn` instead of `p1 ⊕ … ⊕ pn`.
+                            // `(prev_top) ⊕ p1 ⊕ … ⊕ p_n` instead of `p1 ⊕ … ⊕ p_n`.
                             rewritten.push(Instruction {
                                 pc: base_pc,
                                 op: Opcode::PUSH0,

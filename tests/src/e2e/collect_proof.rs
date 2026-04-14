@@ -154,14 +154,14 @@ fn build_collect_calldata(
 ) -> Bytes {
     let (bh_enc, bh_size) = abi_encode_bytes_field(block_header);
     let (rr_enc, rr_size) = abi_encode_bytes_field(receipt_rlp);
-    let (pn_enc, pn_size) = abi_encode_bytes_field(proof_nodes);
+    let (proof_nodes_enc, proof_nodes_size) = abi_encode_bytes_field(proof_nodes);
     let (rp_enc, _rp_size) = abi_encode_bytes_field(receipt_path);
 
     let head_size: usize = 5 * 32;
     let bh_off: usize = head_size;
     let rr_off: usize = bh_off + bh_size;
-    let pn_off: usize = rr_off + rr_size;
-    let rp_off: usize = pn_off + pn_size;
+    let proof_nodes_off: usize = rr_off + rr_size;
+    let rp_off: usize = proof_nodes_off + proof_nodes_size;
 
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(&selector);
@@ -169,12 +169,12 @@ fn build_collect_calldata(
     out.extend_from_slice(&target_block_number.to_be_bytes::<32>());
     out.extend_from_slice(&U256::from(bh_off).to_be_bytes::<32>());
     out.extend_from_slice(&U256::from(rr_off).to_be_bytes::<32>());
-    out.extend_from_slice(&U256::from(pn_off).to_be_bytes::<32>());
+    out.extend_from_slice(&U256::from(proof_nodes_off).to_be_bytes::<32>());
     out.extend_from_slice(&U256::from(rp_off).to_be_bytes::<32>());
     out.extend_from_slice(&log_index.to_be_bytes::<32>());
     out.extend_from_slice(&bh_enc);
     out.extend_from_slice(&rr_enc);
-    out.extend_from_slice(&pn_enc);
+    out.extend_from_slice(&proof_nodes_enc);
     out.extend_from_slice(&rp_enc);
 
     Bytes::from(out)
@@ -620,7 +620,7 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_arithmetic_chain_succeeds
 ///    preceding code had left on the stack. The generator expected the
 ///    chain to start from the identity element (0 for ADD/XOR), but the
 ///    replaced PUSH was a pure stack push — so the produced constant was
-///    `(prev_top) ⊕ p1 ⊕ ... ⊕ pn` instead of `p1 ⊕ ... ⊕ pn`, silently
+///    `(prev_top) ⊕ p1 ⊕ ... ⊕ p_n` instead of `p1 ⊕ ... ⊕ p_n`, silently
 ///    corrupting the literal (in this fixture, the error-selector
 ///    constant fed into the `revert CustomError()` emit sequence). Fix
 ///    was to prepend a `PUSH0` before the chain so the first op always
