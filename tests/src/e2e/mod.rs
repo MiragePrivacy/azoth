@@ -10,7 +10,13 @@
 
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
+use revm::bytecode::Bytecode;
+use revm::context::result::{ExecutionResult, Output};
+use revm::context::TxEnv;
+use revm::database::InMemoryDB;
 use revm::primitives::{Address, Bytes, FixedBytes, U256};
+use revm::state::AccountInfo;
+use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
 use std::collections::HashMap;
 
 /// 4-byte function selector type
@@ -64,6 +70,79 @@ pub fn prepare_bytecode(base_bytecode: &str) -> Result<Bytes> {
     bytecode_bytes.extend_from_slice(&[0; 32]); // currentPaymentAmount = 0
 
     Ok(Bytes::from(bytecode_bytes))
+}
+
+#[allow(dead_code)]
+pub struct DeploymentOutcome {
+    pub address: Address,
+    pub runtime: Bytes,
+    pub gas_used: u64,
+}
+
+#[allow(dead_code)]
+pub fn deploy_contract(bytecode_hex: &str) -> Result<DeploymentOutcome> {
+    let bytecode_bytes = prepare_bytecode(bytecode_hex)?;
+
+    let mut db = InMemoryDB::default();
+    db.insert_account_info(
+        MOCK_TOKEN_ADDR,
+        AccountInfo {
+            balance: U256::ZERO,
+            nonce: 1,
+            code_hash: revm::primitives::KECCAK_EMPTY,
+            code: Some(Bytecode::new_raw(mock_token_bytecode())),
+        },
+    );
+
+    let deployer = Address::from([0x42u8; 20]);
+    db.insert_account_info(
+        deployer,
+        AccountInfo {
+            balance: U256::from(1_000_000_000_000_000_000u128),
+            nonce: 0,
+            code_hash: revm::primitives::KECCAK_EMPTY,
+            code: None,
+        },
+    );
+
+    let mut evm = Context::mainnet().with_db(db).build_mainnet();
+
+    let tx_env = TxEnv {
+        caller: deployer,
+        gas_limit: 30_000_000,
+        kind: revm::primitives::TxKind::Create,
+        data: bytecode_bytes,
+        value: U256::ZERO,
+        nonce: 0,
+        ..Default::default()
+    };
+
+    let result = evm
+        .transact(tx_env)
+        .map_err(|e| eyre!("deployment execution failed: {:?}", e))?;
+
+    match result.result {
+        ExecutionResult::Success {
+            output, gas_used, ..
+        } => match output {
+            Output::Create(bytes, Some(address)) => Ok(DeploymentOutcome {
+                address,
+                runtime: bytes,
+                gas_used,
+            }),
+            Output::Create(_, None) => Err(eyre!("deployment succeeded without address")),
+            _ => Err(eyre!("unexpected create output variant")),
+        },
+        ExecutionResult::Revert { output, .. } => {
+            Err(eyre!("deployment reverted: 0x{}", hex::encode(output)))
+        }
+        ExecutionResult::Halt { reason, .. } => Err(eyre!("deployment halted: {:?}", reason)),
+    }
+}
+
+#[allow(dead_code)]
+pub fn deploy_contract_and_get_runtime(bytecode_hex: &str) -> Result<Bytes> {
+    Ok(deploy_contract(bytecode_hex)?.runtime)
 }
 
 /// Define contract selectors and generate mapping struct + helper methods
@@ -280,6 +359,9 @@ pub fn build_standard_calldata(selector: Selector, args: &[u8]) -> Bytes {
 
 #[cfg(test)]
 mod deploy;
+
+#[cfg(test)]
+mod determinism;
 
 #[cfg(test)]
 mod escrow;

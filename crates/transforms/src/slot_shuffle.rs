@@ -121,7 +121,13 @@ impl Transform for SlotShuffle {
         let mut mapping: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
         let mut mapping_changed = false;
 
-        for (width, slots) in &slots_by_width {
+        let mut ordered_widths: Vec<_> = slots_by_width.keys().copied().collect();
+        ordered_widths.sort_unstable();
+
+        for width in ordered_widths {
+            let slots = slots_by_width
+                .get(&width)
+                .expect("width key collected from slots_by_width");
             let mut shuffled = slots.clone();
             shuffled.shuffle(rng);
             if shuffled == *slots && slots.len() > 1 {
@@ -147,8 +153,8 @@ impl Transform for SlotShuffle {
                         debug!(
                             "SlotShuffle: width={} remap 0x{} -> 0x{}",
                             width,
-                            format_slot_immediate(from, *width),
-                            format_slot_immediate(to, *width)
+                            format_slot_immediate(from, width),
+                            format_slot_immediate(to, width)
                         );
                     }
                 }
@@ -498,6 +504,9 @@ fn format_slot_immediate(bytes: &[u8], width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use azoth_core::seed::Seed;
+    use rand::rngs::StdRng;
+    use std::collections::HashMap;
 
     fn instr(pc: usize, op: Opcode, imm: Option<&str>) -> Instruction {
         Instruction {
@@ -505,6 +514,35 @@ mod tests {
             op,
             imm: imm.map(|s| s.to_string()),
         }
+    }
+
+    fn build_mapping_for_order(
+        ordered_width_slots: &[(usize, Vec<Vec<u8>>)],
+        rng: &mut StdRng,
+    ) -> HashMap<Vec<u8>, Vec<u8>> {
+        let mut mapping = HashMap::new();
+        let mut stable_width_slots = ordered_width_slots.to_vec();
+        stable_width_slots.sort_unstable_by_key(|(width, _)| *width);
+
+        for (width, slots) in &stable_width_slots {
+            let mut shuffled = slots.clone();
+            shuffled.shuffle(rng);
+            if shuffled == *slots && slots.len() > 1 {
+                shuffled.rotate_left(1);
+            }
+
+            for (from, to) in slots.iter().zip(shuffled.iter()) {
+                mapping.insert(from.clone(), to.clone());
+            }
+
+            assert!(
+                !slots.is_empty(),
+                "test setup must provide at least one slot for width {}",
+                width
+            );
+        }
+
+        mapping
     }
 
     #[test]
@@ -696,5 +734,59 @@ mod tests {
             instr(3, Opcode::SSTORE, None),
         ];
         assert_eq!(trace_slot_source(&instructions, 3), None);
+    }
+
+    #[test]
+    fn hash_map_iteration_order_does_not_change_same_seed_mapping() {
+        let seed = Seed::generate();
+
+        let width_1_slots = vec![vec![0x01], vec![0x02], vec![0x03]];
+        let width_2_slots = vec![vec![0x00, 0x0a], vec![0x00, 0x0b], vec![0x00, 0x0c]];
+
+        let mut observed_distinct_iteration_orders = false;
+
+        for _ in 0..64 {
+            let mut slots_by_width_a = HashMap::new();
+            slots_by_width_a.insert(1usize, width_1_slots.clone());
+            slots_by_width_a.insert(2usize, width_2_slots.clone());
+
+            let mut slots_by_width_b = HashMap::new();
+            slots_by_width_b.insert(2usize, width_2_slots.clone());
+            slots_by_width_b.insert(1usize, width_1_slots.clone());
+
+            let order_a: Vec<_> = slots_by_width_a
+                .iter()
+                .map(|(width, slots)| (*width, slots.clone()))
+                .collect();
+            let order_b: Vec<_> = slots_by_width_b
+                .iter()
+                .map(|(width, slots)| (*width, slots.clone()))
+                .collect();
+
+            if order_a == order_b {
+                continue;
+            }
+
+            observed_distinct_iteration_orders = true;
+
+            let mut rng_a = seed.create_deterministic_rng();
+            let mut rng_b = seed.create_deterministic_rng();
+            let mut order_a_sorted = order_a.clone();
+            let mut order_b_sorted = order_b.clone();
+            order_a_sorted.sort_unstable_by_key(|(width, _)| *width);
+            order_b_sorted.sort_unstable_by_key(|(width, _)| *width);
+            let mapping_a = build_mapping_for_order(&order_a_sorted, &mut rng_a);
+            let mapping_b = build_mapping_for_order(&order_b_sorted, &mut rng_b);
+
+            assert_eq!(
+                mapping_a, mapping_b,
+                "same seed should stay deterministic even when HashMap iteration order differs"
+            );
+        }
+
+        assert!(
+            observed_distinct_iteration_orders,
+            "test should observe at least one distinct HashMap iteration order"
+        );
     }
 }
