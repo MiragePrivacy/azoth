@@ -97,10 +97,17 @@ pub fn apply_layout_plan(
     // Track controller jump targets for post-reindex patching: (controller_node, push_pc, push_width, target_pc)
     let mut controller_patches = Vec::new();
 
-    for (tier_index, assignments) in tiers.iter() {
-        if *tier_index == 0 {
+    let mut ordered_tier_indices: Vec<_> = tiers.keys().copied().collect();
+    ordered_tier_indices.sort_unstable();
+
+    for tier_index in ordered_tier_indices {
+        if tier_index == 0 {
             continue;
         }
+
+        let Some(assignments) = tiers.get(&tier_index) else {
+            continue;
+        };
 
         let Some(primary) = assignments.first() else {
             continue;
@@ -111,7 +118,7 @@ pub fn apply_layout_plan(
         let (nodes, updated_pc, stub_patch_info, decoy_patch_info) =
             create_tier_nodes(ir, next_pc, target_pc)?;
         next_pc = updated_pc;
-        tier_nodes.insert(*tier_index, nodes);
+        tier_nodes.insert(tier_index, nodes);
         if let Some((stub_node, stub_push_pc, push_width, decoy_node)) = stub_patch_info {
             stub_patches.push((stub_node, stub_push_pc, push_width, decoy_node));
         }
