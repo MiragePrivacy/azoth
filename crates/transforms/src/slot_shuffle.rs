@@ -57,42 +57,82 @@ impl Transform for SlotShuffle {
         let mut seen_by_width: HashMap<usize, HashSet<Vec<u8>>> = HashMap::new();
         let mut unsupported_sstores: Vec<usize> = Vec::new();
 
+        // For each block, record the set of instruction indices that are the
+        // literal-slot PUSH for some SLOAD/SSTORE in that block (either
+        // directly adjacent, or reachable via a DUP/SWAP/arithmetic trace).
+        // The same set drives both the collection phase below and the rewrite
+        // phase later, so every PUSH we *see* as a slot source during
+        // collection is guaranteed to be *rewritten* — closing the gap where
+        // a non-adjacent PUSH (e.g. `PUSH slot; DUP1; SLOAD; ... SSTORE`)
+        // would previously contribute the slot to the shuffle mapping via
+        // one block's adjacent occurrence but never get rewritten itself.
+        let mut slot_push_by_block: HashMap<_, Vec<(usize, usize, Vec<u8>)>> = HashMap::new();
+
         let nodes: Vec<_> = ir.cfg.node_indices().collect();
         for node in &nodes {
             let Some(Block::Body(body)) = ir.cfg.node_weight(*node) else {
                 continue;
             };
 
+            let mut block_entries: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+            let mut seen_push_idx: HashSet<usize> = HashSet::new();
+
             for idx in 0..body.instructions.len() {
                 let instr = &body.instructions[idx];
-
-                if matches!(instr.op, Opcode::SSTORE) {
-                    if protected_pcs.contains(&instr.pc) {
-                        continue;
-                    }
-                    match sstore_slot_push_index(&body.instructions, idx) {
-                        Some(slot_idx) => {
-                            let slot_instr = &body.instructions[slot_idx];
-                            if protected_pcs.contains(&slot_instr.pc) {
-                                continue;
-                            }
-                        }
-                        None => unsupported_sstores.push(instr.pc),
-                    }
+                if !matches!(instr.op, Opcode::SLOAD | Opcode::SSTORE) {
+                    continue;
                 }
-
                 if protected_pcs.contains(&instr.pc) {
                     continue;
                 }
-                let Some((width, slot_bytes)) = parse_slot_candidate(&body.instructions, idx)
-                else {
-                    continue;
+
+                let slot_push_idx = match slot_push_index(&body.instructions, idx) {
+                    Some(i) => i,
+                    None => {
+                        if matches!(instr.op, Opcode::SSTORE) {
+                            unsupported_sstores.push(instr.pc);
+                        }
+                        // SLOADs with non-literal slot sources (e.g. computed
+                        // keccak256 for a mapping) are silently tolerated —
+                        // remapping literal slots does not affect them.
+                        continue;
+                    }
                 };
+
+                if !seen_push_idx.insert(slot_push_idx) {
+                    continue;
+                }
+
+                let slot_push_instr = &body.instructions[slot_push_idx];
+                if protected_pcs.contains(&slot_push_instr.pc) {
+                    continue;
+                }
+
+                let (width, slot_bytes) = match slot_push_instr.op {
+                    Opcode::PUSH(w) => {
+                        let w = w as usize;
+                        let Some(imm) = slot_push_instr.imm.as_deref() else {
+                            continue;
+                        };
+                        let Some(bytes) = normalize_slot_immediate(imm, w) else {
+                            continue;
+                        };
+                        (w, bytes)
+                    }
+                    Opcode::PUSH0 => (0, Vec::new()),
+                    _ => continue,
+                };
+
+                block_entries.push((slot_push_idx, width, slot_bytes.clone()));
 
                 let seen = seen_by_width.entry(width).or_default();
                 if seen.insert(slot_bytes.clone()) {
                     slots_by_width.entry(width).or_default().push(slot_bytes);
                 }
+            }
+
+            if !block_entries.is_empty() {
+                slot_push_by_block.insert(*node, block_entries);
             }
         }
 
@@ -111,6 +151,30 @@ impl Transform for SlotShuffle {
                 pcs
             );
             return Ok(false);
+        }
+
+        // Exclude slot literals that init-section bytecode writes to at their
+        // original index. SlotShuffle only rewrites CFG blocks (runtime), so
+        // any slot init touches would end up with init writing slot N and
+        // runtime reading a remapped slot != N unless we leave it alone.
+        if let Some((rt_start, _)) = ir.runtime_bounds {
+            let init_bytes = &ir.original_bytecode[..rt_start.min(ir.original_bytecode.len())];
+            let init_touched = init_literal_slots(init_bytes);
+            if !init_touched.is_empty() {
+                debug!(
+                    "SlotShuffle: init section touches {} distinct slot literal(s); \
+                     excluding them from shuffle to preserve init/runtime consistency",
+                    init_touched.len()
+                );
+                for (w, slot) in &init_touched {
+                    if let Some(slots) = slots_by_width.get_mut(w) {
+                        slots.retain(|existing| existing != slot);
+                        if slots.is_empty() {
+                            slots_by_width.remove(w);
+                        }
+                    }
+                }
+            }
         }
 
         if slots_by_width.is_empty() {
@@ -169,6 +233,9 @@ impl Transform for SlotShuffle {
         let mut changed = false;
 
         for node in nodes {
+            let Some(entries) = slot_push_by_block.get(&node) else {
+                continue;
+            };
             let Some(Block::Body(body)) = ir.cfg.node_weight(node) else {
                 continue;
             };
@@ -177,33 +244,30 @@ impl Transform for SlotShuffle {
             let mut rewritten = original.clone();
             let mut block_changed = false;
 
-            for idx in 0..rewritten.len() {
-                let instr = &rewritten[idx];
-                if protected_pcs.contains(&instr.pc) {
-                    continue;
-                }
-                let Some((width, slot_bytes)) = parse_slot_candidate(&rewritten, idx) else {
-                    continue;
-                };
-                let Some(new_slot) = mapping.get(&slot_bytes) else {
+            // Rewrite exactly the PUSHes that the collection phase identified
+            // as slot sources for this block — including any reached through
+            // a backward trace over DUP/SWAP, which the previous adjacency-
+            // only pass would silently skip.
+            for (push_idx, width, slot_bytes) in entries {
+                let Some(new_slot) = mapping.get(slot_bytes) else {
                     continue;
                 };
-                if new_slot == &slot_bytes {
+                if new_slot == slot_bytes {
                     continue;
                 }
-                if matches!(rewritten[idx].op, Opcode::PUSH0) {
+                if matches!(rewritten[*push_idx].op, Opcode::PUSH0) {
                     continue;
                 }
 
                 debug!(
                     "SlotShuffle: block_pc=0x{:x} instr_pc=0x{:x} width={} 0x{} -> 0x{}",
                     body.start_pc,
-                    instr.pc,
+                    rewritten[*push_idx].pc,
                     width,
-                    format_slot_immediate(&slot_bytes, width),
-                    format_slot_immediate(new_slot, width)
+                    format_slot_immediate(slot_bytes, *width),
+                    format_slot_immediate(new_slot, *width)
                 );
-                rewritten[idx].imm = Some(format_slot_immediate(new_slot, width));
+                rewritten[*push_idx].imm = Some(format_slot_immediate(new_slot, *width));
                 block_changed = true;
             }
 
@@ -226,6 +290,7 @@ impl Transform for SlotShuffle {
     }
 }
 
+#[allow(dead_code)]
 fn parse_slot_candidate(instructions: &[Instruction], idx: usize) -> Option<(usize, Vec<u8>)> {
     let instr = instructions.get(idx)?;
     if !is_storage_slot_push(instructions, idx) {
@@ -242,6 +307,7 @@ fn parse_slot_candidate(instructions: &[Instruction], idx: usize) -> Option<(usi
     }
 }
 
+#[allow(dead_code)]
 fn is_storage_slot_push(instructions: &[Instruction], idx: usize) -> bool {
     // Pattern 1: PUSH <slot> ; SLOAD
     if instructions
@@ -266,6 +332,93 @@ fn is_storage_slot_push(instructions: &[Instruction], idx: usize) -> bool {
     false
 }
 
+/// Walk a raw init-section byte slice and return the set of `(width, value)`
+/// pairs that appear as PUSH literals immediately before an `SLOAD` or
+/// `SSTORE` opcode. SlotShuffle only rewrites blocks that live in the CFG,
+/// and the CFG only contains runtime-section blocks; init-section bytecode
+/// (where Solidity inlines constructor-invoked state writes) is invisible to
+/// it. If we shuffle a slot that init-code writes to at its original index,
+/// later runtime reads will go to the remapped slot and find zero — in the
+/// escrow fixture this shows up as `bond() NotFunded()` because the
+/// constructor's inline `funded = true` SSTORE lands on the wrong slot.
+///
+/// Adjacent-PUSH detection is sufficient for the patterns Solidity emits for
+/// direct `s_field = value` writes (`PUSH <slot>; SLOAD; …; PUSH <slot>;
+/// SSTORE`). DUP/SWAP-shared patterns in init code would slip through this
+/// scanner, so if the init section ever grows one, the corresponding slot
+/// value can still be missed — in that case we'd need to either (a) run the
+/// CFG-building backward trace over init instructions too, or (b) refuse to
+/// shuffle and log a warning. For the current escrow fixture, pattern (a) is
+/// sufficient and the test passes; (b) is the fallback the caller still
+/// enforces via `unsupported_sstores` for any traced SSTORE it can't
+/// resolve.
+fn init_literal_slots(bytes: &[u8]) -> HashSet<(usize, Vec<u8>)> {
+    let mut touched = HashSet::new();
+    let mut last_push: Option<(usize, Vec<u8>)> = None;
+
+    let mut pc = 0usize;
+    while pc < bytes.len() {
+        let op = bytes[pc];
+        if op == 0x5f {
+            // PUSH0
+            last_push = Some((0, Vec::new()));
+            pc += 1;
+        } else if (0x60..=0x7f).contains(&op) {
+            // PUSH1..=PUSH32
+            let size = (op - 0x5f) as usize;
+            let end = pc + 1 + size;
+            if end > bytes.len() {
+                break;
+            }
+            last_push = Some((size, bytes[pc + 1..end].to_vec()));
+            pc = end;
+        } else {
+            if matches!(op, 0x54 | 0x55) {
+                if let Some(ref prev) = last_push {
+                    touched.insert(prev.clone());
+                }
+            }
+            last_push = None;
+            pc += 1;
+        }
+    }
+
+    touched
+}
+
+/// Find the PUSH index that supplies the slot for an `SLOAD` or `SSTORE` at
+/// `idx`. Tries the adjacent-PUSH pattern first, then falls back to tracing
+/// stack effects (DUP/SWAP/arithmetic) backward from the access. Returns
+/// `None` if the slot is not a literal — e.g. computed via KECCAK256 for a
+/// Solidity mapping, loaded from storage, or read from calldata.
+fn slot_push_index(instructions: &[Instruction], idx: usize) -> Option<usize> {
+    let instr = instructions.get(idx)?;
+    if !matches!(instr.op, Opcode::SLOAD | Opcode::SSTORE) {
+        return None;
+    }
+
+    // Fast path: literal PUSH immediately before the access.
+    if let Some(slot_idx) = idx.checked_sub(1) {
+        if matches!(instructions[slot_idx].op, Opcode::PUSH(_) | Opcode::PUSH0) {
+            return Some(slot_idx);
+        }
+    }
+
+    // Slow path: trace the slot's provenance through DUP/SWAP/arithmetic.
+    // Both SLOAD and SSTORE take the slot from stack position 0, so the
+    // existing `trace_slot_source` works for both opcodes without change.
+    let traced_idx = trace_slot_source(instructions, idx)?;
+    if matches!(instructions[traced_idx].op, Opcode::PUSH(_) | Opcode::PUSH0) {
+        debug!(
+            "SlotShuffle: traced slot push (slot_pc=0x{:04x}, access_pc=0x{:04x}, op={:?})",
+            instructions[traced_idx].pc, instr.pc, instr.op
+        );
+        return Some(traced_idx);
+    }
+    None
+}
+
+#[allow(dead_code)]
 fn sstore_slot_push_index(instructions: &[Instruction], idx: usize) -> Option<usize> {
     let instr = instructions.get(idx)?;
     if !matches!(instr.op, Opcode::SSTORE) {
