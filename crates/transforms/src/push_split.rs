@@ -166,7 +166,6 @@ impl Transform for PushSplit {
                             let before_window = format_window(&original, idx, 2);
                             let chain = generate_chain(value, width, rng);
                             let base_pc = instr.pc;
-                            let mut pc = base_pc;
 
                             debug!(
                                 "PushSplit: split at pc=0x{:x} width={} value=0x{} into parts={}",
@@ -176,8 +175,23 @@ impl Transform for PushSplit {
                                 format_chain(&chain, width)
                             );
 
-                            let chain_len = chain.len() * 2;
-                            let rewritten_start = rewritten.len();
+                            // Seed the stack with the identity element for the chain's
+                            // combine op (0 is identity for both ADD and XOR, and for
+                            // SUB the first chain entry is always ADD by construction
+                            // — see `generate_chain` where `can_sub = acc > 0` and
+                            // `acc` starts at 0). Without this, the first op would
+                            // combine the chain's first PUSH with whatever value the
+                            // preceding code left on the stack, giving
+                            // `(prev_top) ⊕ p1 ⊕ … ⊕ p_n` instead of `p1 ⊕ … ⊕ p_n`.
+                            rewritten.push(Instruction {
+                                pc: base_pc,
+                                op: Opcode::PUSH0,
+                                imm: None,
+                            });
+                            let mut pc = base_pc + 1;
+
+                            let chain_len = chain.len() * 2 + 1;
+                            let rewritten_start = rewritten.len() - 1;
                             for (part, op) in chain {
                                 pc = emit_part(part, op, pc, &mut rewritten);
                             }

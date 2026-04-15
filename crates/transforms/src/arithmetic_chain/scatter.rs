@@ -86,11 +86,21 @@ pub fn generate_load_instructions(
             let code_offset = runtime_code_length + offset;
             let mem_dest = 0x00;
 
+            // EVM CODECOPY takes (destOffset, offset, size) from the stack
+            // with `destOffset` on TOP (µs[0] in the yellow paper). So the
+            // PUSH order must be size → offset → destOffset so that after
+            // all PUSHes, destOffset is on top. The previous order produced
+            // `CODECOPY(destOffset=size, offset=offset, size=destOffset)`,
+            // which with destOffset=0 meant a zero-length copy — the
+            // subsequent MLOAD always returned whatever memory happened to
+            // contain, silently corrupting the chain reduction
+            // (`dispatcher_plus_arithmetic_chain` surfaced this as
+            // `WrongEventSignature()` on the Transfer topic constant).
             vec![
                 Instruction {
                     pc: 0,
                     op: Opcode::PUSH(1),
-                    imm: Some(format!("{:02x}", mem_dest)),
+                    imm: Some("20".to_string()),
                 },
                 Instruction {
                     pc: 0,
@@ -100,7 +110,7 @@ pub fn generate_load_instructions(
                 Instruction {
                     pc: 0,
                     op: Opcode::PUSH(1),
-                    imm: Some("20".to_string()),
+                    imm: Some(format!("{:02x}", mem_dest)),
                 },
                 Instruction {
                     pc: 0,

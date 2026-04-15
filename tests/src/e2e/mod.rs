@@ -72,6 +72,41 @@ pub fn prepare_bytecode(base_bytecode: &str) -> Result<Bytes> {
     Ok(Bytes::from(bytecode_bytes))
 }
 
+/// Prepare escrow contract deployment bytecode with explicit constructor arguments.
+///
+/// Unlike [`prepare_bytecode`], which hardcodes mock addresses and zero amounts,
+/// this helper accepts fully specified values so callers can deploy an escrow
+/// that matches a specific real-world fixture (e.g. a receipt-proof test case).
+#[allow(dead_code)]
+pub fn prepare_bytecode_with_args(
+    base_bytecode: &str,
+    token: Address,
+    recipient: Address,
+    expected_amount: U256,
+    reward_amount: U256,
+    payment_amount: U256,
+) -> Result<Bytes> {
+    let normalized_hex = azoth_core::normalize_hex_string(base_bytecode)
+        .map_err(|e| eyre!("Failed to normalize bytecode: {}", e))?;
+
+    let mut bytecode_bytes =
+        hex::decode(&normalized_hex).map_err(|e| eyre!("Failed to decode bytecode: {}", e))?;
+
+    if bytecode_bytes.is_empty() {
+        return Err(eyre!("Empty bytecode"));
+    }
+
+    bytecode_bytes.extend_from_slice(&[0u8; 12]);
+    bytecode_bytes.extend_from_slice(token.as_slice());
+    bytecode_bytes.extend_from_slice(&[0u8; 12]);
+    bytecode_bytes.extend_from_slice(recipient.as_slice());
+    bytecode_bytes.extend_from_slice(&expected_amount.to_be_bytes::<32>());
+    bytecode_bytes.extend_from_slice(&reward_amount.to_be_bytes::<32>());
+    bytecode_bytes.extend_from_slice(&payment_amount.to_be_bytes::<32>());
+
+    Ok(Bytes::from(bytecode_bytes))
+}
+
 #[allow(dead_code)]
 pub struct DeploymentOutcome {
     pub address: Address,
@@ -365,6 +400,9 @@ mod determinism;
 
 #[cfg(test)]
 mod escrow;
+
+#[cfg(test)]
+mod collect_proof;
 
 #[cfg(test)]
 mod test_original;

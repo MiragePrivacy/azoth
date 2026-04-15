@@ -157,6 +157,14 @@ pub struct CfgIrBundle {
     pub dispatcher_blocks: HashSet<usize>,
     /// Data section bytes to append to bytecode for arithmetic chain CODECOPY loads.
     pub arithmetic_chain_data: Option<Vec<u8>>,
+    /// Runtime-length estimate used by `ArithmeticChain` when it emitted its
+    /// CODECOPY offset PUSHes. After Step 5 dispatcher reapply passes in the
+    /// obfuscator pipeline, the actual runtime can grow past this estimate
+    /// (some PUSHes widen when a decoy/stub target requires more bytes). The
+    /// post-reindex patch pass uses this field to compute the delta and
+    /// rewrite every AC-emitted offset PUSH so CODECOPY still points into
+    /// the appended data section.
+    pub ac_runtime_length_estimate: Option<usize>,
 }
 
 impl CfgIrBundle {
@@ -865,80 +873,107 @@ impl CfgIrBundle {
                 }
             }
 
-            // Extended scan: for blocks ending with JUMP/JUMPI (regardless of pattern),
-            // scan ALL PUSH instructions for values matching old JUMPDEST PCs.
+            // Extended scan: scan ALL PUSH2+ instructions in EVERY body block
+            // for values matching old JUMPDEST PCs. Solidity's internal
+            // function call convention routinely pushes a return address in
+            // one block and consumes it from a JUMP in a *later* block
+            // (stack-carried), e.g.
             //
-            // Solidity contracts with inheritance (e.g. EscrowERC20 + EscrowBase) emit
-            // internal function call patterns where the return address PUSH is separated
-            // from the terminal JUMP by several instructions:
+            //     Block A:
+            //       PUSH2 ret_addr   ← return address
+            //       SLOAD
+            //       ...              ← no JUMP here, block ends by falling
+            //                          through at a JUMPDEST
+            //     Block B (starts at the JUMPDEST):
+            //       ... address mask ...
+            //       SWAP1
+            //       JUMP             ← consumes the ret_addr pushed in A
             //
-            //   PUSH ret_addr   ← return address, not adjacent to JUMP
-            //   DUP3
-            //   PUSH2 value
-            //   SWAP4
-            //   PUSH0
-            //   SSTORE
-            //   PUSH1 slot
-            //   SSTORE
-            //   JUMP            ← uses ret_addr still on the stack
+            // If we only scanned blocks that end with JUMP/JUMPI, the
+            // return-address PUSH in Block A would never be visited and
+            // would stay stale after PC-shifting transforms (PushSplit,
+            // ArithmeticChain). That produced the InvalidJump regression
+            // documented in tests/src/e2e/collect_proof.rs.
             //
-            // The standard path above only checks the PUSH immediately before a recognized
-            // jump pattern (PUSH+JUMP). This extended scan catches return addresses at
-            // arbitrary positions within the block.
-            let last = body.instructions.last();
-            let ends_with_jump = last.is_some_and(|i| matches!(i.op, Opcode::JUMP | Opcode::JUMPI));
-            if ends_with_jump {
-                // Determine which indices are already part of the recognized jump pattern
-                // to avoid double-remapping
-                let pattern_indices: HashSet<usize> = match &pattern {
-                    Some(JumpPattern::Direct { push_idx }) => {
-                        [*push_idx, push_idx.wrapping_sub(1)].into_iter().collect()
-                    }
-                    Some(JumpPattern::SplitAdd {
-                        push_a_idx,
-                        push_b_idx,
-                    }) => [*push_a_idx, *push_b_idx, push_a_idx.wrapping_sub(1)]
-                        .into_iter()
-                        .collect(),
-                    Some(JumpPattern::PcRelative { push_idx, .. }) => {
-                        [*push_idx, push_idx.wrapping_sub(1)].into_iter().collect()
-                    }
-                    None => HashSet::new(),
-                };
+            // Constraining to PUSH2+ avoids false positives on small
+            // literals that happen to coincide with early JUMPDEST PCs
+            // (slot indices, loop bounds, etc.) — Solidity would use PUSH2
+            // for any jump target in a contract whose code is >256 bytes.
+            let pattern_indices: HashSet<usize> = match &pattern {
+                Some(JumpPattern::Direct { push_idx }) => {
+                    [*push_idx, push_idx.wrapping_sub(1)].into_iter().collect()
+                }
+                Some(JumpPattern::SplitAdd {
+                    push_a_idx,
+                    push_b_idx,
+                }) => [*push_a_idx, *push_b_idx, push_a_idx.wrapping_sub(1)]
+                    .into_iter()
+                    .collect(),
+                Some(JumpPattern::PcRelative { push_idx, .. }) => {
+                    [*push_idx, push_idx.wrapping_sub(1)].into_iter().collect()
+                }
+                None => HashSet::new(),
+            };
 
-                for (idx, instr) in body.instructions.iter().enumerate() {
-                    if pattern_indices.contains(&idx) {
-                        continue;
-                    }
-                    if !matches!(instr.op, Opcode::PUSH(_)) {
-                        continue;
-                    }
-                    let Some(imm) = &instr.imm else {
-                        continue;
-                    };
-                    let Ok(push_value) = usize::from_str_radix(imm, 16) else {
-                        continue;
-                    };
-                    if let Some(new_value) = try_remap(push_value) {
-                        let old_pc_abs = if in_runtime {
-                            old_runtime_start.unwrap_or(0).saturating_add(push_value)
-                        } else {
-                            push_value
-                        };
-                        let new_pc_abs = pc_mapping.get(&old_pc_abs).copied().unwrap_or(0);
+            for (idx, instr) in body.instructions.iter().enumerate() {
+                if pattern_indices.contains(&idx) {
+                    continue;
+                }
+                let push_width = match instr.op {
+                    Opcode::PUSH(w) if w >= 2 => w,
+                    _ => continue,
+                };
+                let _ = push_width;
+                let Some(imm) = &instr.imm else {
+                    continue;
+                };
+                let Ok(push_value) = usize::from_str_radix(imm, 16) else {
+                    continue;
+                };
+                if let Some(new_value) = try_remap(push_value) {
+                    // Narrow false positives: only remap if the value
+                    // actually flows into a JUMP/JUMPI. Without this check
+                    // a PUSH2 whose 16-bit value numerically matches a
+                    // JUMPDEST PC but is really a bit mask, deadline
+                    // constant, or other non-target literal would be
+                    // silently rewritten (PUSH2 values span `0..=0xffff`
+                    // which heavily overlaps the PC range of sub-64KB
+                    // runtimes). `push_reaches_jump` forward-walks from
+                    // the PUSH within its block and returns `false` only
+                    // when the value is unambiguously consumed by a
+                    // non-jump op; stack-carried values (survive to
+                    // block end or flow through a JUMP to a callee) and
+                    // within-block JUMP targets still return `true`, so
+                    // return addresses remain detectable.
+                    if !push_reaches_jump(&body.instructions, idx) {
                         tracing::debug!(
-                            "remap_orphan_jump_pushes: block {} instr {} at pc=0x{:x}: \
-                             0x{:x} -> 0x{:x} (abs: 0x{:x} -> 0x{:x}) [extended scan]",
+                            "remap_orphan_jump_pushes: skipping block {} instr {} at pc=0x{:x} \
+                             (value 0x{:x} matches JUMPDEST PC but is consumed by non-jump op)",
                             node.index(),
                             idx,
                             instr.pc,
-                            push_value,
-                            new_value,
-                            old_pc_abs,
-                            new_pc_abs,
+                            push_value
                         );
-                        edits.push((node, idx, new_value));
+                        continue;
                     }
+                    let old_pc_abs = if in_runtime {
+                        old_runtime_start.unwrap_or(0).saturating_add(push_value)
+                    } else {
+                        push_value
+                    };
+                    let new_pc_abs = pc_mapping.get(&old_pc_abs).copied().unwrap_or(0);
+                    tracing::debug!(
+                        "remap_orphan_jump_pushes: block {} instr {} at pc=0x{:x}: \
+                         0x{:x} -> 0x{:x} (abs: 0x{:x} -> 0x{:x}) [extended scan]",
+                        node.index(),
+                        idx,
+                        instr.pc,
+                        push_value,
+                        new_value,
+                        old_pc_abs,
+                        new_pc_abs,
+                    );
+                    edits.push((node, idx, new_value));
                 }
             }
         }
@@ -957,6 +992,140 @@ impl CfgIrBundle {
                 total_remapped
             );
         }
+
+        Ok(())
+    }
+
+    /// Correct ArithmeticChain CODECOPY offset PUSHes after all PC-shifting
+    /// passes have finished. AC records a `runtime_length_estimate` at the
+    /// moment it emits its chain replacements; the dispatcher's
+    /// reapply-stub/decoy/controller passes can subsequently widen some
+    /// PUSHes (PUSH1→PUSH2, PUSH2→PUSH3, …), growing the runtime beyond that
+    /// estimate. Because the data section is appended at the *actual* end of
+    /// the encoded runtime, every AC-emitted CODECOPY offset (= estimate +
+    /// scatter_offset) ends up pointing `delta` bytes before where the
+    /// scattered value actually lives — CODECOPY then loads runtime-code
+    /// bytes instead of the chain's initial value, producing a silently
+    /// wrong reduction (the failure mode `dispatcher_plus_arithmetic_chain`
+    /// caught as `WrongEventSignature()` on the Transfer event topic).
+    ///
+    /// This pass walks every runtime body block, identifies AC's CODECOPY
+    /// load pattern (the PUSH immediately before a `PUSH1 0x20; CODECOPY`
+    /// triple), and shifts its immediate by `actual_runtime_length -
+    /// estimated_runtime_length`. `PUSH1 0x20; CODECOPY` without the
+    /// preceding offset-PUSH signature is rare enough in compiled Solidity
+    /// that this shouldn't cause false positives, and the delta-shift is a
+    /// no-op when estimate and actual match.
+    pub fn patch_arithmetic_chain_codecopy_offsets(&mut self) -> Result<(), Error> {
+        let Some(estimate) = self.ac_runtime_length_estimate else {
+            return Ok(());
+        };
+
+        let runtime_bounds = self.runtime_bounds;
+        let in_runtime = |pc: usize| match runtime_bounds {
+            Some((start, end)) => pc >= start && pc < end,
+            None => true,
+        };
+
+        // First, compute the actual runtime length by summing instruction
+        // byte sizes across runtime blocks. This reflects the post-
+        // reindex, post-reapply state.
+        let mut actual_runtime_length = 0usize;
+        for node in self.cfg.node_indices() {
+            if let Some(Block::Body(body)) = self.cfg.node_weight(node) {
+                if !in_runtime(body.start_pc) {
+                    continue;
+                }
+                for instr in &body.instructions {
+                    actual_runtime_length += instr.byte_size();
+                }
+            }
+        }
+
+        if actual_runtime_length == estimate {
+            return Ok(());
+        }
+        let delta = actual_runtime_length as isize - estimate as isize;
+        tracing::debug!(
+            "patch_arithmetic_chain_codecopy_offsets: estimate=0x{:x}, actual=0x{:x}, delta={}",
+            estimate,
+            actual_runtime_length,
+            delta
+        );
+
+        // Collect edits: (node, instr_idx, new_value). AC's CODECOPY load
+        // compiles to a 4-instruction prelude:
+        //
+        //   PUSH1 0x20        ; size
+        //   PUSH<n> <offset>  ; code offset  ← what we patch
+        //   PUSH1 0x00        ; destOffset
+        //   CODECOPY
+        //
+        // The offset PUSH sits one before a `PUSH1 0x00; CODECOPY` tail and
+        // one after a `PUSH1 0x20`. Match on that shape.
+        let mut edits: Vec<(NodeIndex, usize, usize)> = Vec::new();
+        for node in self.cfg.node_indices() {
+            let Some(Block::Body(body)) = self.cfg.node_weight(node) else {
+                continue;
+            };
+            if !in_runtime(body.start_pc) {
+                continue;
+            }
+
+            let instructions = &body.instructions;
+            for idx in 0..instructions.len().saturating_sub(3) {
+                let push_size = &instructions[idx];
+                let push_off = &instructions[idx + 1];
+                let push_dest = &instructions[idx + 2];
+                let codecopy = &instructions[idx + 3];
+
+                if !matches!(push_size.op, Opcode::PUSH(1))
+                    || push_size.imm.as_deref() != Some("20")
+                {
+                    continue;
+                }
+                if !matches!(push_off.op, Opcode::PUSH(_)) {
+                    continue;
+                }
+                if !matches!(push_dest.op, Opcode::PUSH(1) | Opcode::PUSH0) {
+                    continue;
+                }
+                if !matches!(codecopy.op, Opcode::CODECOPY) {
+                    continue;
+                }
+                let Some(imm_hex) = &push_off.imm else {
+                    continue;
+                };
+                let Ok(old_value) = usize::from_str_radix(imm_hex, 16) else {
+                    continue;
+                };
+                // AC's offset is always `estimate + scatter_offset`, so it's
+                // >= estimate. Anything below is unrelated.
+                if old_value < estimate {
+                    continue;
+                }
+                let new_value = (old_value as isize + delta) as usize;
+                edits.push((node, idx + 1, new_value));
+            }
+        }
+
+        let total_edits = edits.len();
+        for (node, instr_idx, new_value) in edits {
+            if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
+                apply_immediate(&mut body.instructions[instr_idx], new_value)?;
+            }
+        }
+        if total_edits > 0 {
+            tracing::debug!(
+                "patch_arithmetic_chain_codecopy_offsets: shifted {} offset(s) by {}",
+                total_edits,
+                delta
+            );
+        }
+
+        // The estimate has been consumed; clear it so subsequent iterations
+        // don't double-apply.
+        self.ac_runtime_length_estimate = Some(actual_runtime_length);
 
         Ok(())
     }
@@ -1509,6 +1678,7 @@ pub fn build_cfg_ir(
         dispatcher_info,
         dispatcher_blocks: HashSet::new(),
         arithmetic_chain_data: None,
+        ac_runtime_length_estimate: None,
     };
     let body_blocks = bundle
         .cfg
@@ -1896,6 +2066,284 @@ fn detect_jump_pattern(instructions: &[Instruction]) -> Option<JumpPattern> {
         .len()
         .checked_sub(1)
         .and_then(|last| detect_jump_pattern_at(instructions, last))
+}
+
+/// Forward-walk from a PUSH instruction to determine whether its value is
+/// actually consumed as a `JUMP`/`JUMPI` target, or silently diverted into
+/// some other computation.
+///
+/// Used by [`CfgIrBundle::remap_orphan_jump_pushes`] to narrow false
+/// positives in its extended scan: the scan visits every body block and
+/// flags any `PUSH2+` whose immediate coincides with an OLD JUMPDEST PC,
+/// but 16-bit constants (bit masks, deadline literals, small numeric
+/// values) routinely fall in the same numeric range as runtime PCs in
+/// sub-64KB contracts. Without this filter every such coincidence would
+/// get silently rewritten when `reindex_pcs` grew the runtime, drifting
+/// the literal by whatever the PC delta happened to be.
+///
+/// Returns `false` only when the value is *unambiguously* consumed by a
+/// non-jump operation within the PUSH's block — stack-carried values
+/// (those that survive to block end without being consumed) still return
+/// `true` because the extended scan exists specifically to catch return
+/// addresses that cross block boundaries via the stack. That leaves a
+/// residual risk for constants stack-carried out of their block, but it
+/// strictly tightens the previous "match any JUMPDEST PC" heuristic and
+/// eliminates the most common class of false positive (PUSH feeds
+/// directly into ADD/AND/LT/MSTORE/SSTORE/… inside the same block).
+///
+/// Stack position is tracked as the PUSH's distance from top: 0 right
+/// after the PUSH. DUP of the tracked slot is handled conservatively —
+/// returns `true` immediately because either the copy or the original
+/// could still reach a downstream JUMP. Unknown opcodes also return
+/// `true` so new opcodes added to future hardforks don't silently
+/// introduce false negatives.
+#[doc(hidden)]
+pub fn push_reaches_jump(instructions: &[Instruction], push_idx: usize) -> bool {
+    // `pos` is the tracked value's distance from stack top; 0 = top.
+    let mut pos: isize = 0;
+
+    for instr in instructions.iter().skip(push_idx + 1) {
+        let op = &instr.op;
+        match op {
+            // pop 0, push 1 — every value above us shifts us down by 1
+            Opcode::PUSH(_)
+            | Opcode::PUSH0
+            | Opcode::ADDRESS
+            | Opcode::ORIGIN
+            | Opcode::CALLER
+            | Opcode::CALLVALUE
+            | Opcode::CALLDATASIZE
+            | Opcode::CODESIZE
+            | Opcode::GASPRICE
+            | Opcode::COINBASE
+            | Opcode::TIMESTAMP
+            | Opcode::NUMBER
+            | Opcode::DIFFICULTY
+            | Opcode::GASLIMIT
+            | Opcode::CHAINID
+            | Opcode::SELFBALANCE
+            | Opcode::BASEFEE
+            | Opcode::GAS
+            | Opcode::RETURNDATASIZE
+            | Opcode::PC
+            | Opcode::MSIZE => {
+                pos += 1;
+            }
+
+            Opcode::POP => {
+                if pos == 0 {
+                    return false;
+                }
+                pos -= 1;
+            }
+
+            Opcode::DUP(n) => {
+                let source_pos = (*n as isize) - 1;
+                if pos == source_pos {
+                    // We're the source of the DUP. The copy goes to stack
+                    // top and the original stays (shifted up by 1), so
+                    // both positions could end up consumed differently.
+                    // Be conservative: assume whichever branch reaches a
+                    // JUMP does, so the remap stays.
+                    return true;
+                }
+                pos += 1;
+            }
+
+            Opcode::SWAP(n) => {
+                let n = *n as isize;
+                if pos == 0 {
+                    pos = n;
+                } else if pos == n {
+                    pos = 0;
+                }
+            }
+
+            // pop 1, push 1 — net 0, but consumed if our pos was the input
+            Opcode::ISZERO
+            | Opcode::NOT
+            | Opcode::BALANCE
+            | Opcode::CALLDATALOAD
+            | Opcode::EXTCODESIZE
+            | Opcode::BLOCKHASH
+            | Opcode::MLOAD
+            | Opcode::SLOAD
+            | Opcode::EXTCODEHASH => {
+                if pos == 0 {
+                    return false;
+                }
+            }
+
+            // pop 2, push 1 — net -1
+            Opcode::ADD
+            | Opcode::SUB
+            | Opcode::MUL
+            | Opcode::DIV
+            | Opcode::SDIV
+            | Opcode::MOD
+            | Opcode::SMOD
+            | Opcode::EXP
+            | Opcode::SIGNEXTEND
+            | Opcode::LT
+            | Opcode::GT
+            | Opcode::SLT
+            | Opcode::SGT
+            | Opcode::EQ
+            | Opcode::AND
+            | Opcode::OR
+            | Opcode::XOR
+            | Opcode::BYTE
+            | Opcode::SHL
+            | Opcode::SHR
+            | Opcode::SAR
+            | Opcode::KECCAK256 => {
+                if pos < 2 {
+                    return false;
+                }
+                pos -= 1;
+            }
+
+            // pop 3, push 1 — net -2
+            Opcode::ADDMOD | Opcode::MULMOD => {
+                if pos < 3 {
+                    return false;
+                }
+                pos -= 2;
+            }
+
+            // pop 2, push 0 — net -2
+            Opcode::MSTORE | Opcode::MSTORE8 | Opcode::SSTORE => {
+                if pos < 2 {
+                    return false;
+                }
+                pos -= 2;
+            }
+
+            // pop 3, push 0 — net -3
+            Opcode::CODECOPY
+            | Opcode::CALLDATACOPY
+            | Opcode::EXTCODECOPY
+            | Opcode::RETURNDATACOPY => {
+                if pos < 3 {
+                    return false;
+                }
+                pos -= 3;
+            }
+
+            Opcode::LOG0 => {
+                if pos < 2 {
+                    return false;
+                }
+                pos -= 2;
+            }
+            Opcode::LOG1 => {
+                if pos < 3 {
+                    return false;
+                }
+                pos -= 3;
+            }
+            Opcode::LOG2 => {
+                if pos < 4 {
+                    return false;
+                }
+                pos -= 4;
+            }
+            Opcode::LOG3 => {
+                if pos < 5 {
+                    return false;
+                }
+                pos -= 5;
+            }
+            Opcode::LOG4 => {
+                if pos < 6 {
+                    return false;
+                }
+                pos -= 6;
+            }
+
+            // External calls: treat as consuming the target region
+            Opcode::CALL | Opcode::CALLCODE => {
+                if pos < 7 {
+                    return false;
+                }
+                pos -= 6;
+            }
+            Opcode::DELEGATECALL | Opcode::STATICCALL => {
+                if pos < 6 {
+                    return false;
+                }
+                pos -= 5;
+            }
+            Opcode::CREATE => {
+                if pos < 3 {
+                    return false;
+                }
+                pos -= 2;
+            }
+            Opcode::CREATE2 => {
+                if pos < 4 {
+                    return false;
+                }
+                pos -= 3;
+            }
+
+            Opcode::JUMP => {
+                // If our value is the JUMP target (pos == 0), return true.
+                // Otherwise the JUMP consumes a different value and our
+                // value is still on the stack, flowing into the callee's
+                // block. This is precisely the Solidity internal-function-
+                // call pattern: `PUSH ret_addr; ... DUP args; PUSH func;
+                // JUMP` leaves `ret_addr` stack-carried past the JUMP,
+                // and the callee eventually returns by popping it. So
+                // `JUMP` with `pos != 0` is NOT evidence the value is a
+                // non-target — it's stack-carried, return `true`.
+                return true;
+            }
+            Opcode::JUMPI => {
+                if pos == 0 {
+                    return true;
+                }
+                if pos == 1 {
+                    // Our value is the condition, not the target — the
+                    // JUMPI consumed it as a boolean, so it's not a jump
+                    // target even though it happens to match a JUMPDEST
+                    // PC numerically.
+                    return false;
+                }
+                // pos >= 2: stack-carried past the branch into either
+                // successor block. Same reasoning as JUMP above.
+                return true;
+            }
+
+            // Block-terminating ops other than JUMP/JUMPI: execution ends
+            // in this block without ever branching on our value.
+            Opcode::STOP
+            | Opcode::RETURN
+            | Opcode::REVERT
+            | Opcode::INVALID
+            | Opcode::SELFDESTRUCT => {
+                return false;
+            }
+
+            Opcode::JUMPDEST => {
+                // no stack effect
+            }
+
+            // Unknown / unhandled opcodes (e.g. new hardfork instructions
+            // we don't yet model): be conservative and assume the value
+            // reaches a JUMP so new opcodes never silently introduce
+            // false negatives.
+            _ => {
+                return true;
+            }
+        }
+    }
+
+    // Reached the end of the block without finding a JUMP that consumed
+    // our value. The value is still on the stack and will flow into the
+    // next block — could well be a return address that the next block's
+    // JUMP consumes. Keep the remap.
+    true
 }
 
 fn detect_jump_pattern_at(instructions: &[Instruction], jump_idx: usize) -> Option<JumpPattern> {
