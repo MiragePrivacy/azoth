@@ -76,6 +76,9 @@ pub enum PredicateType {
 /// * `slot` - Storage slot to check
 /// * `match_target` - Where to jump if the slot value is zero
 /// * `fallback_target` - Where to jump if the slot value is non-zero
+/// * `jump_target_width` - PUSH width used for the two jump-target PUSHes.
+///   Callers must pass a width large enough to hold any post-reindex target,
+///   since `reapply_controller_patches` reuses this width verbatim.
 ///
 /// # Returns
 ///
@@ -85,6 +88,7 @@ pub fn generate_storage_check_instructions(
     slot: u64,
     match_target: usize,
     fallback_target: usize,
+    jump_target_width: u8,
 ) -> Vec<Instruction> {
     let mut instructions = Vec::new();
     let mut pc = start_pc;
@@ -118,8 +122,7 @@ pub fn generate_storage_check_instructions(
     });
     pc += 1;
 
-    // Determine push width for match target
-    let match_width = minimal_push_width(match_target);
+    let match_width = jump_target_width;
     instructions.push(Instruction {
         pc,
         op: Opcode::PUSH(match_width),
@@ -139,8 +142,7 @@ pub fn generate_storage_check_instructions(
     });
     pc += 1;
 
-    // Determine push width for fallback target
-    let fallback_width = minimal_push_width(fallback_target);
+    let fallback_width = jump_target_width;
     instructions.push(Instruction {
         pc,
         op: Opcode::PUSH(fallback_width),
@@ -175,6 +177,9 @@ pub fn generate_storage_check_instructions(
 /// * `expected_value` - The byte value to compare against
 /// * `match_target` - Where to jump if the comparison succeeds
 /// * `fallback_target` - Where to jump if the comparison fails
+/// * `jump_target_width` - PUSH width used for the two jump-target PUSHes.
+///   Callers must pass a width large enough to hold any post-reindex target,
+///   since `reapply_controller_patches` reuses this width verbatim.
 ///
 /// # Returns
 ///
@@ -185,6 +190,7 @@ pub fn generate_byte_extraction_instructions(
     expected_value: u8,
     match_target: usize,
     fallback_target: usize,
+    jump_target_width: u8,
 ) -> Vec<Instruction> {
     let mut instructions = Vec::new();
     let mut pc = start_pc;
@@ -237,8 +243,7 @@ pub fn generate_byte_extraction_instructions(
     });
     pc += 1;
 
-    // Determine push width for match target
-    let match_width = minimal_push_width(match_target);
+    let match_width = jump_target_width;
     instructions.push(Instruction {
         pc,
         op: Opcode::PUSH(match_width),
@@ -258,8 +263,7 @@ pub fn generate_byte_extraction_instructions(
     });
     pc += 1;
 
-    // Determine push width for fallback target
-    let fallback_width = minimal_push_width(fallback_target);
+    let fallback_width = jump_target_width;
     instructions.push(Instruction {
         pc,
         op: Opcode::PUSH(fallback_width),
@@ -493,6 +497,7 @@ mod tests {
             0x7f,   // expected value
             0x2000, // match target
             0x3000, // fallback target
+            2,      // jump target width (PUSH2)
         );
         let next_pc = 0x1000 + instructions.size();
 
@@ -544,6 +549,7 @@ mod tests {
             0x1000, 0x7a3c, // Random storage slot
             0x2000, // Match target (if zero)
             0x3000, // Fallback target (if non-zero)
+            2,      // jump target width (PUSH2)
         );
         let next_pc = 0x1000 + instructions.size();
 
@@ -587,7 +593,7 @@ mod tests {
         // Test with a small slot value (1-byte PUSH)
         let instructions = generate_storage_check_instructions(
             0x1000, 0x05, // Small slot
-            0x2000, 0x3000,
+            0x2000, 0x3000, 2,
         );
 
         // First instruction should be PUSH1 for small slot
@@ -600,7 +606,7 @@ mod tests {
         // Test with a larger slot value (2-byte PUSH)
         let instructions = generate_storage_check_instructions(
             0x1000, 0xabcd, // Larger slot requiring 2 bytes
-            0x2000, 0x3000,
+            0x2000, 0x3000, 2,
         );
 
         // First instruction should be PUSH2 for larger slot
@@ -610,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_storage_check_instruction_sequence() {
-        let instructions = generate_storage_check_instructions(0x1000, 0x100, 0x2000, 0x3000);
+        let instructions = generate_storage_check_instructions(0x1000, 0x100, 0x2000, 0x3000, 2);
 
         // Verify the sequence order
         let opcodes: Vec<_> = instructions.iter().map(|i| &i.op).collect();
