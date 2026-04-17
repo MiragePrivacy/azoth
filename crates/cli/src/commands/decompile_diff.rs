@@ -40,7 +40,7 @@ pub struct DecompileDiffArgs {
     #[arg(short = 'R', long = "runtime")]
     pub runtime_bytecode: String,
 
-    /// Comma-separated list of transforms (default: shuffle).
+    /// Comma-separated list of transforms (default: `DEFAULT_PASSES`).
     #[arg(long, default_value = DEFAULT_PASSES)]
     pub passes: String,
 
