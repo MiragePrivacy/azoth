@@ -279,7 +279,7 @@ impl Transform for ClusterShuffle {
         // `reindex_pcs` recomputes `runtime_bounds` block-by-block.
         // Without this anchoring, cluster 0 would land at PC 0, which
         // is below any contract's runtime_start, and `reindex_pcs`
-        // would mis-classify shuffled bodies as init — wiping
+        // would misclassify shuffled bodies as init — wiping
         // `runtime_bounds` post-reindex and forcing `patch_jump_immediates`
         // / `remap_orphan_jump_pushes` to reinterpret every
         // runtime-relative PUSH immediate as an absolute PC. That was
