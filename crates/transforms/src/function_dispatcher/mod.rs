@@ -15,6 +15,29 @@ use rand::rngs::StdRng;
 use std::collections::HashMap;
 use tracing::debug;
 
+/// True when `value` fits in a `PUSH<push_width>` immediate.
+///
+/// `push_width` counts bytes (so `PUSH2` passes 2) and may exceed the
+/// host's word size — on 64-bit `PUSH8` would shift by 64, and anything
+/// wider would overflow a `usize`. `checked_shl` returns `None` in that
+/// range; we treat it as "capacity ≥ usize::MAX", i.e. anything fits,
+/// which is the only semantically-meaningful answer when the width
+/// covers every representable value.
+pub(crate) fn push_width_holds(value: usize, push_width: u8) -> bool {
+    let bits = (push_width as u32).saturating_mul(8);
+    match 1usize.checked_shl(bits) {
+        Some(capacity) => value < capacity,
+        None => true,
+    }
+}
+
+/// Capacity of a `PUSH<push_width>` as a usize; saturates at `usize::MAX`
+/// for widths that cover the whole word. Used only for error messages.
+pub(crate) fn push_width_capacity(push_width: u8) -> usize {
+    let bits = (push_width as u32).saturating_mul(8);
+    1usize.checked_shl(bits).unwrap_or(usize::MAX)
+}
+
 #[derive(Default)]
 pub struct FunctionDispatcher {
     cached_dispatcher: Option<DispatcherInfo>,
@@ -174,6 +197,28 @@ impl FunctionDispatcher {
                 new_controller_pc
             };
 
+            // Tier PUSHes reuse the push_width from the original runtime
+            // bytecode (they're the source-level `PUSH<selector_target>;
+            // JUMPI` pattern). If a layout-shifting transform like
+            // `ClusterShuffle` moved the controller past this width's
+            // capacity, `format!("{:0w$x}", ...)` would silently emit a
+            // hex string whose length doesn't match push_width * 2,
+            // producing an OddLength encoder failure downstream or —
+            // worse — a plausible-looking but wrong immediate when the
+            // width/value happen to align. Fail loud instead.
+            if !push_width_holds(controller_rel, push_width) {
+                return Err(Error::Generic(format!(
+                    "reapply_dispatcher_patches: selector 0x{:08x} controller_rel 0x{:x} \
+                     overflows stored push_width {} (capacity 0x{:x}). Either the source \
+                     tier PUSH was narrower than the runtime allows or a transform moved \
+                     the controller beyond it — tier PUSH widening is not yet implemented.",
+                    selector,
+                    controller_rel,
+                    push_width,
+                    push_width_capacity(push_width),
+                )));
+            }
+
             let formatted = format!(
                 "{:0width$x}",
                 controller_rel,
@@ -230,6 +275,22 @@ impl FunctionDispatcher {
             } else {
                 new_target_pc
             };
+
+            // Controller PUSHes are pre-widened via `safe_runtime_push_width`
+            // at layout time, so this overflow shouldn't trigger for any
+            // EIP-170-compliant contract. Guard anyway so that a future
+            // change to that helper (e.g. narrowing it too aggressively)
+            // fails loud here instead of producing a malformed immediate.
+            if !push_width_holds(target_rel, push_width) {
+                return Err(Error::Generic(format!(
+                    "reapply_controller_patches: target_rel 0x{:x} overflows stored \
+                     push_width {} (capacity 0x{:x}) — `safe_runtime_push_width` is \
+                     not wide enough for this runtime.",
+                    target_rel,
+                    push_width,
+                    push_width_capacity(push_width),
+                )));
+            }
 
             let formatted = format!("{:0width$x}", target_rel, width = push_width as usize * 2);
 
@@ -479,5 +540,43 @@ impl Transform for FunctionDispatcher {
             debug!("Dispatcher mapping produced no changes");
             Ok(false)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{push_width_capacity, push_width_holds};
+
+    #[test]
+    fn push_width_holds_narrow() {
+        // PUSH1 accepts 0..=0xff
+        assert!(push_width_holds(0, 1));
+        assert!(push_width_holds(0xff, 1));
+        assert!(!push_width_holds(0x100, 1));
+        // PUSH2 accepts 0..=0xffff
+        assert!(push_width_holds(0xffff, 2));
+        assert!(!push_width_holds(0x1_0000, 2));
+    }
+
+    #[test]
+    fn push_width_holds_wide_does_not_panic() {
+        // PUSH8 shifts by 64 on a 64-bit target; the naive
+        // `1usize << 64` panics in debug mode. push_width_holds
+        // must gracefully treat this as "fits anything".
+        assert!(push_width_holds(usize::MAX, 8));
+        assert!(push_width_holds(usize::MAX, 32));
+    }
+
+    #[test]
+    fn push_width_capacity_narrow() {
+        assert_eq!(push_width_capacity(1), 0x100);
+        assert_eq!(push_width_capacity(2), 0x1_0000);
+        assert_eq!(push_width_capacity(4), 0x1_0000_0000);
+    }
+
+    #[test]
+    fn push_width_capacity_saturates_on_wide() {
+        assert_eq!(push_width_capacity(8), usize::MAX);
+        assert_eq!(push_width_capacity(32), usize::MAX);
     }
 }
