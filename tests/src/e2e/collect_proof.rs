@@ -17,6 +17,7 @@ use super::{
 use azoth_core::seed::Seed;
 use azoth_transform::arithmetic_chain::ArithmeticChain;
 use azoth_transform::cluster_shuffle::ClusterShuffle;
+use azoth_transform::constant_mask::ConstantMask;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use azoth_transform::push_split::PushSplit;
 use azoth_transform::slot_shuffle::SlotShuffle;
@@ -613,8 +614,18 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_arithmetic_chain_succeeds
     assert_collect_flow_success(label, outcome)
 }
 
-/// Regression probe for two PushSplit bugs that both made `collect()`
-/// halt with `InvalidJump` at the 30M gas limit:
+#[tokio::test]
+async fn test_collect_with_erc20_proof_dispatcher_plus_constant_mask_succeeds() -> Result<()> {
+    let label = "dispatcher_plus_constant_mask";
+    let (deployment_bytecode, bond_calldata, collect_selector) =
+        build_obfuscated_flow_inputs(label, vec![Box::new(ConstantMask::new())]).await?;
+    let outcome =
+        execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
+    assert_collect_flow_success(label, outcome)
+}
+
+/// Regression probe for PushSplit/finalization bugs that made `collect()`
+/// halt or revert after size-growing literal splits:
 ///
 /// 1. `push_split.rs` emitted the split chain as `PUSH p1; op; PUSH p2;
 ///    op; ...`, where the first `op` consumed whatever value the
@@ -637,6 +648,16 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_arithmetic_chain_succeeds
 ///    `PUSH2+` to avoid false positives on small literals that coincide
 ///    with early `JUMPDEST` PCs. This test caught it as a runtime JUMP
 ///    at PC `0x07be` consuming a stale PUSH2 from `0x07a6`.
+///
+/// 3. PushSplit emitted `SUB` directly even though EVM `SUB` computes
+///    top-minus-next. The chain accumulator stack is `[part, acc]`, so
+///    `SUB` must be emitted as `SWAP1; SUB` to compute `acc - part`.
+///
+/// 4. The obfuscator called `remap_orphan_jump_pushes` both before and
+///    after dispatcher reapply. The second pass treated already-remapped
+///    return addresses as old PCs and remapped them again, sending the
+///    RLP parser into the `InvalidRLP()` helper even though every split
+///    literal reconstructed correctly.
 #[tokio::test]
 async fn test_collect_with_erc20_proof_dispatcher_plus_push_split_succeeds() -> Result<()> {
     let label = "dispatcher_plus_push_split";
@@ -721,16 +742,8 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_cluster_shuffle_succeeds(
 #[tokio::test]
 async fn test_collect_with_erc20_proof_default_pipeline_succeeds() -> Result<()> {
     let label = "default_pipeline";
-    let (deployment_bytecode, bond_calldata, collect_selector) = build_obfuscated_flow_inputs(
-        label,
-        vec![
-            Box::new(ArithmeticChain::new()),
-            Box::new(PushSplit::new()),
-            Box::new(SlotShuffle::new()),
-            Box::new(StringObfuscate::new()),
-        ],
-    )
-    .await?;
+    let (deployment_bytecode, bond_calldata, collect_selector) =
+        build_obfuscated_flow_inputs(label, ObfuscationConfig::default().transforms).await?;
     let outcome =
         execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
     assert_collect_flow_success(label, outcome)

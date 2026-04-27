@@ -9,6 +9,7 @@ use hex::encode;
 use revm::primitives::{B256, Bytes};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
+use std::collections::{HashMap, HashSet};
 
 /// Represents a runtime section with its original offset and length.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +135,13 @@ struct PushInfo {
     value: usize,
 }
 
+#[derive(Clone, Debug)]
+struct InitJumpPatch {
+    push_pos: usize,
+    width: usize,
+    old_target: usize,
+}
+
 impl CleanReport {
     /// Updates init code CODECOPY and RETURN parameters to reflect new runtime length and offset.
     ///
@@ -158,14 +166,20 @@ impl CleanReport {
         );
 
         // Find Init section in removed
-        let new_runtime_offset = self
+        let original_runtime_offset = self
             .runtime_layout
             .iter()
             .map(|span| span.offset)
             .min()
             .ok_or("No runtime layout found")?;
+        let new_runtime_offset: usize = self
+            .removed
+            .iter()
+            .filter(|removed| removed.offset < original_runtime_offset)
+            .map(|removed| removed.data.len())
+            .sum();
 
-        let runtime_offset = new_runtime_offset;
+        let runtime_offset = original_runtime_offset;
         let post_runtime_len: usize = self
             .removed
             .iter()
@@ -412,6 +426,20 @@ impl CleanReport {
         &mut self,
         remap: &dyn Fn(usize) -> Option<usize>,
     ) -> Result<(), String> {
+        self.patch_init_immutable_refs_with_masks(remap, &HashMap::new())
+    }
+
+    /// Patch immutable reference offsets and optionally mask immutable values.
+    ///
+    /// `immutable_masks` maps the original runtime byte offset of an immutable
+    /// placeholder to a 32-byte XOR key. For those offsets, the init code is
+    /// rewritten to store `value XOR key` into the runtime placeholder, matching
+    /// runtime code that later computes `(value XOR key) XOR key`.
+    pub fn patch_init_immutable_refs_with_masks(
+        &mut self,
+        remap: &dyn Fn(usize) -> Option<usize>,
+        immutable_masks: &HashMap<usize, Vec<u8>>,
+    ) -> Result<(), String> {
         let runtime_start = self
             .runtime_layout
             .iter()
@@ -428,6 +456,7 @@ impl CleanReport {
 
         let mut init_bytes = init_section.data.to_vec();
         let mut patched = 0usize;
+        let mut mask_insertions: Vec<(usize, Vec<u8>)> = Vec::new();
         let mut idx = 0usize;
 
         while idx < init_bytes.len() {
@@ -458,12 +487,12 @@ impl CleanReport {
             };
 
             // Only remap values that look like runtime offsets followed by ADD
-            if is_add_target
-                && value >= 1
-                && value < runtime_end.saturating_sub(runtime_start)
-                && let Some(new_value) = remap(value)
-                && new_value != value
-            {
+            if is_add_target && value >= 1 && value < runtime_end.saturating_sub(runtime_start) {
+                let Some(new_value) = remap(value) else {
+                    idx += 1 + width;
+                    continue;
+                };
+                let value_changed = new_value != value;
                 // Check that new value fits in the same width
                 let max = if width >= std::mem::size_of::<usize>() {
                     usize::MAX
@@ -483,17 +512,58 @@ impl CleanReport {
                         let shift = (width - 1 - j) * 8;
                         init_bytes[idx + 1 + j] = ((new_value >> shift) & 0xff) as u8;
                     }
-                    tracing::debug!(
-                        "Patched immutable ref at init offset 0x{:x}: 0x{:x} -> 0x{:x}",
-                        idx,
-                        value,
-                        new_value
-                    );
-                    patched += 1;
+                    if value_changed {
+                        tracing::debug!(
+                            "Patched immutable ref at init offset 0x{:x}: 0x{:x} -> 0x{:x}",
+                            idx,
+                            value,
+                            new_value
+                        );
+                        patched += 1;
+                    }
+                }
+
+                if let Some(key) = immutable_masks.get(&value) {
+                    if key.len() == 32 {
+                        let mstore_pos = after + 1;
+                        if mstore_pos < init_bytes.len() && init_bytes[mstore_pos] == 0x52 {
+                            mask_insertions.push((mstore_pos, key.clone()));
+                        } else {
+                            tracing::warn!(
+                                "Immutable mask for runtime offset 0x{:x} did not match \
+                                 ADD; MSTORE pattern in init code",
+                                value
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Ignoring immutable mask for runtime offset 0x{:x}: expected \
+                             32-byte key, got {} bytes",
+                            value,
+                            key.len()
+                        );
+                    }
                 }
             }
 
             idx += 1 + width;
+        }
+
+        if !mask_insertions.is_empty() {
+            mask_insertions.sort_by_key(|(pos, _)| *pos);
+            mask_insertions.dedup_by_key(|(pos, _)| *pos);
+            let jump_patches = collect_init_jump_patches(&init_bytes);
+            for (pos, key) in mask_insertions.iter().rev() {
+                let mut patch = Vec::with_capacity(36);
+                patch.push(0x90); // SWAP1: bring immutable value above destination.
+                patch.push(0x7f); // PUSH32 key
+                patch.extend_from_slice(&key);
+                patch.push(0x18); // XOR: value ^ key
+                patch.push(0x90); // SWAP1: restore MSTORE argument order.
+                init_bytes.splice(*pos..*pos, patch);
+                patched += 1;
+            }
+            patch_shifted_init_jump_targets(&mut init_bytes, &jump_patches, &mask_insertions)?;
         }
 
         if patched > 0 {
@@ -547,6 +617,12 @@ impl CleanReport {
                 .map(|span| span.offset)
                 .min()
                 .unwrap_or(0);
+            let actual_runtime_start_offset: usize = self
+                .removed
+                .iter()
+                .filter(|removed| removed.offset < runtime_start_offset)
+                .map(|removed| removed.data.len())
+                .sum();
 
             tracing::debug!(
                 "Original runtime started at offset {}, preserving prefix structure",
@@ -596,15 +672,14 @@ impl CleanReport {
                 }
             }
 
-            // here, we take the final constructor prefix (prefix), looks for any PUSH immediates still holding
-            // the old runtime length or the old total bytecode length, and rewrites them to the new valuesright
-            // before the output is returned
-            let prefix_end = runtime_start_offset.min(out.len());
+            // Patch the final constructor prefix in case targeted init-code
+            // patching missed a size/offset PUSH after earlier insertions.
+            let prefix_end = actual_runtime_start_offset.min(out.len());
             let (prefix, _) = out.split_at_mut(prefix_end);
             let original_tail_len = self.clean_len + post_runtime_len;
             let new_tail_len = clean.len() + post_runtime_len;
             let original_total_len = runtime_start_offset + original_tail_len;
-            let new_total_len = runtime_start_offset + new_tail_len;
+            let new_total_len = actual_runtime_start_offset + new_tail_len;
 
             if original_tail_len != new_tail_len {
                 let replaced = patch_push_value(prefix, original_tail_len, new_tail_len, Some(1));
@@ -613,6 +688,22 @@ impl CleanReport {
                         "Failed to update CODECOPY length from 0x{:x} to 0x{:x} in final bytecode",
                         original_tail_len,
                         new_tail_len
+                    );
+                }
+            }
+
+            if actual_runtime_start_offset != runtime_start_offset {
+                let replaced = patch_push_value(
+                    prefix,
+                    runtime_start_offset,
+                    actual_runtime_start_offset,
+                    Some(1),
+                );
+                if replaced == 0 {
+                    tracing::warn!(
+                        "Failed to update CODECOPY offset from 0x{:x} to 0x{:x} in final bytecode",
+                        runtime_start_offset,
+                        actual_runtime_start_offset
                     );
                 }
             }
@@ -694,6 +785,97 @@ impl CleanReport {
             out
         }
     }
+}
+
+fn collect_init_jump_patches(bytes: &[u8]) -> Vec<InitJumpPatch> {
+    let mut jumpdests = HashSet::new();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let opcode = bytes[idx];
+        if opcode == 0x5b {
+            jumpdests.insert(idx);
+            idx += 1;
+        } else if (0x60..=0x7f).contains(&opcode) {
+            let width = (opcode - 0x5f) as usize;
+            idx += 1 + width;
+        } else {
+            idx += 1;
+        }
+    }
+
+    let mut patches = Vec::new();
+    idx = 0;
+    while idx < bytes.len() {
+        let opcode = bytes[idx];
+        if !(0x60..=0x7f).contains(&opcode) {
+            idx += 1;
+            continue;
+        }
+
+        let width = (opcode - 0x5f) as usize;
+        if idx + 1 + width > bytes.len() {
+            break;
+        }
+
+        let mut value = 0usize;
+        for &byte in &bytes[idx + 1..idx + 1 + width] {
+            value = (value << 8) | byte as usize;
+        }
+        if jumpdests.contains(&value) {
+            patches.push(InitJumpPatch {
+                push_pos: idx,
+                width,
+                old_target: value,
+            });
+        }
+
+        idx += 1 + width;
+    }
+
+    patches
+}
+
+fn patch_shifted_init_jump_targets(
+    bytes: &mut [u8],
+    jump_patches: &[InitJumpPatch],
+    insertions: &[(usize, Vec<u8>)],
+) -> Result<(), String> {
+    for patch in jump_patches {
+        let new_push_pos = pc_after_insertions(patch.push_pos, insertions);
+        let new_target = pc_after_insertions(patch.old_target, insertions);
+        if new_target == patch.old_target {
+            continue;
+        }
+        if new_push_pos + 1 + patch.width > bytes.len() {
+            return Err(format!(
+                "shifted init jump PUSH out of bounds at 0x{:x}",
+                new_push_pos
+            ));
+        }
+        if patch.width < std::mem::size_of::<usize>() {
+            let max = (1usize << (patch.width * 8)) - 1;
+            if new_target > max {
+                return Err(format!(
+                    "shifted init jump target 0x{:x} does not fit in PUSH{}",
+                    new_target, patch.width
+                ));
+            }
+        }
+        for j in 0..patch.width {
+            let shift = (patch.width - 1 - j) * 8;
+            bytes[new_push_pos + 1 + j] = ((new_target >> shift) & 0xff) as u8;
+        }
+    }
+
+    Ok(())
+}
+
+fn pc_after_insertions(pc: usize, insertions: &[(usize, Vec<u8>)]) -> usize {
+    pc + insertions
+        .iter()
+        .filter(|(pos, _)| *pos <= pc)
+        .map(|(_, key)| key.len() + 4)
+        .sum::<usize>()
 }
 
 fn patch_push_value(

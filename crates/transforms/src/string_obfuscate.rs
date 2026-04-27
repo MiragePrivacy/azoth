@@ -1,7 +1,8 @@
-//! Obfuscate Error(string) revert literals by rewriting string data PUSH immediates.
+//! Obfuscate revert payloads by sanitizing selectors and Error(string) data.
 //!
-//! This pass uses structural detection for ABI-encoded Error(string).
-//! It handles two selector patterns:
+//! This pass handles custom-error selectors and ABI-encoded Error(string)
+//! payloads. Error(string) handling uses structural detection for two selector
+//! patterns:
 //! 1. Direct: `PUSH4 0x08c379a0`
 //! 2. Computed: `PUSH3 0x461bcd ; PUSH1 0xe5 ; SHL` (Solidity optimization)
 //!
@@ -14,11 +15,12 @@ use azoth_core::cfg_ir::{Block, CfgIrBundle};
 use azoth_core::decoder::Instruction;
 use azoth_core::Opcode;
 use rand::rngs::StdRng;
-use rand::RngCore;
-use std::collections::HashMap;
+use rand::{Rng, RngCore};
+use std::collections::{HashMap, HashSet};
 use tracing::debug;
 
-/// Obfuscate Error(string) literals by scrambling the encoded string data.
+/// Obfuscate revert payloads by randomizing custom-error selectors and
+/// scrambling Error(string) literals.
 #[derive(Default)]
 pub struct StringObfuscate;
 
@@ -34,11 +36,13 @@ impl Transform for StringObfuscate {
     }
 
     fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
-        debug!("StringObfuscate: scanning for Error(string) literals");
+        debug!("StringObfuscate: scanning revert payloads");
+
+        let mut changed = randomize_custom_error_selectors(ir, rng)?;
+        let mut used_selectors = collect_push4_values(ir);
 
         let protected_pcs = collect_protected_pcs(ir);
         let nodes: Vec<_> = ir.cfg.node_indices().collect();
-        let mut changed = false;
 
         for node in nodes {
             let Some(Block::Body(body)) = ir.cfg.node_weight(node) else {
@@ -51,6 +55,15 @@ impl Transform for StringObfuscate {
             let data_push_indices = collect_error_string_data_pushes(&rewritten);
             if data_push_indices.is_empty() {
                 continue;
+            }
+
+            if randomize_error_string_selector(
+                &mut rewritten,
+                rng,
+                &mut used_selectors,
+                &protected_pcs,
+            ) {
+                block_changed = true;
             }
 
             for idx in data_push_indices {
@@ -84,12 +97,240 @@ impl Transform for StringObfuscate {
         }
 
         if changed {
-            debug!("StringObfuscate: obfuscated Error(string) literals");
+            debug!("StringObfuscate: obfuscated revert payloads");
         } else {
-            debug!("StringObfuscate: no eligible Error(string) literals found");
+            debug!("StringObfuscate: no eligible revert payloads found");
         }
         Ok(changed)
     }
+}
+
+/// Randomize custom-error selectors in revert construction blocks.
+///
+/// This is owned by StringObfuscate because custom errors and Error(string)
+/// payloads are both revert-data fingerprints.
+fn randomize_custom_error_selectors(ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
+    debug!("StringObfuscate: scanning custom-error selectors");
+
+    let protected_pcs = collect_protected_pcs(ir);
+    let mut used = collect_push4_values(ir);
+    let nodes: Vec<_> = ir.cfg.node_indices().collect();
+    let mut changed = false;
+
+    for node in nodes {
+        let Some(Block::Body(body)) = ir.cfg.node_weight(node) else {
+            continue;
+        };
+
+        let mut rewritten = body.instructions.clone();
+        let mut block_changed = false;
+
+        for idx in 0..rewritten.len() {
+            if protected_pcs.contains(&rewritten[idx].pc) {
+                continue;
+            }
+            let Some((selector, value_idx, shift_idx)) = shifted_selector_at(&rewritten, idx)
+            else {
+                continue;
+            };
+            if protected_pcs.contains(&rewritten[shift_idx].pc) {
+                continue;
+            }
+            if is_solidity_builtin_error_selector(selector) {
+                continue;
+            }
+            if !has_nearby_mstore_then_revert(&rewritten, idx + 3) {
+                continue;
+            }
+
+            used.insert(selector);
+            let replacement = next_selector(rng, &mut used);
+            debug!(
+                "StringObfuscate: custom error selector pc=0x{:x} 0x{:08x} -> 0x{:08x}",
+                rewritten[value_idx].pc, selector, replacement
+            );
+            rewritten[value_idx].op = Opcode::PUSH(4);
+            rewritten[value_idx].imm = Some(format!("{replacement:08x}"));
+            rewritten[shift_idx].imm = Some("e0".to_string());
+            block_changed = true;
+        }
+
+        if block_changed {
+            let mut new_body = body.clone();
+            new_body.instructions = rewritten;
+            ir.overwrite_block(node, new_body)
+                .map_err(|e| Error::CoreError(e.to_string()))?;
+            changed = true;
+        }
+    }
+
+    Ok(changed)
+}
+
+fn collect_push4_values(ir: &CfgIrBundle) -> HashSet<u32> {
+    let mut values = HashSet::new();
+    for node in ir.cfg.node_indices() {
+        let Some(Block::Body(body)) = ir.cfg.node_weight(node) else {
+            continue;
+        };
+        for instr in &body.instructions {
+            if matches!(instr.op, Opcode::PUSH(4)) {
+                if let Some(value) = parse_u32(instr.imm.as_deref()) {
+                    values.insert(value);
+                }
+            }
+        }
+    }
+    values
+}
+
+fn randomize_error_string_selector(
+    instructions: &mut [Instruction],
+    rng: &mut StdRng,
+    used: &mut HashSet<u32>,
+    protected_pcs: &HashSet<usize>,
+) -> bool {
+    let mut changed = false;
+
+    for idx in 0..instructions.len() {
+        if protected_pcs.contains(&instructions[idx].pc) {
+            continue;
+        }
+
+        if matches!(instructions[idx].op, Opcode::PUSH(4)) {
+            if let Some((_, bytes)) = parse_push_immediate(&instructions[idx]) {
+                if is_error_selector(&bytes) {
+                    let replacement = next_selector(rng, used);
+                    instructions[idx].imm = Some(format!("{replacement:08x}"));
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+
+        if matches!(instructions[idx].op, Opcode::SHL) && idx >= 2 {
+            let shift_idx = idx - 1;
+            let value_idx = idx - 2;
+            if protected_pcs.contains(&instructions[value_idx].pc) {
+                continue;
+            }
+
+            let shift_ok = matches!(
+                parse_push_immediate(&instructions[shift_idx]),
+                Some((_, bytes)) if parse_usize_be(&bytes) == Some(0xe5)
+            );
+            let value_ok = matches!(
+                parse_push_immediate(&instructions[value_idx]),
+                Some((_, bytes)) if bytes == [0x46, 0x1b, 0xcd] ||
+                    (bytes.len() > 3 && bytes.ends_with(&[0x46, 0x1b, 0xcd]) &&
+                     bytes[..bytes.len()-3].iter().all(|&b| b == 0))
+            );
+            if !shift_ok || !value_ok {
+                continue;
+            }
+
+            let (replacement_push3, selector) = next_shifted_selector3(rng, used);
+            instructions[value_idx].imm = Some(format!("{replacement_push3:06x}"));
+            used.insert(selector);
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+fn next_selector(rng: &mut StdRng, used: &mut HashSet<u32>) -> u32 {
+    loop {
+        let value = rng.random::<u32>();
+        if value == 0 || is_solidity_builtin_error_selector(value) || used.contains(&value) {
+            continue;
+        }
+        used.insert(value);
+        return value;
+    }
+}
+
+fn next_shifted_selector3(rng: &mut StdRng, used: &HashSet<u32>) -> (u32, u32) {
+    loop {
+        let value = rng.next_u32() & 0x00ff_ffff;
+        let selector = value << 5;
+        if value == 0 || is_solidity_builtin_error_selector(selector) || used.contains(&selector) {
+            continue;
+        }
+        return (value, selector);
+    }
+}
+
+fn parse_u32(imm: Option<&str>) -> Option<u32> {
+    let imm = imm?;
+    if imm.len() != 8 {
+        return None;
+    }
+    u32::from_str_radix(imm, 16).ok()
+}
+
+fn is_solidity_builtin_error_selector(selector: u32) -> bool {
+    matches!(selector, 0x08c3_79a0 | 0x4e48_7b71)
+}
+
+fn shifted_selector_at(instructions: &[Instruction], idx: usize) -> Option<(u32, usize, usize)> {
+    let value = instructions.get(idx)?;
+    let Some(shift) = instructions.get(idx + 1) else {
+        return None;
+    };
+    let Some(shl) = instructions.get(idx + 2) else {
+        return None;
+    };
+    if !matches!(value.op, Opcode::PUSH(1..=4))
+        || !matches!(shift.op, Opcode::PUSH(1))
+        || shl.op != Opcode::SHL
+    {
+        return None;
+    }
+
+    let (_, value_bytes) = parse_push_immediate(value)?;
+    let (_, shift_bytes) = parse_push_immediate(shift)?;
+    let value = parse_usize_be(&value_bytes)?;
+    let shift = parse_usize_be(&shift_bytes)?;
+    let selector = recover_left_aligned_selector(value, shift)?;
+    Some((selector, idx, idx + 1))
+}
+
+fn recover_left_aligned_selector(value: usize, shift: usize) -> Option<u32> {
+    if shift < 224 {
+        return None;
+    }
+    let extra_shift = shift - 224;
+    if extra_shift >= 32 {
+        return None;
+    }
+    let selector = (value as u64).checked_shl(extra_shift as u32)?;
+    if selector == 0 || selector > u32::MAX as u64 {
+        return None;
+    }
+    Some(selector as u32)
+}
+
+fn has_nearby_mstore_then_revert(instructions: &[Instruction], start: usize) -> bool {
+    let end = (start + 16).min(instructions.len());
+    let mut saw_mstore = false;
+
+    for instr in &instructions[start..end] {
+        match instr.op {
+            Opcode::MSTORE => saw_mstore = true,
+            Opcode::REVERT => return saw_mstore,
+            Opcode::JUMP
+            | Opcode::JUMPI
+            | Opcode::STOP
+            | Opcode::RETURN
+            | Opcode::CALL
+            | Opcode::DELEGATECALL
+            | Opcode::STATICCALL => return false,
+            _ => {}
+        }
+    }
+
+    false
 }
 
 fn collect_error_string_data_pushes(instructions: &[Instruction]) -> Vec<usize> {
@@ -415,6 +656,12 @@ fn is_error_selector(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use azoth_core::cfg_ir::Block;
+    use azoth_core::process_bytecode_to_cfg;
+    use azoth_core::seed::Seed;
+    use std::collections::HashSet;
+
+    const FIXED_SEED: &str = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn instr(pc: usize, op: Opcode, imm: Option<&str>) -> Instruction {
         Instruction {
@@ -542,5 +789,86 @@ mod tests {
 
         let indices = collect_error_string_data_pushes(&instructions);
         assert_eq!(indices, vec![9, 12]); // both chunk indices
+    }
+
+    #[test]
+    fn randomizes_direct_error_string_selector() {
+        let mut instructions = vec![
+            instr(0, Opcode::PUSH(4), Some("08c379a0")),
+            instr(5, Opcode::PUSH(1), Some("00")),
+            instr(7, Opcode::MSTORE, None),
+        ];
+        let seed = Seed::from_hex(FIXED_SEED).unwrap();
+        let mut rng = seed.create_deterministic_rng();
+        let mut used = HashSet::new();
+        let protected = HashSet::new();
+
+        let changed =
+            randomize_error_string_selector(&mut instructions, &mut rng, &mut used, &protected);
+
+        assert!(changed);
+        assert_ne!(instructions[0].imm.as_deref(), Some("08c379a0"));
+        assert_ne!(instructions[0].imm.as_deref(), Some("4e487b71"));
+    }
+
+    #[tokio::test]
+    async fn string_obfuscate_randomizes_custom_error_selector() {
+        let bytecode = "0x63d5ef09ba60e01b5f5260045ffd";
+        let (mut ir, _, _, _) = process_bytecode_to_cfg(bytecode, false, bytecode, false)
+            .await
+            .unwrap();
+        let seed = Seed::from_hex(FIXED_SEED).unwrap();
+        let mut rng = seed.create_deterministic_rng();
+
+        let changed = StringObfuscate::new().apply(&mut ir, &mut rng).unwrap();
+        assert!(changed);
+
+        let mut selectors = Vec::new();
+        for node in ir.cfg.node_indices() {
+            if let Block::Body(body) = &ir.cfg[node] {
+                for instr in &body.instructions {
+                    if matches!(instr.op, Opcode::PUSH(4)) {
+                        selectors.push(instr.imm.clone().unwrap());
+                    }
+                }
+            }
+        }
+
+        assert_eq!(selectors.len(), 1);
+        assert_ne!(selectors[0], "d5ef09ba");
+    }
+
+    #[tokio::test]
+    async fn string_obfuscate_randomizes_optimized_custom_error_selector() {
+        // Solidity can compress a left-aligned selector when the low selector
+        // bit is zero: 0x022e2581 << 0xe1 reconstructs 0x045c4b02.
+        let bytecode = "0x63022e258160e11b5f5260045ffd";
+        let (mut ir, _, _, _) = process_bytecode_to_cfg(bytecode, false, bytecode, false)
+            .await
+            .unwrap();
+        let seed = Seed::from_hex(FIXED_SEED).unwrap();
+        let mut rng = seed.create_deterministic_rng();
+
+        let changed = StringObfuscate::new().apply(&mut ir, &mut rng).unwrap();
+        assert!(changed);
+
+        let mut selector = None;
+        let mut shift = None;
+        for node in ir.cfg.node_indices() {
+            if let Block::Body(body) = &ir.cfg[node] {
+                for instr in &body.instructions {
+                    if matches!(instr.op, Opcode::PUSH(4)) {
+                        selector = instr.imm.clone();
+                    }
+                    if matches!(instr.op, Opcode::PUSH(1)) && shift.is_none() {
+                        shift = instr.imm.clone();
+                    }
+                }
+            }
+        }
+
+        assert_ne!(selector.as_deref(), Some("045c4b02"));
+        assert_ne!(selector.as_deref(), Some("022e2581"));
+        assert_eq!(shift.as_deref(), Some("e0"));
     }
 }

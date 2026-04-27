@@ -14,7 +14,7 @@ use revm::bytecode::Bytecode;
 use revm::context::result::{ExecutionResult, Output};
 use revm::context::TxEnv;
 use revm::database::InMemoryDB;
-use revm::primitives::{Address, Bytes, FixedBytes, U256};
+use revm::primitives::{Address, Bytes, FixedBytes, TxKind, U256};
 use revm::state::AccountInfo;
 use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
 use std::collections::HashMap;
@@ -37,6 +37,35 @@ pub fn mock_token_bytecode() -> Bytes {
         0x60, 0x01, 0x60, 0x00, 0x52, // PUSH1 1, PUSH1 0, MSTORE
         0x60, 0x20, 0x60, 0x00, 0xf3, // PUSH1 32, PUSH1 0, RETURN
     ])
+}
+
+#[allow(dead_code)]
+pub fn init_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .without_time()
+        .try_init();
+}
+
+#[allow(dead_code)]
+pub fn funded_account_info(nonce: u64) -> AccountInfo {
+    AccountInfo {
+        balance: U256::from(1_000_000_000_000_000_000u128),
+        nonce,
+        code_hash: revm::primitives::KECCAK_EMPTY,
+        code: None,
+    }
+}
+
+#[allow(dead_code)]
+pub fn code_account_info(code: Bytes, nonce: u64) -> AccountInfo {
+    AccountInfo {
+        balance: U256::ZERO,
+        nonce,
+        code_hash: revm::primitives::KECCAK_EMPTY,
+        code: Some(Bytecode::new_raw(code)),
+    }
 }
 
 #[allow(dead_code)]
@@ -115,64 +144,133 @@ pub struct DeploymentOutcome {
 }
 
 #[allow(dead_code)]
+pub fn create_tx(caller: Address, data: Bytes, gas_limit: u64, nonce: u64) -> TxEnv {
+    TxEnv {
+        caller,
+        gas_limit,
+        kind: TxKind::Create,
+        data,
+        value: U256::ZERO,
+        nonce,
+        ..Default::default()
+    }
+}
+
+#[allow(dead_code)]
+pub fn call_tx(
+    caller: Address,
+    contract: Address,
+    data: Bytes,
+    gas_limit: u64,
+    nonce: u64,
+) -> TxEnv {
+    TxEnv {
+        caller,
+        gas_limit,
+        kind: TxKind::Call(contract),
+        data,
+        value: U256::ZERO,
+        nonce,
+        ..Default::default()
+    }
+}
+
+#[allow(dead_code)]
+pub fn parse_create_result(result: ExecutionResult, label: &str) -> Result<DeploymentOutcome> {
+    match result {
+        ExecutionResult::Success {
+            output, gas_used, ..
+        } => match output {
+            Output::Create(runtime, Some(address)) => Ok(DeploymentOutcome {
+                address,
+                runtime,
+                gas_used,
+            }),
+            Output::Create(_, None) => Err(eyre!("{label} succeeded without address")),
+            _ => Err(eyre!("{label} returned unexpected create output")),
+        },
+        ExecutionResult::Revert { output, .. } => {
+            Err(eyre!("{label} reverted: 0x{}", hex::encode(output)))
+        }
+        ExecutionResult::Halt { reason, .. } => Err(eyre!("{label} halted: {:?}", reason)),
+    }
+}
+
+#[allow(dead_code)]
+pub fn parse_call_output(result: ExecutionResult, label: &str) -> Result<Bytes> {
+    match result {
+        ExecutionResult::Success {
+            output: Output::Call(data),
+            ..
+        } => Ok(data),
+        ExecutionResult::Success { .. } => Err(eyre!("{label} returned unexpected call output")),
+        ExecutionResult::Revert { output, .. } => {
+            Err(eyre!("{label} reverted: 0x{}", hex::encode(output)))
+        }
+        ExecutionResult::Halt { reason, .. } => Err(eyre!("{label} halted: {:?}", reason)),
+    }
+}
+
+#[allow(dead_code)]
+pub fn expect_success(result: ExecutionResult, label: &str) -> Result<u64> {
+    match result {
+        ExecutionResult::Success { gas_used, .. } => Ok(gas_used),
+        ExecutionResult::Revert { output, .. } => {
+            Err(eyre!("{label} reverted: 0x{}", hex::encode(output)))
+        }
+        ExecutionResult::Halt { reason, .. } => Err(eyre!("{label} halted: {:?}", reason)),
+    }
+}
+
+#[allow(dead_code)]
+pub fn parse_u256_word(data: &[u8]) -> U256 {
+    if data.len() >= 32 {
+        U256::from_be_slice(&data[..32])
+    } else {
+        U256::ZERO
+    }
+}
+
+#[allow(dead_code)]
+pub fn parse_bool_word(data: &[u8]) -> bool {
+    data.len() >= 32 && data[31] != 0
+}
+
+#[allow(dead_code)]
+pub fn selector_token_word(mapping: &HashMap<u32, Vec<u8>>, selector: u32) -> Result<Bytes> {
+    let token = mapping
+        .get(&selector)
+        .ok_or_else(|| eyre!("missing token mapping for selector 0x{selector:08x}"))?;
+
+    if token.is_empty() || token.len() > 32 {
+        return Err(eyre!(
+            "invalid token length {} for selector 0x{selector:08x}",
+            token.len()
+        ));
+    }
+
+    let mut word = vec![0u8; 32];
+    word[..token.len()].copy_from_slice(token);
+    Ok(Bytes::from(word))
+}
+
+#[allow(dead_code)]
 pub fn deploy_contract(bytecode_hex: &str) -> Result<DeploymentOutcome> {
     let bytecode_bytes = prepare_bytecode(bytecode_hex)?;
 
     let mut db = InMemoryDB::default();
-    db.insert_account_info(
-        MOCK_TOKEN_ADDR,
-        AccountInfo {
-            balance: U256::ZERO,
-            nonce: 1,
-            code_hash: revm::primitives::KECCAK_EMPTY,
-            code: Some(Bytecode::new_raw(mock_token_bytecode())),
-        },
-    );
+    db.insert_account_info(MOCK_TOKEN_ADDR, code_account_info(mock_token_bytecode(), 1));
 
     let deployer = Address::from([0x42u8; 20]);
-    db.insert_account_info(
-        deployer,
-        AccountInfo {
-            balance: U256::from(1_000_000_000_000_000_000u128),
-            nonce: 0,
-            code_hash: revm::primitives::KECCAK_EMPTY,
-            code: None,
-        },
-    );
+    db.insert_account_info(deployer, funded_account_info(0));
 
     let mut evm = Context::mainnet().with_db(db).build_mainnet();
 
-    let tx_env = TxEnv {
-        caller: deployer,
-        gas_limit: 30_000_000,
-        kind: revm::primitives::TxKind::Create,
-        data: bytecode_bytes,
-        value: U256::ZERO,
-        nonce: 0,
-        ..Default::default()
-    };
-
     let result = evm
-        .transact(tx_env)
+        .transact(create_tx(deployer, bytecode_bytes, 30_000_000, 0))
         .map_err(|e| eyre!("deployment execution failed: {:?}", e))?;
 
-    match result.result {
-        ExecutionResult::Success {
-            output, gas_used, ..
-        } => match output {
-            Output::Create(bytes, Some(address)) => Ok(DeploymentOutcome {
-                address,
-                runtime: bytes,
-                gas_used,
-            }),
-            Output::Create(_, None) => Err(eyre!("deployment succeeded without address")),
-            _ => Err(eyre!("unexpected create output variant")),
-        },
-        ExecutionResult::Revert { output, .. } => {
-            Err(eyre!("deployment reverted: 0x{}", hex::encode(output)))
-        }
-        ExecutionResult::Halt { reason, .. } => Err(eyre!("deployment halted: {:?}", reason)),
-    }
+    parse_create_result(result.result, "deployment")
 }
 
 #[allow(dead_code)]
@@ -403,6 +501,9 @@ mod escrow;
 
 #[cfg(test)]
 mod collect_proof;
+
+#[cfg(test)]
+mod constant_audit;
 
 #[cfg(test)]
 mod test_original;

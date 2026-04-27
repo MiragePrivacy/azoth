@@ -1,5 +1,6 @@
 use crate::arithmetic_chain::ArithmeticChain;
 use crate::cluster_shuffle::ClusterShuffle;
+use crate::constant_mask::ConstantMask;
 use crate::function_dispatcher::FunctionDispatcher;
 use crate::push_split::PushSplit;
 use crate::slot_shuffle::SlotShuffle;
@@ -66,10 +67,11 @@ impl Default for ObfuscationConfig {
         Self {
             seed: Seed::generate(),
             transforms: vec![
+                Box::new(StringObfuscate::new()),
+                Box::new(ConstantMask::new()),
                 Box::new(ArithmeticChain::new()),
                 Box::new(PushSplit::new()),
                 Box::new(SlotShuffle::new()),
-                Box::new(StringObfuscate::new()),
                 Box::new(ClusterShuffle::new()),
             ],
             preserve_unknown_opcodes: true,
@@ -368,12 +370,6 @@ pub async fn obfuscate_bytecode(
         .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
     tracing::debug!("  Patched jump immediates after PC reindexing");
 
-    // Remap orphan jump-address PUSHes (e.g. return addresses for internal function calls)
-    // that are not part of any recognized jump pattern.
-    cfg_ir
-        .remap_orphan_jump_pushes(&pc_mapping, old_runtime_bounds)
-        .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
-
     // Re-apply dispatcher jump target patches with OLD controller PCs (before updating)
     // NOTE: These patches update the PUSH2 instructions (jump targets), not the PUSH4 token instructions
     if let (Some(controller_pcs), Some(dispatcher_patches)) = (
@@ -606,11 +602,18 @@ pub async fn obfuscate_bytecode(
         tracing::debug!("  Controller patches re-applied successfully");
     }
 
-    // After all Step 5 dispatcher reapplies may have grown some PUSH widths
-    // post-reindex, recompute the actual runtime length and shift AC-emitted
-    // CODECOPY offsets so the data section still lines up. This is a no-op
-    // when ArithmeticChain didn't run or when the estimate already matches
-    // the real runtime length.
+    // Remap stack-carried return-address PUSHes exactly once, after every
+    // dispatcher patch has been re-applied. Running this before and after the
+    // dispatcher phase double-remaps values that already point at new PCs,
+    // which can redirect Solidity internal-call returns into the wrong helper.
+    cfg_ir
+        .remap_orphan_jump_pushes(&pc_mapping, old_runtime_bounds)
+        .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
+
+    // Dispatcher reapplies can grow some PUSH widths post-reindex. Recompute
+    // the actual runtime length and shift AC-emitted CODECOPY offsets so the
+    // data section still lines up. This is a no-op when ArithmeticChain didn't
+    // run or when the estimate already matches the real runtime length.
     cfg_ir
         .patch_arithmetic_chain_codecopy_offsets()
         .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
@@ -695,7 +698,11 @@ pub async fn obfuscate_bytecode(
             }
         };
 
-        if let Err(e) = cfg_ir.clean_report.patch_init_immutable_refs(&remap) {
+        let immutable_masks = cfg_ir.immutable_masks.clone();
+        if let Err(e) = cfg_ir
+            .clean_report
+            .patch_init_immutable_refs_with_masks(&remap, &immutable_masks)
+        {
             tracing::warn!("Failed to patch init immutable refs: {}", e);
         }
     }

@@ -54,6 +54,7 @@ impl Transform for PushSplit {
 
         let _ = runtime_bounds;
         let nodes: Vec<_> = ir.cfg.node_indices().collect();
+        let mut next_synthetic_pc = next_available_pc(ir);
         for node in nodes {
             if protected_nodes.contains(&node) {
                 continue;
@@ -176,10 +177,9 @@ impl Transform for PushSplit {
                             );
 
                             // Seed the stack with the identity element for the chain's
-                            // combine op (0 is identity for both ADD and XOR, and for
-                            // SUB the first chain entry is always ADD by construction
-                            // — see `generate_chain` where `can_sub = acc > 0` and
-                            // `acc` starts at 0). Without this, the first op would
+                            // combine op (0 is identity for ADD/XOR; SUB entries are
+                            // emitted as `SWAP1; SUB` so the reduction computes
+                            // accumulated - part). Without this, the first op would
                             // combine the chain's first PUSH with whatever value the
                             // preceding code left on the stack, giving
                             // `(prev_top) ⊕ p1 ⊕ … ⊕ p_n` instead of `p1 ⊕ … ⊕ p_n`.
@@ -188,12 +188,10 @@ impl Transform for PushSplit {
                                 op: Opcode::PUSH0,
                                 imm: None,
                             });
-                            let mut pc = base_pc + 1;
-
                             let chain_len = chain.len() * 2 + 1;
                             let rewritten_start = rewritten.len() - 1;
                             for (part, op) in chain {
-                                pc = emit_part(part, op, pc, &mut rewritten);
+                                emit_part(part, op, &mut next_synthetic_pc, &mut rewritten);
                             }
                             let after_window =
                                 format_window(&rewritten, rewritten_start, chain_len.min(6));
@@ -204,7 +202,7 @@ impl Transform for PushSplit {
                                 );
                             }
 
-                            new_max_stack = new_max_stack.max(2);
+                            new_max_stack = new_max_stack.max(original_max_stack.saturating_add(1));
                             changed = true;
                             continue;
                         }
@@ -378,25 +376,63 @@ fn format_window(instructions: &[Instruction], center_idx: usize, count: usize) 
     out
 }
 
-fn emit_part(part: u128, op: CombineOp, pc: usize, out: &mut Vec<Instruction>) -> usize {
+fn emit_part(part: u128, op: CombineOp, next_synthetic_pc: &mut usize, out: &mut Vec<Instruction>) {
+    let mut fresh_pc = || {
+        let pc = *next_synthetic_pc;
+        *next_synthetic_pc = next_synthetic_pc.saturating_add(1);
+        pc
+    };
     let width = minimal_push_width(part);
+    let push_pc = fresh_pc();
     out.push(Instruction {
-        pc,
+        pc: push_pc,
         op: Opcode::PUSH(width),
         imm: Some(format_hex(part, width)),
     });
-    let pc_after_push = pc + 1 + width as usize;
-    let opcode = match op {
-        CombineOp::Add => Opcode::ADD,
-        CombineOp::Sub => Opcode::SUB,
-        CombineOp::Xor => Opcode::XOR,
-    };
-    out.push(Instruction {
-        pc: pc_after_push,
-        op: opcode,
-        imm: None,
-    });
-    pc_after_push + 1
+    match op {
+        CombineOp::Add | CombineOp::Xor => {
+            let opcode = match op {
+                CombineOp::Add => Opcode::ADD,
+                CombineOp::Xor => Opcode::XOR,
+                CombineOp::Sub => unreachable!(),
+            };
+            out.push(Instruction {
+                pc: fresh_pc(),
+                op: opcode,
+                imm: None,
+            });
+        }
+        CombineOp::Sub => {
+            // EVM SUB computes top - next. The reduction stack is
+            // [part, acc], so swap first to compute acc - part.
+            out.push(Instruction {
+                pc: fresh_pc(),
+                op: Opcode::SWAP(1),
+                imm: None,
+            });
+            out.push(Instruction {
+                pc: fresh_pc(),
+                op: Opcode::SUB,
+                imm: None,
+            });
+        }
+    }
+}
+
+fn next_available_pc(ir: &CfgIrBundle) -> usize {
+    ir.cfg
+        .node_indices()
+        .filter_map(|node| match ir.cfg.node_weight(node) {
+            Some(Block::Body(body)) => body
+                .instructions
+                .iter()
+                .map(|instr| instr.pc.saturating_add(instr.byte_size()))
+                .max(),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1_000_000)
 }
 
 #[cfg(test)]
@@ -487,5 +523,22 @@ mod tests {
                 assert_eq!(acc, value, "width={width} value=0x{value:x}");
             }
         }
+    }
+
+    #[test]
+    fn sub_part_emits_swap_before_sub() {
+        let mut instructions = Vec::new();
+        let mut next_synthetic_pc = 0x20;
+        emit_part(
+            0x12,
+            CombineOp::Sub,
+            &mut next_synthetic_pc,
+            &mut instructions,
+        );
+
+        assert_eq!(next_synthetic_pc, 0x23);
+        assert!(matches!(instructions[0].op, Opcode::PUSH(1)));
+        assert!(matches!(instructions[1].op, Opcode::SWAP(1)));
+        assert_eq!(instructions[2].op, Opcode::SUB);
     }
 }

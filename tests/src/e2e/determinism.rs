@@ -5,6 +5,7 @@ use azoth_core::process_bytecode_to_cfg;
 use azoth_core::seed::Seed;
 use azoth_transform::arithmetic_chain::ArithmeticChain;
 use azoth_transform::cluster_shuffle::ClusterShuffle;
+use azoth_transform::constant_mask::ConstantMask;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use azoth_transform::push_split::PushSplit;
 use azoth_transform::slot_shuffle::SlotShuffle;
@@ -184,6 +185,24 @@ async fn string_obfuscate_is_deterministic_for_same_seed() {
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         "StringObfuscate",
         || Box::new(StringObfuscate::new()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn constant_mask_is_deterministic_for_same_seed() {
+    assert_transform_deterministic_for_bytecode(
+        "escrow runtime",
+        ESCROW_CONTRACT_RUNTIME_BYTECODE,
+        "ConstantMask",
+        || Box::new(ConstantMask::new()),
+    )
+    .await;
+    assert_transform_deterministic_for_bytecode(
+        "escrow deployment",
+        ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+        "ConstantMask",
+        || Box::new(ConstantMask::new()),
     )
     .await;
 }

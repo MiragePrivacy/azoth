@@ -13,6 +13,50 @@ The transforms crate implements a pass-based architecture where each transformat
 
 ## Current Transforms
 
+### String Obfuscate (`string_obfuscate.rs`)
+
+Owns revert-data sanitization. It randomizes custom-error selectors, rewrites
+`Error(string)` selectors to seed-derived values, and scrambles ABI-encoded
+string chunks before the broader literal masking pass runs. This removes
+human-readable revert strings and public selector-database labels while
+preserving revert behavior.
+
+### Constant Mask (`constant_mask.rs`)
+
+Masks constructor/init-code `PUSH4..PUSH32` literals and eligible runtime constants by reconstructing them from seed-varied shares at runtime, so bytecode does not expose plain custom-error selectors, ERC-20 selectors, event topics, timeout literals, or immutable addresses. Init-code `PUSH1..PUSH3` literals are deliberately skipped because solc constructors frequently use them for jump targets, return PCs, and ABI offsets:
+
+```assembly
+PUSH4 0x23b872dd
+```
+
+becomes:
+
+```assembly
+PUSH4 share_0
+<dynamic-zero identity>
+PUSH4 share_1
+XOR
+...
+PUSH4 share_N
+XOR
+```
+
+The runtime reconstruction emits 3-5 XOR shares per site and injects
+dynamic-zero identity noise through ADD, XOR, OR, SHL, SHR, and opaque-zero
+templates. This keeps a simple straight-line constant folder from recovering
+the original value while avoiding one fixed `masked ^ key` fingerprint.
+Runtime immutable placeholders keep the older XOR-key shape because constructor
+patching must write `value ^ key` into the first immediate.
+
+External-call selector writes are lowered to a decoy selector word followed by
+seed-ordered `MSTORE8` patches whose bytes are also reconstructed instead of
+emitted as raw `PUSH1` values. This covers the canonical
+`PUSH4 selector; PUSH1 e0; SHL; DUP2; MSTORE` shape plus optimized shifted
+selector forms such as `PUSH3 value; PUSH1 e5; SHL`. Jump-target literals are
+skipped using stack-flow checks so stack-carried return addresses remain
+available for final PC remapping. `ConstantMask::with_min_width(...)` can still
+tune the runtime minimum PUSH width.
+
 ### Shuffle (`shuffle.rs`)
 
 Reorders basic blocks within the CFG while updating jump targets to maintain correctness. Simple block-level randomization that changes program layout without affecting execution.

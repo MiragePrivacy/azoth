@@ -1,11 +1,5 @@
 use azoth_core::seed::Seed;
-use azoth_transform::{
-    Transform,
-    jump_address_transformer::JumpAddressTransformer,
-    obfuscator::{ObfuscationConfig, obfuscate_bytecode},
-    opaque_predicate::OpaquePredicate,
-    shuffle::Shuffle,
-};
+use azoth_transform::obfuscator::{ObfuscationConfig, obfuscate_bytecode};
 use chrono::{DateTime, Utc};
 use hex::FromHexError;
 use serde::Serialize;
@@ -15,13 +9,6 @@ use std::{
     path::{Path, PathBuf},
 };
 use thiserror::Error as ThisError;
-
-/// Default passes applied to each obfuscation run.
-///
-/// Leaving this empty means the analysis reuses the obfuscator's native defaults
-/// (dispatcher when detected plus any user-specified transforms) instead of
-/// forcing deprecated transforms such as Shuffle.
-pub const DEFAULT_PASSES: &str = "";
 
 /// Configuration for running an obfuscation analysis experiment.
 #[derive(Debug, Clone)]
@@ -341,8 +328,6 @@ pub enum AnalysisError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("invalid transform pass: {0}")]
-    InvalidPass(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("format error: {0}")]
@@ -357,7 +342,6 @@ pub async fn analyze_obfuscation(
         return Err(AnalysisError::EmptyIterations);
     }
 
-    let passes = parse_passes(DEFAULT_PASSES)?;
     let original_bytes = hex_to_bytes(config.original_bytecode)?;
     let mut sequence_lengths = Vec::with_capacity(config.iterations);
     let mut sequence_counter: HashMap<Vec<u8>, usize> = HashMap::new();
@@ -374,7 +358,7 @@ pub async fn analyze_obfuscation(
             let seed_hex = seed.to_hex();
             let mut obfuscation_config = ObfuscationConfig::with_seed(seed.clone());
             obfuscation_config.preserve_unknown_opcodes = true;
-            obfuscation_config.transforms = passes.iter().map(|p| p.build()).collect();
+            obfuscation_config.transforms = ObfuscationConfig::default().transforms;
 
             match obfuscate_bytecode(
                 config.original_bytecode,
@@ -673,43 +657,6 @@ fn truncate_hex(input: &str, max_len: usize) -> String {
         format!("{}...", &input[..max_len - 3])
     } else {
         input[..max_len].to_string()
-    }
-}
-
-fn parse_passes(passes: &str) -> Result<Vec<TransformSpec>, AnalysisError> {
-    let mut specs = Vec::new();
-    if passes.trim().is_empty() {
-        return Ok(specs);
-    }
-    for raw in passes.split(',') {
-        let name = raw.trim();
-        if name.is_empty() {
-            continue;
-        }
-        let spec = match name {
-            "shuffle" => TransformSpec::Shuffle,
-            "opaque_pred" | "opaque_predicate" => TransformSpec::OpaquePredicate,
-            "jump_transform" | "jump_addr" => TransformSpec::JumpTransform,
-            other => return Err(AnalysisError::InvalidPass(other.to_string())),
-        };
-        specs.push(spec);
-    }
-    Ok(specs)
-}
-
-enum TransformSpec {
-    Shuffle,
-    OpaquePredicate,
-    JumpTransform,
-}
-
-impl TransformSpec {
-    fn build(&self) -> Box<dyn Transform> {
-        match self {
-            TransformSpec::Shuffle => Box::new(Shuffle),
-            TransformSpec::OpaquePredicate => Box::new(OpaquePredicate::new()),
-            TransformSpec::JumpTransform => Box::new(JumpAddressTransformer::new()),
-        }
     }
 }
 

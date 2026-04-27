@@ -130,6 +130,8 @@ impl ArithmeticChain {
     ) -> Vec<(NodeIndex, usize, u8, [u8; 32])> {
         let mut targets = Vec::new();
 
+        let runtime_start = ir.runtime_bounds().map(|(start, _)| start).unwrap_or(0);
+
         for node_idx in ir.cfg.node_indices() {
             if let Block::Body(body) = &ir.cfg[node_idx] {
                 for (instr_idx, instr) in body.instructions.iter().enumerate() {
@@ -142,6 +144,20 @@ impl ArithmeticChain {
                     // Skip protected PCs
                     if self.config.respect_protected_pcs && protected_pcs.contains(&instr.pc) {
                         debug!("Skipping protected PUSH{} at PC {:#x}", push_size, instr.pc);
+                        continue;
+                    }
+
+                    // ConstantMask records immutable placeholder PUSH sites so
+                    // init-code patching can write constructor args into the
+                    // first PUSH immediate and let runtime XOR reconstruction
+                    // recover the value. Replacing that PUSH with an arithmetic
+                    // chain removes the patch site and corrupts deployed state.
+                    let immediate_offset = instr.pc.saturating_add(1).saturating_sub(runtime_start);
+                    if ir.immutable_masks.contains_key(&immediate_offset) {
+                        debug!(
+                            "Skipping PUSH{} at PC {:#x} - immutable patch site",
+                            push_size, instr.pc
+                        );
                         continue;
                     }
 

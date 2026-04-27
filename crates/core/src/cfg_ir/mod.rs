@@ -165,6 +165,10 @@ pub struct CfgIrBundle {
     /// rewrite every AC-emitted offset PUSH so CODECOPY still points into
     /// the appended data section.
     pub ac_runtime_length_estimate: Option<usize>,
+    /// Map of original runtime byte offsets for immutable placeholders to
+    /// XOR keys used by transforms that mask the placeholder. Init-code
+    /// immutable writes must store `value XOR key` at these offsets.
+    pub immutable_masks: HashMap<usize, Vec<u8>>,
 }
 
 impl CfgIrBundle {
@@ -1679,6 +1683,7 @@ pub fn build_cfg_ir(
         dispatcher_blocks: HashSet::new(),
         arithmetic_chain_data: None,
         ac_runtime_length_estimate: None,
+        immutable_masks: HashMap::new(),
     };
     let body_blocks = bundle
         .cfg
