@@ -1,4 +1,4 @@
-use crate::commands::{obfuscate::read_input, ObfuscateError};
+use crate::commands::obfuscate::read_input;
 use async_trait::async_trait;
 use azoth_analysis::obfuscation::{analyze_obfuscation, AnalysisConfig, AnalysisError};
 use clap::Args;
@@ -111,7 +111,6 @@ fn map_analysis_error(err: AnalysisError) -> Box<dyn Error> {
         AnalysisError::UnknownOpcodes { count } => Box::new(std::io::Error::other(format!(
             "analysis aborted due to {count} unknown opcode(s)"
         ))),
-        AnalysisError::InvalidPass(name) => Box::new(ObfuscateError::InvalidPass(name)),
         AnalysisError::ObfuscationFailure { source, .. } => source,
         AnalysisError::Io(err) => Box::new(err),
         AnalysisError::Fmt(err) => Box::new(err),

@@ -1291,6 +1291,7 @@ dependencies = [
  "azoth-core",
  "azoth-transform",
  "chrono",
+ "futures-util",
  "heimdall-decompiler",
  "hex",
  "imara-diff",

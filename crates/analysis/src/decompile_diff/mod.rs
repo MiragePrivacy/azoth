@@ -13,11 +13,14 @@
 pub mod parser;
 
 use alloy::primitives::Bytes;
+use futures_util::FutureExt;
 use heimdall_decompiler::DecompilerArgsBuilder;
 use imara_diff::{Diff, InternedInput, Interner, Token, UnifiedDiffPrinter};
 use owo_colors::OwoColorize;
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::panic::AssertUnwindSafe;
 
 /// Errors that can occur during decompile diff analysis.
 #[derive(thiserror::Error, Debug)]
@@ -29,6 +32,10 @@ pub enum DecompileDiffError {
     /// Decompilation produced no source output.
     #[error("decompilation produced no source output")]
     NoSource,
+
+    /// The decompiler panicked while processing bytecode.
+    #[error("decompiler panic: {0}")]
+    DecompilerPanic(String),
 }
 
 /// A single replacement hunk representing lines removed and added.
@@ -401,8 +408,21 @@ pub async fn decompile(target: Bytes) -> Result<String, DecompileDiffError> {
         .include_solidity(true)
         .build()
         .unwrap();
-    let result = heimdall_decompiler::decompile(args).await?;
+    let result = AssertUnwindSafe(heimdall_decompiler::decompile(args))
+        .catch_unwind()
+        .await
+        .map_err(|payload| DecompileDiffError::DecompilerPanic(panic_payload(payload)))??;
     result.source.ok_or(DecompileDiffError::NoSource)
+}
+
+fn panic_payload(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        return (*message).to_string();
+    }
+    "unknown panic payload".to_string()
 }
 
 // ============================================================================
