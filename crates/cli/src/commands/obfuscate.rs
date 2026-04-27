@@ -165,6 +165,9 @@ pub(crate) fn build_passes(list: &str) -> Result<Vec<Box<dyn Transform>>, Box<dy
             "arithmetic_chain" => Ok(Box::new(
                 azoth_transform::arithmetic_chain::ArithmeticChain::new(),
             ) as Box<dyn Transform>),
+            "constant_mask" | "literal_mask" => Ok(Box::new(
+                azoth_transform::constant_mask::ConstantMask::new(),
+            ) as Box<dyn Transform>),
             "push_split" => {
                 Ok(Box::new(azoth_transform::push_split::PushSplit::new()) as Box<dyn Transform>)
             }
