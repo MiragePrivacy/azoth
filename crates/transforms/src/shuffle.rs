@@ -12,6 +12,11 @@ impl Transform for Shuffle {
     }
 
     fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
+        if ir.has_unresolved_dynamic_jumps() {
+            debug!("Shuffle: skipping because CFG contains unresolved dynamic jumps");
+            return Ok(false);
+        }
+
         let mut block_indices: Vec<_> = ir
             .cfg
             .node_indices()

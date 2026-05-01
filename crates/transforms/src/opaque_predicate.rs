@@ -38,6 +38,10 @@ impl Transform for OpaquePredicate {
 
     fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
         debug!("=== OpaquePredicate Transform Start ===");
+        if ir.has_unresolved_dynamic_jumps() {
+            debug!("OpaquePredicate: skipping because CFG contains unresolved dynamic jumps");
+            return Ok(false);
+        }
 
         let mut changed = false;
         let mut eligible_blocks: Vec<NodeIndex> = ir

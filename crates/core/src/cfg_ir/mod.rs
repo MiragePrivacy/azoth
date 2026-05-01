@@ -14,8 +14,13 @@ use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+mod relocation;
 mod trace;
 
+pub use relocation::{
+    JumpSite, JumpSiteKind, RelocInstrRef, RelocKind, Relocation, RelocationStats, RelocationTable,
+    SuspiciousPcLiteral, TargetExpr,
+};
 pub use trace::{
     BlockBodySnapshot, BlockChangeSet, BlockControlSnapshot, BlockModification, BlockPcDiff,
     BlockSnapshot, BlockSnapshotKind, CfgIrDiff, CfgIrSnapshot, EdgeChangeSet, EdgeSnapshot,
@@ -588,11 +593,43 @@ impl CfgIrBundle {
         None
     }
 
-    /// Reindexes PCs and refreshes the start_pc mapping. Unlike the legacy implementation this also
-    /// writes symbolic jump immediates so a subsequent `patch_jump_immediates` call becomes a no-op
-    /// for blocks using the new API.
-    /// Renumbers program counters and returns a mapping from old PCs to their new positions.
+    /// Recovers relocations, reindexes PCs, and lowers every recovered
+    /// PC-sensitive immediate against the final layout.
+    ///
+    /// The old implementation renumbered first and then relied on direct jump
+    /// patching plus an orphan-PUSH heuristic. This wrapper makes relocation
+    /// metadata the source of truth: recovery runs while old PCs are still
+    /// visible, `reindex_pcs_without_legacy_guessing` assigns final PCs, and
+    /// `apply_relocations` lowers direct, PC-relative, split-add, and
+    /// Solidity-style return-address immediates.
     pub fn reindex_pcs(&mut self) -> Result<ReindexOutcome, Error> {
+        let old_runtime_bounds = self.runtime_bounds;
+        let relocation_table = self.recover_relocations(old_runtime_bounds)?;
+        let (mapping, old_runtime_bounds) = self.reindex_pcs_without_legacy_guessing()?;
+
+        self.apply_relocations(&relocation_table, &mapping, old_runtime_bounds)?;
+        self.write_symbolic_immediates()?;
+
+        let stats = relocation_table.stats();
+        self.record_operation(
+            OperationKind::ApplyRelocations {
+                direct: stats.direct,
+                branch: stats.branch,
+                pc_relative: stats.pc_relative,
+                split_add: stats.split_add,
+                return_address: stats.return_address,
+                suspicious_pc_literals: stats.suspicious_pc_literals,
+                unresolved_dynamic_jumps: stats.unresolved_dynamic_jumps,
+            },
+            CfgIrDiff::None,
+            Some(mapping.clone()),
+        );
+
+        Ok((mapping, old_runtime_bounds))
+    }
+
+    /// Renumbers program counters and returns a mapping from old PCs to their new positions.
+    fn reindex_pcs_without_legacy_guessing(&mut self) -> Result<ReindexOutcome, Error> {
         let before_blocks = block_start_pcs(self);
         let mut mapping = HashMap::new();
         let old_runtime_bounds = self.runtime_bounds;
@@ -705,7 +742,6 @@ impl CfgIrBundle {
 
         let diff = diff_from_pc_remap(block_diffs, instruction_diffs);
 
-        self.write_symbolic_immediates()?;
         self.record_operation(OperationKind::ReindexPcs, diff, Some(mapping.clone()));
 
         Ok((mapping, old_runtime_bounds))
@@ -751,6 +787,14 @@ impl CfgIrBundle {
             }
         }
         let diff = diff_from_block_changes(block_changes);
+        tracing::debug!(
+            changed_blocks = match &diff {
+                CfgIrDiff::BlockChanges(changes) => changes.changes.len(),
+                _ => 0,
+            },
+            legacy_fallback_changed = !matches!(diff, CfgIrDiff::None),
+            "patch_jump_immediates: legacy fallback complete"
+        );
         self.record_operation(
             OperationKind::PatchJumpImmediates,
             diff,

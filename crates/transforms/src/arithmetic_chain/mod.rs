@@ -271,6 +271,10 @@ impl Transform for ArithmeticChain {
 
     fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
         debug!("=== ArithmeticChain Transform Start ===");
+        if ir.has_unresolved_dynamic_jumps() {
+            debug!("ArithmeticChain: skipping because CFG contains unresolved dynamic jumps");
+            return Ok(false);
+        }
 
         let protected_pcs = if self.config.respect_protected_pcs {
             collect_protected_pcs(ir)

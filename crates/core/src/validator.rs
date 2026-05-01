@@ -13,6 +13,10 @@ use crate::{
 
 /// Validate that all statically resolvable JUMP/JUMPI instructions target valid JUMPDESTs.
 ///
+/// This is not a full proof of arbitrary EVM control flow. It deliberately ignores
+/// dynamic jump shapes whose target is not recoverable from local immediates; those
+/// cases require relocation recovery, symbolic execution, or runtime testing.
+///
 /// The validator checks two common patterns:
 /// * Direct `PUSHn <addr>; JUMP/JUMPI`
 /// * PC-relative dispatcher pattern `PUSHn <delta>; PC; ADD; JUMPI`

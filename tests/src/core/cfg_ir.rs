@@ -1,11 +1,16 @@
 use azoth_core::cfg_ir::{
-    build_cfg_ir, push_reaches_jump, Block, CfgIrBundle, CfgIrDiff, OperationKind,
+    build_cfg_ir, push_reaches_jump, Block, CfgIrBundle, CfgIrDiff, OperationKind, RelocKind,
 };
 use azoth_core::decoder::Instruction;
-use azoth_core::detection::{self, SectionKind};
+use azoth_core::detection::{self, Section, SectionKind};
+use azoth_core::seed::Seed;
+use azoth_core::strip::RuntimeSpan;
 use azoth_core::Opcode;
-use azoth_core::{decoder, strip};
+use azoth_core::{decoder, encoder, strip, validator};
+use azoth_transform::shuffle::Shuffle;
+use azoth_transform::Transform;
 use petgraph::visit::EdgeRef;
+use revm::primitives::B256;
 use std::collections::HashSet;
 
 const STORAGE_BYTECODE: &str = include_str!("../../bytecode/storage.hex");
@@ -21,6 +26,80 @@ async fn build_storage_cfg() -> CfgIrBundle {
 
     build_cfg_ir(&instructions, &sections, report, &bytes)
         .expect("failed to build CFG for storage bytecode")
+}
+
+fn synthetic_clean_report(len: usize) -> strip::CleanReport {
+    strip::CleanReport {
+        runtime_layout: vec![RuntimeSpan { offset: 0, len }],
+        removed: Vec::new(),
+        swarm_hash: None,
+        bytes_saved: 0,
+        clean_len: len,
+        clean_keccak: B256::ZERO,
+        program_counter_mapping: Vec::new(),
+    }
+}
+
+fn synthetic_cfg(instructions: Vec<Instruction>) -> CfgIrBundle {
+    let len = instructions
+        .iter()
+        .map(|instr| instr.pc + instr.byte_size())
+        .max()
+        .unwrap_or(0);
+    let sections = vec![Section {
+        kind: SectionKind::Runtime,
+        offset: 0,
+        len,
+    }];
+    let bytecode = vec![0; len];
+    build_cfg_ir(
+        &instructions,
+        &sections,
+        synthetic_clean_report(len),
+        &bytecode,
+    )
+    .expect("synthetic CFG builds")
+}
+
+fn cfg_instructions(cfg_ir: &CfgIrBundle) -> Vec<Instruction> {
+    let mut instructions = Vec::new();
+    for node in cfg_ir.cfg.node_indices() {
+        if let Block::Body(body) = &cfg_ir.cfg[node] {
+            instructions.extend(body.instructions.clone());
+        }
+    }
+    instructions.sort_by_key(|instr| instr.pc);
+    instructions
+}
+
+fn insert_instruction(
+    cfg_ir: &mut CfgIrBundle,
+    block_old_start_pc: usize,
+    instr_idx: usize,
+    instr: Instruction,
+) {
+    let node = cfg_ir
+        .cfg
+        .node_indices()
+        .find(|&idx| match &cfg_ir.cfg[idx] {
+            Block::Body(body) => body
+                .instructions
+                .first()
+                .is_some_and(|first| first.pc == block_old_start_pc),
+            _ => false,
+        })
+        .expect("block exists");
+    if let Block::Body(body) = cfg_ir.cfg.node_weight_mut(node).expect("node present") {
+        body.instructions.insert(instr_idx, instr);
+    }
+}
+
+fn instr(pc: usize, op: Opcode, imm: Option<&str>) -> Instruction {
+    Instruction {
+        pc,
+        op,
+        imm: imm.map(|s| s.to_string()),
+    }
 }
 
 #[tokio::test]
@@ -378,4 +457,297 @@ fn push_reaches_jump_dup_of_tracked_slot_is_conservative() {
         prj_instr(5, Opcode::JUMP, None),
     ];
     assert!(push_reaches_jump(&instrs, 0));
+}
+
+#[tokio::test]
+async fn direct_jump_relocation_survives_block_growth() {
+    // Regression for adjacent direct jump targets. The source block grows
+    // before reindexing, so the old PUSH immediate must be relocated to the
+    // target block's final PC rather than left as the stale old PC.
+    let mut cfg_ir = synthetic_cfg(vec![
+        instr(0, Opcode::JUMPDEST, None),
+        instr(1, Opcode::PUSH(1), Some("04")),
+        instr(3, Opcode::JUMP, None),
+        instr(4, Opcode::JUMPDEST, None),
+        instr(5, Opcode::STOP, None),
+    ]);
+
+    insert_instruction(&mut cfg_ir, 0, 1, instr(0x80, Opcode::PUSH0, None));
+    let table = cfg_ir
+        .recover_relocations(cfg_ir.runtime_bounds)
+        .expect("relocations recover");
+    assert_eq!(table.stats().direct, 1);
+
+    cfg_ir.reindex_pcs().expect("reindex succeeds");
+    let instructions = cfg_instructions(&cfg_ir);
+    let jump_push = instructions
+        .iter()
+        .find(|instr| matches!(instr.op, Opcode::PUSH(1)) && instr.pc == 2)
+        .expect("jump target push present");
+    assert_eq!(jump_push.imm.as_deref(), Some("05"));
+
+    let bytes = encoder::encode(&instructions, &[]).expect("encoded bytecode");
+    validator::validate_jump_targets(&bytes)
+        .await
+        .expect("statically resolvable jumps validate");
+}
+
+#[tokio::test]
+async fn direct_jumpi_relocation_survives_block_growth() {
+    // `JUMPI` consumes the target from the top of stack and condition from the
+    // next slot. Growing the block must rewrite only the target PUSH.
+    let mut cfg_ir = synthetic_cfg(vec![
+        instr(0, Opcode::PUSH(1), Some("01")),
+        instr(2, Opcode::PUSH(1), Some("06")),
+        instr(4, Opcode::JUMPI, None),
+        instr(5, Opcode::STOP, None),
+        instr(6, Opcode::JUMPDEST, None),
+        instr(7, Opcode::STOP, None),
+    ]);
+
+    insert_instruction(&mut cfg_ir, 0, 1, instr(0x80, Opcode::PUSH0, None));
+    let table = cfg_ir
+        .recover_relocations(cfg_ir.runtime_bounds)
+        .expect("relocations recover");
+    assert_eq!(table.stats().branch, 1);
+
+    cfg_ir.reindex_pcs().expect("reindex succeeds");
+    let instructions = cfg_instructions(&cfg_ir);
+    let immediates: Vec<_> = instructions
+        .iter()
+        .filter_map(|instr| matches!(instr.op, Opcode::PUSH(1)).then_some(instr.imm.as_deref()))
+        .collect();
+    assert!(
+        immediates.contains(&Some("01")),
+        "condition stays unchanged"
+    );
+    assert!(immediates.contains(&Some("07")), "target is relocated");
+
+    let bytes = encoder::encode(&instructions, &[]).expect("encoded bytecode");
+    validator::validate_jump_targets(&bytes)
+        .await
+        .expect("statically resolvable jumps validate");
+}
+
+#[tokio::test]
+async fn pc_relative_delta_recomputes_after_intervening_block_growth() {
+    // PC-relative branches encode `target - pc_instruction`. Growing a block
+    // between the source and target changes only the target side, so the delta
+    // must be recomputed from the final `PC` instruction address.
+    let mut cfg_ir = synthetic_cfg(vec![
+        instr(0, Opcode::PUSH(1), Some("04")),
+        instr(2, Opcode::PC, None),
+        instr(3, Opcode::ADD, None),
+        instr(4, Opcode::JUMPI, None),
+        instr(5, Opcode::STOP, None),
+        instr(6, Opcode::JUMPDEST, None),
+        instr(7, Opcode::STOP, None),
+    ]);
+
+    insert_instruction(&mut cfg_ir, 5, 0, instr(0x80, Opcode::PUSH0, None));
+    let table = cfg_ir
+        .recover_relocations(cfg_ir.runtime_bounds)
+        .expect("relocations recover");
+    assert_eq!(table.stats().pc_relative, 1);
+
+    cfg_ir.reindex_pcs().expect("reindex succeeds");
+    let instructions = cfg_instructions(&cfg_ir);
+    let delta_push = instructions
+        .iter()
+        .find(|instr| matches!(instr.op, Opcode::PUSH(1)))
+        .expect("delta push present");
+    assert_eq!(delta_push.imm.as_deref(), Some("05"));
+
+    let bytes = encoder::encode(&instructions, &[]).expect("encoded bytecode");
+    validator::validate_jump_targets(&bytes)
+        .await
+        .expect("PC-relative branch validates");
+}
+
+#[test]
+fn split_add_relocation_recomputes_parts_after_block_growth() {
+    // Split-add jump encodings hide the target in `a + b`; neither PUSH alone
+    // is a PC. Relocation rewrites both parts so the sum names the final block.
+    let mut cfg_ir = synthetic_cfg(vec![
+        instr(0, Opcode::PUSH(1), Some("02")),
+        instr(2, Opcode::PUSH(1), Some("04")),
+        instr(4, Opcode::ADD, None),
+        instr(5, Opcode::JUMP, None),
+        instr(6, Opcode::JUMPDEST, None),
+        instr(7, Opcode::STOP, None),
+    ]);
+
+    insert_instruction(&mut cfg_ir, 0, 0, instr(0x80, Opcode::PUSH0, None));
+    let table = cfg_ir
+        .recover_relocations(cfg_ir.runtime_bounds)
+        .expect("relocations recover");
+    assert_eq!(table.stats().split_add, 1);
+
+    cfg_ir.reindex_pcs().expect("reindex succeeds");
+    let parts: Vec<_> = cfg_instructions(&cfg_ir)
+        .iter()
+        .filter(|instr| matches!(instr.op, Opcode::PUSH(1)))
+        .map(|instr| usize::from_str_radix(instr.imm.as_deref().unwrap(), 16).unwrap())
+        .collect();
+    assert_eq!(parts.iter().sum::<usize>(), 7);
+}
+
+#[tokio::test]
+async fn return_address_relocation_survives_block_growth() {
+    // Regression test for Solidity-style internal calls. The return address is
+    // pushed before jumping to the internal function and is consumed by a later
+    // bare JUMP, so adjacent PUSH/JUMP patching cannot find it.
+    let mut cfg_ir = synthetic_cfg(vec![
+        instr(0, Opcode::PUSH(1), Some("05")),
+        instr(2, Opcode::PUSH(1), Some("07")),
+        instr(4, Opcode::JUMP, None),
+        instr(5, Opcode::JUMPDEST, None),
+        instr(6, Opcode::STOP, None),
+        instr(7, Opcode::JUMPDEST, None),
+        instr(8, Opcode::JUMP, None),
+    ]);
+
+    insert_instruction(&mut cfg_ir, 0, 0, instr(0x80, Opcode::PUSH0, None));
+    let table = cfg_ir
+        .recover_relocations(cfg_ir.runtime_bounds)
+        .expect("relocations recover");
+    assert_eq!(table.stats().return_address, 1);
+    assert!(
+        !table.has_unresolved_dynamic_jumps(),
+        "bare internal-function return JUMP is covered by recovered return targets"
+    );
+
+    cfg_ir.reindex_pcs().expect("reindex succeeds");
+    let instructions = cfg_instructions(&cfg_ir);
+    let return_push = instructions
+        .iter()
+        .find(|instr| matches!(instr.op, Opcode::PUSH(1)) && instr.pc == 1)
+        .expect("return-address push present");
+    assert_eq!(return_push.imm.as_deref(), Some("06"));
+
+    let bytes = encoder::encode(&instructions, &[]).expect("encoded bytecode");
+    validator::validate_jump_targets(&bytes)
+        .await
+        .expect("direct internal-call jump validates");
+}
+
+#[test]
+fn sload_literal_equal_to_jumpdest_is_not_relocated() {
+    // False-positive guard: a PUSH that numerically equals a JUMPDEST but is
+    // consumed by SLOAD is a storage slot, not a control-flow relocation.
+    let cfg_ir = synthetic_cfg(vec![
+        instr(0, Opcode::PUSH(2), Some("0100")),
+        instr(3, Opcode::SLOAD, None),
+        instr(4, Opcode::STOP, None),
+        instr(0x100, Opcode::JUMPDEST, None),
+        instr(0x101, Opcode::STOP, None),
+    ]);
+
+    let table = cfg_ir
+        .recover_relocations(cfg_ir.runtime_bounds)
+        .expect("relocations recover");
+    assert_eq!(table.stats().return_address, 0);
+    assert_eq!(table.suspicious_pc_literals.len(), 1);
+}
+
+#[test]
+fn sstore_literal_equal_to_jumpdest_is_not_relocated() {
+    // False-positive guard: SSTORE consumes both slot and value operands, so a
+    // matching PC literal in that operand pair must be treated as data.
+    let cfg_ir = synthetic_cfg(vec![
+        instr(0, Opcode::PUSH(2), Some("0100")),
+        instr(3, Opcode::PUSH(1), Some("00")),
+        instr(5, Opcode::SSTORE, None),
+        instr(6, Opcode::STOP, None),
+        instr(0x100, Opcode::JUMPDEST, None),
+        instr(0x101, Opcode::STOP, None),
+    ]);
+
+    let table = cfg_ir
+        .recover_relocations(cfg_ir.runtime_bounds)
+        .expect("relocations recover");
+    assert_eq!(table.stats().return_address, 0);
+    assert_eq!(table.suspicious_pc_literals.len(), 1);
+}
+
+#[test]
+fn jumpi_condition_literal_equal_to_jumpdest_is_not_relocated() {
+    // `JUMPI` target and condition have different stack positions. The first
+    // PUSH is the condition here and must not be relocated, even though it
+    // equals the target JUMPDEST.
+    let cfg_ir = synthetic_cfg(vec![
+        instr(0, Opcode::PUSH(1), Some("05")),
+        instr(2, Opcode::PUSH(1), Some("05")),
+        instr(4, Opcode::JUMPI, None),
+        instr(5, Opcode::JUMPDEST, None),
+        instr(6, Opcode::STOP, None),
+    ]);
+
+    let table = cfg_ir
+        .recover_relocations(cfg_ir.runtime_bounds)
+        .expect("relocations recover");
+    assert_eq!(table.stats().branch, 1);
+    assert_eq!(table.stats().return_address, 0);
+    assert_eq!(table.suspicious_pc_literals.len(), 1);
+}
+
+#[test]
+fn terminal_block_literal_equal_to_jumpdest_is_not_relocated() {
+    // A block ending in STOP never branches on the pushed value, so a matching
+    // JUMPDEST literal is reported but not remapped.
+    let cfg_ir = synthetic_cfg(vec![
+        instr(0, Opcode::PUSH(1), Some("03")),
+        instr(2, Opcode::STOP, None),
+        instr(3, Opcode::JUMPDEST, None),
+        instr(4, Opcode::STOP, None),
+    ]);
+
+    let table = cfg_ir
+        .recover_relocations(cfg_ir.runtime_bounds)
+        .expect("relocations recover");
+    assert!(table.entries.is_empty());
+    assert_eq!(table.suspicious_pc_literals.len(), 1);
+}
+
+#[test]
+fn unresolved_dynamic_jump_blocks_layout_transform() {
+    // Arbitrary runtime-computed targets such as CALLDATALOAD; JUMP are not
+    // relocatable by this pass, so a layout-changing transform must skip.
+    let mut cfg_ir = synthetic_cfg(vec![
+        instr(0, Opcode::CALLDATALOAD, None),
+        instr(1, Opcode::JUMP, None),
+        instr(2, Opcode::JUMPDEST, None),
+        instr(3, Opcode::STOP, None),
+    ]);
+
+    assert!(cfg_ir.has_unresolved_dynamic_jumps());
+    let seed = Seed::from_bytes([7u8; 32]);
+    let mut rng = seed.create_deterministic_rng();
+    let changed = Shuffle
+        .apply(&mut cfg_ir, &mut rng)
+        .expect("shuffle handles safety gate");
+    assert!(!changed);
+}
+
+#[test]
+fn relocation_recovery_classifies_dup_jumpi_target() {
+    // Conditional jump example from the relocation docs: DUP copies the target
+    // to the top of stack, and the copied target, not the condition slot, is
+    // what JUMPI consumes first.
+    let cfg_ir = synthetic_cfg(vec![
+        instr(0, Opcode::PUSH(1), Some("04")),
+        instr(2, Opcode::DUP(1), None),
+        instr(3, Opcode::JUMPI, None),
+        instr(4, Opcode::JUMPDEST, None),
+        instr(5, Opcode::STOP, None),
+    ]);
+
+    let table = cfg_ir
+        .recover_relocations(cfg_ir.runtime_bounds)
+        .expect("relocations recover");
+    assert_eq!(table.stats().branch, 1);
+    assert!(matches!(
+        table.entries[0].kind,
+        RelocKind::RuntimeRelativePc
+    ));
 }

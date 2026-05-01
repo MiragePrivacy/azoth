@@ -45,6 +45,10 @@ impl Transform for PushSplit {
 
     fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
         debug!("PushSplit: scanning for eligible PUSH4–PUSH16 literals");
+        if ir.has_unresolved_dynamic_jumps() {
+            debug!("PushSplit: skipping because CFG contains unresolved dynamic jumps");
+            return Ok(false);
+        }
 
         let protected_pcs = collect_protected_pcs(ir);
         let protected_nodes = collect_protected_nodes(ir);

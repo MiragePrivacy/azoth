@@ -56,6 +56,15 @@ pub enum OperationKind {
         node: usize,
     },
     ReindexPcs,
+    ApplyRelocations {
+        direct: usize,
+        branch: usize,
+        pc_relative: usize,
+        split_add: usize,
+        return_address: usize,
+        suspicious_pc_literals: usize,
+        unresolved_dynamic_jumps: usize,
+    },
     PatchJumpImmediates,
     /// Dispatcher selector tokens patched across multiple blocks.
     PatchDispatcher {

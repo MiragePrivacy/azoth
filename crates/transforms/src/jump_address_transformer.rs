@@ -69,6 +69,12 @@ impl Transform for JumpAddressTransformer {
 
     fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
         debug!("=== JumpAddressTransformer Transform Start ===");
+        if ir.has_unresolved_dynamic_jumps() {
+            debug!(
+                "JumpAddressTransformer: skipping because CFG contains unresolved dynamic jumps"
+            );
+            return Ok(false);
+        }
 
         let mut changed = false;
         let mut transformations = Vec::new();
