@@ -168,8 +168,18 @@ impl Contract {
     }
 }
 
+/// Number of comma-separated passes in `DEFAULT_PASSES`.
+fn default_pass_count() -> u32 {
+    DEFAULT_PASSES.split(',').count() as u32
+}
+
+/// Exclusive upper bound on the pass-selection bitmask, covering every default pass.
+fn pass_mask_limit() -> u32 {
+    1u32 << default_pass_count()
+}
+
 /// Generate a random comma-separated pass string from bits.
-fn passes_from_bits(bits: u8) -> String {
+fn passes_from_bits(bits: u32) -> String {
     DEFAULT_PASSES
         .split(",")
         .enumerate()
@@ -677,7 +687,7 @@ async fn fuzzer_worker(
         let contract = Contract::ALL[(rng.next_u32() as usize) % Contract::ALL.len()];
         let mut seed_bytes = [0u8; 32];
         rng.fill_bytes(&mut seed_bytes);
-        let passes = passes_from_bits((rng.next_u32() % 8) as u8);
+        let passes = passes_from_bits(rng.next_u32() % pass_mask_limit());
 
         let input = FuzzInput::new(contract, seed_bytes, passes);
 
@@ -816,5 +826,34 @@ impl super::Command for FuzzArgs {
         let _ = status_thread.join();
         stats.print_summary(args.check_deploy);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fuzz_pass_selection_can_reach_every_default_pass() {
+        let default_passes: Vec<&str> = DEFAULT_PASSES.split(',').map(str::trim).collect();
+
+        for expected in &default_passes {
+            let reachable = (0u32..pass_mask_limit()).any(|mask| {
+                passes_from_bits(mask)
+                    .split(',')
+                    .map(str::trim)
+                    .any(|p| p == *expected)
+            });
+            assert!(
+                reachable,
+                "default pass {expected} is not reachable by fuzz pass selection"
+            );
+        }
+    }
+
+    #[test]
+    fn pass_mask_limit_covers_all_default_passes() {
+        assert_eq!(pass_mask_limit(), 1u32 << default_pass_count());
+        assert!(default_pass_count() >= 1);
     }
 }
