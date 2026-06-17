@@ -98,8 +98,21 @@ fn collect_error_string_data_pushes(instructions: &[Instruction]) -> Vec<usize> 
         return indices;
     }
 
-    // Fallback: heuristic detection for blocks without full Error(string) structure
-    // This catches string data in blocks that were split by other transforms
+    // Fallback: heuristic detection for blocks whose full Error(string)
+    // structure was broken up by an earlier transform (e.g. block splitting).
+    //
+    // Gate this on the block actually containing an Error(string) selector.
+    // The ASCII heuristic alone is too permissive: any PUSH16+ whose bytes
+    // happen to be >=60% printable looks like a string to it, including
+    // arbitrary constants other passes emit. ArithmeticChain, for instance,
+    // scatters backward-computed chain values as inline PUSHes; when one of
+    // those constants is incidentally ASCII-ish, the heuristic scrambles it
+    // and corrupts the chain (observed as `collect()` reverting with
+    // `WrongEventSignature()` on the ERC20 Transfer topic). Requiring the
+    // selector keeps the fallback scoped to genuine error-string blocks.
+    if find_error_selector_index(instructions).is_none() {
+        return Vec::new();
+    }
     collect_ascii_string_pushes(instructions)
 }
 
