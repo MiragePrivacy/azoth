@@ -405,6 +405,9 @@ mod escrow;
 mod collect_proof;
 
 #[cfg(test)]
+mod arithmetic_chain_evm;
+
+#[cfg(test)]
 mod test_original;
 
 #[cfg(test)]

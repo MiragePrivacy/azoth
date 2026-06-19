@@ -421,9 +421,17 @@ async fn build_obfuscated_flow_inputs(
     label: &str,
     transforms: Vec<Box<dyn Transform>>,
 ) -> Result<(Bytes, Bytes, [u8; 4])> {
-    println!("\n=== Obfuscating escrow bytecode for {} ===", label);
     let seed = Seed::from_hex("0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
         .expect("valid fixed seed");
+    build_obfuscated_flow_inputs_with_seed(label, transforms, seed).await
+}
+
+async fn build_obfuscated_flow_inputs_with_seed(
+    label: &str,
+    transforms: Vec<Box<dyn Transform>>,
+    seed: Seed,
+) -> Result<(Bytes, Bytes, [u8; 4])> {
+    println!("\n=== Obfuscating escrow bytecode for {} ===", label);
     let config = ObfuscationConfig {
         seed,
         transforms,
@@ -705,6 +713,108 @@ async fn test_collect_with_erc20_proof_default_pipeline_succeeds() -> Result<()>
         ],
     )
     .await?;
+    let outcome =
+        execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
+    assert_collect_flow_success(label, outcome)
+}
+
+/// Seed that produced a failing mainnet `collect()` (reverted with
+/// `WrongEventSignature()` on the ERC20 Transfer-topic check). Reproduces
+/// the report end-to-end against the full default transform pipeline.
+const MAINNET_FAILING_SEED: &str =
+    "0xb1314f5c5063267ec70a9b9bb6f3d6b0cfb96b0f54773b3e534f54cd92caa5b4";
+
+#[tokio::test]
+async fn test_collect_with_erc20_proof_failing_seed_default_pipeline() -> Result<()> {
+    let label = "failing_seed_default_pipeline";
+    let seed = Seed::from_hex(MAINNET_FAILING_SEED).expect("valid seed");
+    let (deployment_bytecode, bond_calldata, collect_selector) =
+        build_obfuscated_flow_inputs_with_seed(
+            label,
+            vec![
+                Box::new(ArithmeticChain::new()),
+                Box::new(PushSplit::new()),
+                Box::new(SlotShuffle::new()),
+                Box::new(StringObfuscate::new()),
+            ],
+            seed,
+        )
+        .await?;
+    let outcome =
+        execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
+    assert_collect_flow_success(label, outcome)
+}
+
+/// Bisect the failing seed across transform subsets to localise which
+/// pass (or interaction) corrupts the Transfer topic. Prints the outcome
+/// for each subset; ignored by default (run explicitly with `--run-ignored`).
+#[tokio::test]
+#[ignore]
+async fn bisect_failing_seed_transform_subsets() -> Result<()> {
+    type Builder = fn() -> Box<dyn Transform>;
+    let all: &[(&str, Builder)] = &[
+        ("AC", || Box::new(ArithmeticChain::new())),
+        ("PS", || Box::new(PushSplit::new())),
+        ("SS", || Box::new(SlotShuffle::new())),
+        ("SO", || Box::new(StringObfuscate::new())),
+    ];
+
+    // Subsets to try, by index into `all`.
+    let subsets: &[&[usize]] = &[
+        &[0],
+        &[1],
+        &[2],
+        &[3],
+        &[0, 1],
+        &[0, 2],
+        &[0, 3],
+        &[1, 2],
+        &[0, 1, 2],
+        &[0, 1, 3],
+        &[0, 2, 3],
+        &[0, 1, 2, 3],
+    ];
+
+    println!("\n=== bisecting failing seed across subsets ===");
+    for subset in subsets {
+        let names: Vec<&str> = subset.iter().map(|&i| all[i].0).collect();
+        let label = format!("bisect[{}]", names.join("+"));
+        let seed = Seed::from_hex(MAINNET_FAILING_SEED).expect("valid seed");
+        let transforms: Vec<Box<dyn Transform>> = subset.iter().map(|&i| (all[i].1)()).collect();
+
+        let built = build_obfuscated_flow_inputs_with_seed(&label, transforms, seed).await;
+        let (deployment_bytecode, bond_calldata, collect_selector) = match built {
+            Ok(v) => v,
+            Err(e) => {
+                println!("  {label}: OBFUSCATION FAILED: {e}");
+                continue;
+            }
+        };
+        match execute_collect_proof_flow(
+            deployment_bytecode,
+            bond_calldata,
+            collect_selector,
+            &label,
+        ) {
+            Ok(FlowOutcome::Success { gas_used }) => {
+                println!("  {label}: SUCCESS (gas {gas_used})")
+            }
+            Ok(other) => println!("  {label}: FAIL {other:?}"),
+            Err(e) => println!("  {label}: ERROR {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Same failing seed, ArithmeticChain only, to localise the corruption to a
+/// single transform if the full-pipeline test fails.
+#[tokio::test]
+async fn test_collect_with_erc20_proof_failing_seed_arithmetic_chain_only() -> Result<()> {
+    let label = "failing_seed_arithmetic_chain_only";
+    let seed = Seed::from_hex(MAINNET_FAILING_SEED).expect("valid seed");
+    let (deployment_bytecode, bond_calldata, collect_selector) =
+        build_obfuscated_flow_inputs_with_seed(label, vec![Box::new(ArithmeticChain::new())], seed)
+            .await?;
     let outcome =
         execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
     assert_collect_flow_success(label, outcome)
