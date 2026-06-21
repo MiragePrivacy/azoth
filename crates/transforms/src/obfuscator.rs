@@ -1,4 +1,5 @@
 use crate::arithmetic_chain::ArithmeticChain;
+use crate::cluster_shuffle::ClusterShuffle;
 use crate::function_dispatcher::FunctionDispatcher;
 use crate::push_split::PushSplit;
 use crate::slot_shuffle::SlotShuffle;
@@ -69,6 +70,7 @@ impl Default for ObfuscationConfig {
                 Box::new(PushSplit::new()),
                 Box::new(SlotShuffle::new()),
                 Box::new(StringObfuscate::new()),
+                Box::new(ClusterShuffle::new()),
             ],
             preserve_unknown_opcodes: true,
         }
@@ -453,6 +455,23 @@ pub async fn obfuscate_bytecode(
                 new_decoy_pc
             };
 
+            // Stub PUSHes are pre-widened via `safe_runtime_push_width`.
+            // Guard against a regression in that helper so any future
+            // narrowing fails loud rather than emitting a malformed hex
+            // immediate the encoder rejects with `OddLength`.
+            if !crate::function_dispatcher::push_width_holds(decoy_rel, push_width) {
+                return Err(ObfuscationError::from_err(
+                    format!(
+                        "reapply_stub_patches: decoy_rel 0x{:x} overflows stored push_width {} \
+                         (capacity 0x{:x})",
+                        decoy_rel,
+                        push_width,
+                        crate::function_dispatcher::push_width_capacity(push_width),
+                    ),
+                    &cfg_ir.trace,
+                ));
+            }
+
             let formatted = format!("{:0width$x}", decoy_rel, width = push_width as usize * 2);
 
             tracing::debug!(
@@ -529,6 +548,21 @@ pub async fn obfuscate_bytecode(
             } else {
                 new_target_pc
             };
+
+            // Decoy PUSHes are pre-widened via `safe_runtime_push_width`.
+            // Mirror the stub-patch guard for the same reason.
+            if !crate::function_dispatcher::push_width_holds(target_rel, push_width) {
+                return Err(ObfuscationError::from_err(
+                    format!(
+                        "reapply_decoy_patches: target_rel 0x{:x} overflows stored push_width {} \
+                         (capacity 0x{:x})",
+                        target_rel,
+                        push_width,
+                        crate::function_dispatcher::push_width_capacity(push_width),
+                    ),
+                    &cfg_ir.trace,
+                ));
+            }
 
             let formatted = format!("{:0width$x}", target_rel, width = push_width as usize * 2);
 

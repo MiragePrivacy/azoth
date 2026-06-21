@@ -16,6 +16,7 @@ use super::{
 };
 use azoth_core::seed::Seed;
 use azoth_transform::arithmetic_chain::ArithmeticChain;
+use azoth_transform::cluster_shuffle::ClusterShuffle;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use azoth_transform::push_split::PushSplit;
 use azoth_transform::slot_shuffle::SlotShuffle;
@@ -698,6 +699,31 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_string_obfuscate_succeeds
     let outcome =
         execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
     assert_collect_flow_success(label, outcome)
+}
+
+#[tokio::test]
+async fn test_collect_with_erc20_proof_dispatcher_plus_cluster_shuffle_succeeds() -> Result<()> {
+    let shuffle_label = "dispatcher_plus_cluster_shuffle";
+    let (shuffle_deployment, shuffle_bond, shuffle_collect) =
+        build_obfuscated_flow_inputs(shuffle_label, vec![Box::new(ClusterShuffle::new())]).await?;
+
+    let baseline_label = "dispatcher_only_baseline";
+    let (baseline_deployment, _, _) = build_obfuscated_flow_inputs(baseline_label, vec![]).await?;
+    if shuffle_deployment == baseline_deployment {
+        return Err(eyre!(
+            "ClusterShuffle produced the same deployment bytecode as \
+             the dispatcher-only baseline for the same seed — the \
+             transform was a silent no-op"
+        ));
+    }
+
+    let outcome = execute_collect_proof_flow(
+        shuffle_deployment,
+        shuffle_bond,
+        shuffle_collect,
+        shuffle_label,
+    )?;
+    assert_collect_flow_success(shuffle_label, outcome)
 }
 
 #[tokio::test]

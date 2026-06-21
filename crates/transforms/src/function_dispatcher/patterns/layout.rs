@@ -267,6 +267,57 @@ fn minimal_push_width(value: usize) -> u8 {
     32
 }
 
+/// Width large enough to hold any PC that could land in the runtime section
+/// after subsequent transforms rearrange it.
+///
+/// Stub, decoy and controller PUSHes are patched post-reindex by
+/// `reapply_{stub,decoy,controller}_patches`, which reuses the width chosen
+/// here verbatim via `format!("{:0width$x}", new_target_rel, width = push_width * 2)`.
+/// If a later layout-shifting transform (e.g. `ClusterShuffle`) moves a
+/// target past the stored width's capacity, the reapply produces a
+/// malformed hex immediate and the encoder fails with `OddLength`.
+///
+/// # Why the `0xffff` floor
+///
+/// Azoth does **not** enforce EIP-170 (the mainnet-level 24 576-byte runtime
+/// size cap). Any bytecode can be passed in; this helper derives its width
+/// from the runtime size of the *actual* input and widens automatically if
+/// that's larger than `0xffff`.
+///
+/// The `0xffff` value is a heuristic floor motivated by EIP-170 as the
+/// common case: every contract deployed on an EIP-170-compliant chain fits
+/// in PUSH2 (24 576 < 65 535), so the floor means we effectively always
+/// pick PUSH2 in practice. This is preferable to hard-coding `2` because:
+///
+/// * For tiny synthetic fixtures (e.g. the ~80-byte `storage.hex` used in
+///   tests) the minimal-width-of-runtime-size would be PUSH1, and a PUSH1
+///   stub can't hold the post-shuffle targets of a runtime large enough
+///   to produce multiple clusters. The floor guarantees PUSH2 regardless
+///   of input size.
+/// * For non-EIP-170 environments (private chains, experimental L2s with
+///   raised size caps, off-chain interpretation of large bytecode),
+///   `minimal_push_width(runtime_size)` takes over once `runtime_size`
+///   exceeds `0xffff`, promoting to PUSH3 for contracts up to 16 MB and
+///   PUSH4 beyond that, without any code change.
+///
+/// In short: the floor encodes "every realistic mainnet contract fits
+/// PUSH2" as a lower bound, and the `minimal_push_width(runtime_size.max(...))`
+/// pattern widens automatically for anything bigger.
+///
+/// # Size cost
+///
+/// ~1 byte per patched dispatcher PUSH for contracts whose targets would
+/// otherwise fit PUSH1 (≤ 0xff rel). With ~4-6 patched PUSHes per selector
+/// tier, the overhead for a 4-selector dispatcher is under ~30 bytes of
+/// bytecode and zero runtime gas (PUSH1 and PUSH2 both cost 3 gas).
+fn safe_runtime_push_width(ir: &CfgIrBundle) -> u8 {
+    let runtime_size = ir
+        .runtime_bounds
+        .map(|(start, end)| end.saturating_sub(start))
+        .unwrap_or(0);
+    minimal_push_width(runtime_size.max(0xffff))
+}
+
 fn format_immediate(value: u128, width: u8) -> String {
     format!("{:0width$x}", value, width = width as usize * 2)
 }
@@ -325,9 +376,9 @@ fn create_tier_nodes(
 
     let mut pc = next_pc;
     let decoy_start = pc;
-    let invalid_width = minimal_push_width(invalid_rel);
+    let invalid_width = safe_runtime_push_width(ir);
     let target_rel = runtime_relative(ir, target_pc);
-    let target_width = minimal_push_width(target_rel);
+    let target_width = safe_runtime_push_width(ir);
     let mut decoy_instructions = Vec::new();
     decoy_instructions.push(Instruction {
         pc,
@@ -403,7 +454,7 @@ fn create_tier_nodes(
 
     let stub_start = next_pc;
     let stub_target_rel = runtime_relative(ir, decoy_start);
-    let stub_width = minimal_push_width(stub_target_rel);
+    let stub_width = safe_runtime_push_width(ir);
     debug!(
         stub_start = format_args!("0x{:04x}", stub_start),
         decoy_start = format_args!("0x{:04x}", decoy_start),
@@ -501,32 +552,17 @@ fn create_selector_controller(
             let selector_bytes = selector.to_be_bytes();
             let expected_byte = selector_bytes[config.byte_index as usize];
 
-            // Calculate where the JUMPDEST will be after the byte extraction block
-            // The block consists of:
+            // The byte extraction block is:
             // - PUSH1 0x00 + CALLDATALOAD + PUSH1 index + BYTE + PUSH1 expected + EQ (9 bytes fixed)
-            // - PUSH(match_width) + imm + JUMPI (variable: 1 + match_width + 1)
-            // - PUSH(fallback_width) + imm + JUMP (variable: 1 + fallback_width + 1)
+            // - PUSH(jump_target_width) + imm + JUMPI (1 + w + 1)
+            // - PUSH(jump_target_width) + imm + JUMP (1 + w + 1)
             //
-            // We need to calculate match_width, but it depends on byte_match_pc which we're calculating.
-            // Use iterative approach: start with PUSH1, check if sufficient, adjust if needed.
+            // With a uniform jump-target width chosen up front, the block
+            // size is deterministic and no iterative sizing is required.
             let byte_fail_rel = invalid_rel;
-            let fallback_width = minimal_push_width(byte_fail_rel);
-            let mut match_width = 1u8;
-            let byte_match_pc;
-
-            loop {
-                let byte_block_size =
-                    9 + (1 + match_width as usize + 1) + (1 + fallback_width as usize + 1);
-                let candidate_pc = next_pc + byte_block_size;
-                let candidate_rel = runtime_relative(ir, candidate_pc);
-                let required_width = minimal_push_width(candidate_rel);
-
-                if required_width <= match_width {
-                    byte_match_pc = candidate_pc;
-                    break;
-                }
-                match_width = required_width;
-            }
+            let jump_target_width = safe_runtime_push_width(ir);
+            let byte_block_size = 9 + 2 * (1 + jump_target_width as usize + 1);
+            let byte_match_pc = next_pc + byte_block_size;
 
             let byte_instrs = generate_byte_extraction_instructions(
                 next_pc,
@@ -534,6 +570,7 @@ fn create_selector_controller(
                 expected_byte,
                 runtime_relative(ir, byte_match_pc),
                 byte_fail_rel,
+                jump_target_width,
             );
             let byte_block_size = byte_instrs.size();
 
@@ -585,6 +622,7 @@ fn create_selector_controller(
                 config.storage_slot,
                 stub_rel,    // If storage is zero (default), go to stub (real path)
                 invalid_rel, // If storage is non-zero, trap at invalid
+                safe_runtime_push_width(ir),
             );
             let storage_block_size = storage_instrs.size();
 
@@ -613,7 +651,7 @@ fn create_selector_controller(
         }
     }
 
-    let stub_width = minimal_push_width(stub_rel);
+    let stub_width = safe_runtime_push_width(ir);
     let final_push_pc = next_pc;
     instructions.push(Instruction {
         pc: next_pc,

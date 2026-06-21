@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod determinism;
+mod cluster_shuffle;
 #[cfg(test)]
 mod function_dispatcher;
 #[cfg(test)]

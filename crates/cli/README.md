@@ -67,7 +67,7 @@ Options:
 - `-D, --deployment <BYTECODE>` - Input deployment bytecode (required)
 - `-R, --runtime <BYTECODE>` - Input runtime bytecode (required)
 - `--seed <value>` - Cryptographic seed for deterministic obfuscation
-- `--passes <list>` - Comma-separated list of transforms (default: shuffle)
+- `--passes <list>` - Comma-separated list of transforms (default: `arithmetic_chain,push_split,slot_shuffle,string_obfuscate,cluster_shuffle`)
 - `--emit <file>` - Path to write gas/size report as JSON
 - `--emit-debug <PATH>` - Path to emit detailed CFG trace debug report as JSON
 - `--tui` - Launch TUI to view debug trace after obfuscation
