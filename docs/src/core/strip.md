@@ -1,0 +1,5 @@
+# Strip
+
+The strip module removes non-runtime data from the detected sections so transforms work on the smallest possible surface area. `strip_bytecode` receives the raw byte vector and `Section` list, copies only the runtime spans into a clean buffer, and records everything else as `Removed` entries. The companion `CleanReport` captures enough metadata to reassemble the original artifact: runtime offsets and lengths, stripped bytes with their offsets and kinds, hashes of the clean runtime, and a program-counter mapping that relates original PCs to the stripped layout.
+
+If no runtime section is found the function fails fast, preventing downstream passes from operating on empty input. After transforms produce a new runtime blob, `CleanReport::reassemble` (invoked through `encoder::rebuild`) restores the removed init code, constructor arguments, padding, and auxdata, updating CODECOPY/RETURN parameters when necessary so the deployment payload stays coherent with the modified runtime size.
