@@ -6,13 +6,18 @@ edition = "2024"
 [dependencies]
 eot.workspace = true
 hex.workspace = true
+indexmap.workspace = true
 heimdall.workspace = true
 petgraph.workspace = true
 rand.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha3.workspace = true
 thiserror.workspace = true
 tiny-keccak.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 revm.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

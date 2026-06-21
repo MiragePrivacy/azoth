@@ -165,6 +165,11 @@ pub struct CfgIrBundle {
     /// rewrite every AC-emitted offset PUSH so CODECOPY still points into
     /// the appended data section.
     pub ac_runtime_length_estimate: Option<usize>,
+    /// Compiler-emitted facts loaded from a foundry artifact, when available.
+    /// Carries `methodIdentifiers`, `immutableReferences`, `linkReferences`,
+    /// and `storageLayout`. Subsystems can prefer this data over heuristic
+    /// recovery when present (see `detect_function_dispatcher_with_context`).
+    pub compiler: Option<crate::compiler::CompilerContext>,
 }
 
 impl CfgIrBundle {
@@ -1679,6 +1684,7 @@ pub fn build_cfg_ir(
         dispatcher_blocks: HashSet::new(),
         arithmetic_chain_data: None,
         ac_runtime_length_estimate: None,
+        compiler: None,
     };
     let body_blocks = bundle
         .cfg
