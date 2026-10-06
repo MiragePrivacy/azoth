@@ -21,9 +21,9 @@ concurrency:
 jobs:
   review:
     if: vars.AI_REVIEW_ENABLED == 'true'
-    uses: MiragePrivacy/.github/.github/workflows/ai-review.yml@6bdec9cc55a4680e21a397f9449be8c9cb9e3aca
+    uses: MiragePrivacy/.github/.github/workflows/ai-review.yml@3122eece6e4d61aaaf75c4c8b68d29195f75c988
     with:
-      automation-ref: 6bdec9cc55a4680e21a397f9449be8c9cb9e3aca
+      automation-ref: 3122eece6e4d61aaaf75c4c8b68d29195f75c988
       pr-number: ${{ github.event.pull_request.number || inputs.pr-number }}
       openai-model: ${{ vars.AI_REVIEW_OPENAI_MODEL || 'gpt-5.4' }}
       claude-model: ${{ vars.AI_REVIEW_CLAUDE_MODEL || 'claude-sonnet-4-6' }}
