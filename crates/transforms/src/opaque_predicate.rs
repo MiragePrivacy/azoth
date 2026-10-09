@@ -1,11 +1,12 @@
 use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, BlockBody, BlockControl, CfgIrBundle, EdgeType};
 use azoth_core::decoder::Instruction;
+use azoth_core::seed::DeterministicRng;
 use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use rand::prelude::SliceRandom;
-use rand::{rngs::StdRng, Rng};
+use rand::Rng;
 use sha3::{Digest, Keccak256};
 use tracing::debug;
 
@@ -36,7 +37,7 @@ impl Transform for OpaquePredicate {
         "OpaquePredicate"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut DeterministicRng) -> Result<bool> {
         debug!("=== OpaquePredicate Transform Start ===");
 
         let mut changed = false;
@@ -97,7 +98,7 @@ impl Transform for OpaquePredicate {
                 true_start_pc, false_start_pc
             );
 
-            let true_label = ir.cfg.add_node(Block::Body(BlockBody {
+            let true_label = ir.add_block(Block::Body(BlockBody {
                 start_pc: true_start_pc,
                 instructions: vec![Instruction {
                     pc: true_start_pc,
@@ -106,9 +107,10 @@ impl Transform for OpaquePredicate {
                 }],
                 max_stack: 0,
                 control: BlockControl::Unknown,
+                section: azoth_core::detection::SectionKind::Runtime,
             }));
 
-            let false_label = ir.cfg.add_node(Block::Body(BlockBody {
+            let false_label = ir.add_block(Block::Body(BlockBody {
                 start_pc: false_start_pc,
                 instructions: vec![
                     Instruction {
@@ -139,6 +141,7 @@ impl Transform for OpaquePredicate {
                 ],
                 max_stack: 1,
                 control: BlockControl::Unknown,
+                section: azoth_core::detection::SectionKind::Runtime,
             }));
 
             if let Block::Body(body) = &mut ir.cfg[*block_id] {

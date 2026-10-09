@@ -1,11 +1,10 @@
-use azoth_analysis::collect_metrics;
 use azoth_core::process_bytecode_to_cfg;
 use azoth_core::seed::Seed;
 use azoth_transform::shuffle::Shuffle;
 use azoth_transform::Transform;
 
 #[tokio::test]
-async fn test_shuffle_reorders_blocks() {
+async fn legacy_shuffle_fails_closed_instead_of_using_temporary_overlapping_pcs() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .with_ansi(false)
@@ -16,21 +15,21 @@ async fn test_shuffle_reorders_blocks() {
         .await
         .unwrap();
 
-    let before = collect_metrics(&cfg_ir, &cfg_ir.clean_report).unwrap();
-    let seed = Seed::generate();
+    let seed = Seed::from_bytes([0x51; 32]);
     let mut rng = seed.create_deterministic_rng();
     let transform = Shuffle;
-    let changed = transform.apply(&mut cfg_ir, &mut rng).unwrap();
-    let after = collect_metrics(&cfg_ir, &cfg_ir.clean_report).unwrap();
-    assert!(changed, "Shuffle should reorder blocks");
-    assert_eq!(
-        before.byte_len, after.byte_len,
-        "Byte length should not change"
+    let error = transform
+        .apply(&mut cfg_ir, &mut rng)
+        .expect_err("temporary block PCs must fail structural validation");
+    assert!(
+        error.to_string().contains("invalid block structure")
+            && error.to_string().contains("gap or overlap"),
+        "unexpected fail-closed error: {error}"
     );
 }
 
 #[tokio::test]
-async fn test_shuffle_storage_bytecode() {
+async fn legacy_shuffle_storage_fixture_fails_closed() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .with_ansi(false)
@@ -57,31 +56,15 @@ async fn test_shuffle_storage_bytecode() {
 
     println!("Block PCs before shuffle: {:?}", before_pcs);
 
-    let seed = Seed::generate();
+    let seed = Seed::from_bytes([0x52; 32]);
     let mut rng = seed.create_deterministic_rng();
     let transform = Shuffle;
-    let changed = transform.apply(&mut cfg_ir, &mut rng).unwrap();
-
-    // Collect block start PCs after shuffle
-    let after_pcs: Vec<usize> = cfg_ir
-        .cfg
-        .node_indices()
-        .filter_map(|n| {
-            if let azoth_core::cfg_ir::Block::Body(body) = &cfg_ir.cfg[n] {
-                Some(body.start_pc)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    println!("Block PCs after shuffle: {:?}", after_pcs);
-    println!("Shuffle changed: {}", changed);
-
-    // Verify block count didn't change
-    assert_eq!(
-        before_pcs.len(),
-        after_pcs.len(),
-        "Block count should remain the same"
+    let error = transform
+        .apply(&mut cfg_ir, &mut rng)
+        .expect_err("temporary block PCs must fail structural validation");
+    assert!(
+        error.to_string().contains("invalid block structure")
+            && error.to_string().contains("gap or overlap"),
+        "unexpected fail-closed error: {error}"
     );
 }

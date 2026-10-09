@@ -1,10 +1,11 @@
 use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, CfgIrBundle};
 use azoth_core::decoder::Instruction;
+use azoth_core::seed::DeterministicRng;
 use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
 use rand::seq::SliceRandom;
-use rand::{rngs::StdRng, Rng};
+use rand::Rng;
 use tracing::debug;
 
 /// Jump Address Transformer obfuscates JUMP/JUMPI targets by splitting addresses
@@ -42,7 +43,7 @@ impl JumpAddressTransformer {
     }
 
     /// Splits a jump target into two values that add up to the original
-    pub fn split_jump_target(&self, target: u64, rng: &mut StdRng) -> (u64, u64) {
+    pub fn split_jump_target(&self, target: u64, rng: &mut DeterministicRng) -> (u64, u64) {
         // Generate a random value less than the target
         let split_point = if target > 1 {
             rng.random_range(1..target)
@@ -67,7 +68,7 @@ impl Transform for JumpAddressTransformer {
         "JumpAddressTransformer"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut DeterministicRng) -> Result<bool> {
         debug!("=== JumpAddressTransformer Transform Start ===");
 
         let mut changed = false;

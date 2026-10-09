@@ -1,5 +1,6 @@
 use super::{
-    deploy_contract, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, ESCROW_CONTRACT_RUNTIME_BYTECODE,
+    assert_erc20_identity_fallback, deploy_contract, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+    ESCROW_CONTRACT_RUNTIME_BYTECODE,
 };
 use azoth_core::seed::Seed;
 use azoth_transform::jump_address_transformer::JumpAddressTransformer;
@@ -35,34 +36,35 @@ fn create_config_with_transforms(
         seed,
         transforms,
         preserve_unknown_opcodes: true,
+        rewrite_function_selectors: false,
+        obfuscate_constructor_arguments: false,
     }
 }
 
 #[tokio::test]
-async fn test_function_dispatch_only() -> Result<()> {
-    let seed = Seed::generate();
+async fn test_safe_profile_preserves_interface_and_falls_back_on_gas() -> Result<()> {
+    let seed = Seed::from_bytes([0x51; 32]);
 
-    println!("Testing FunctionDispatcher only (no additional transforms)");
+    println!("Testing the safe profile's GAS-observer identity fallback");
 
-    let config = create_config_with_transforms(vec![], seed);
+    let config = ObfuscationConfig::with_seed(seed.clone());
     let result = obfuscate_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
         config,
     )
     .await
-    .map_err(|e| eyre!("Failed to obfuscate with function dispatcher: {}", e))?;
+    .map_err(|e| eyre!("Safe-profile processing failed: {}", e))?;
 
-    assert!(result
-        .metadata
-        .transforms_applied
-        .contains(&"FunctionDispatcher".to_string()));
+    assert_erc20_identity_fallback(&result, &seed, &["ClusterShuffle"])?;
 
-    let (address, _) =
-        deploy_and_verify_contract_revm(&result.obfuscated_bytecode, "FunctionDispatcher")?;
+    let (address, _) = deploy_and_verify_contract_revm(
+        &result.obfuscated_bytecode,
+        "safe-profile identity fallback",
+    )?;
 
     println!(
-        "✓ FunctionDispatcher test passed - Deployed at: {}",
+        "✓ identity fallback deployed with the standard interface at: {}",
         address
     );
 

@@ -82,6 +82,16 @@ fn chain_runtime_bytecode(chain_instrs: &[azoth_core::decoder::Instruction]) -> 
         },
     ]);
 
+    // `encode` deliberately requires canonical, contiguous IR. The chain compiler and this
+    // standalone EVM epilogue are independent fragments, so rebase their PCs after joining them.
+    let mut next_pc = 0usize;
+    for instruction in &mut instrs {
+        instruction.pc = next_pc;
+        next_pc = next_pc
+            .checked_add(instruction.byte_size())
+            .ok_or_else(|| eyre!("standalone arithmetic-chain runtime is too large"))?;
+    }
+
     encode(&instrs, &[]).map_err(|e| eyre!("encode failed: {:?}", e))
 }
 

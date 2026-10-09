@@ -42,38 +42,37 @@ fn encode_return() {
 fn encode_unknown_hex_format() {
     let ins = Instruction {
         pc: 42,
-        op: Opcode::UNKNOWN(0xfe),
+        op: Opcode::UNKNOWN(0xaa),
         imm: None,
     };
-    let original = vec![0xfe; 43]; // Ensure PC 42 exists
+    let original = vec![0xaa; 43]; // Ensure PC 42 exists
     let bytes = encode(&[ins], &original).unwrap();
-    assert_eq!(bytes, vec![0xfe]);
+    assert_eq!(bytes, vec![0xaa]);
 }
 
 #[test]
-fn encode_invalid_opcode_with_original() {
+fn encode_invalid_opcode_is_always_fe() {
     let ins = Instruction {
         pc: 0,
         op: Opcode::INVALID,
         imm: None,
     };
-    // With original bytecode, INVALID opcode is preserved from original
-    let original = vec![0x5c]; // Some unknown byte
+    // INVALID is the concrete 0xfe opcode; native decoding never uses it as an unknown marker.
+    let original = vec![0x5c];
     let result = encode(&[ins], &original);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), vec![0x5c]); // Preserved from original!
+    assert_eq!(result.unwrap(), vec![0xfe]);
 }
 
 #[test]
-fn encode_invalid_opcode_without_original_data() {
+fn encode_invalid_opcode_never_silently_disappears() {
     let ins = Instruction {
         pc: 42,
         op: Opcode::INVALID,
         imm: None,
     };
-    // PC 42 is beyond original bytecode, so it gets skipped
-    let original = vec![0x60, 0x01]; // Only 2 bytes, PC 42 doesn't exist
+    let original = vec![0x60, 0x01];
     let result = encode(&[ins], &original);
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), Vec::<u8>::new()); // Empty - skipped!
+    assert_eq!(result.unwrap(), vec![0xfe]);
 }

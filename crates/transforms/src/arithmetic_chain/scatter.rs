@@ -15,8 +15,8 @@
 use super::types::{ArithmeticChainDef, ScatterContext, ScatterStrategy};
 use azoth_core::cfg_ir::CfgIrBundle;
 use azoth_core::decoder::Instruction;
+use azoth_core::seed::DeterministicRng;
 use azoth_core::Opcode;
-use rand::rngs::StdRng;
 
 /// Apply scattering to a chain, populating the scatter context with data
 /// section bytes and dead path blocks as needed.
@@ -38,7 +38,7 @@ pub fn apply_scattering(
     _ir: &mut CfgIrBundle,
     chain: &mut ArithmeticChainDef,
     ctx: &mut ScatterContext,
-    _rng: &mut StdRng,
+    _rng: &mut DeterministicRng,
 ) -> crate::Result<()> {
     for (i, (value, strategy)) in chain
         .initial_values

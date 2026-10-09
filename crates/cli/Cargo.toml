@@ -26,6 +26,7 @@ thiserror.workspace = true
 # Fuzz command dependencies
 chrono = "0.4"
 parking_lot = "0.12"
-rand = { workspace = true, features = ["small_rng"] }
+rand.workspace = true
 revm.workspace = true
 sha3 = "0.10"
+tempfile.workspace = true

@@ -10,8 +10,68 @@ use azoth_transform::obfuscator::ObfuscationConfig;
 const SIMPLE_BYTECODE: &str =
     "0x60003560e01c80637ff36ab514601e578063a9059cbb14602357600080fd5b600080fd5b600080fd";
 
+// One-function dispatcher whose implementation returns `msg.sig`.  Replacing the dispatcher
+// selector changes this function's observable return value even when the caller follows the
+// selector map, so the production profile must never relabel it automatically.
+const MSG_SIG_RUNTIME: &str = "0x60003560e01c806311223344146013575f5ffd5b5f3560e01c5f5260205ff3";
+const MSG_SIG_DEPLOYMENT: &str =
+    "0x601f600a5f39601f5ff360003560e01c806311223344146013575f5ffd5b5f3560e01c5f5260205ff3";
+
 const COUNTER_BYTECODE: &str =
     "0x6080604052348015600e575f5ffd5b506101d98061001c5f395ff3fe608060405234801561000f575f5ffd5b506004361061004a575f3560e01c806306661abd1461004e578063371303c01461006c5780636d4ce63c14610076578063b3bcfa8214610094575b5f5ffd5b61005661009e565b60405161006391906100f7565b60405180910390f35b6100746100a3565b005b61007e6100bd565b60405161008b91906100f7565b60405180910390f35b61009c6100c5565b005b5f5481565b60015f5f8282546100b4919061013d565b92505081905550565b5f5f54905090565b60015f5f8282546100d69190610170565b92505081905550565b5f819050919050565b6100f1816100df565b82525050565b5f60208201905061010a5f8301846100e8565b92915050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52601160045260245ffd5b5f610147826100df565b9150610152836100df565b925082820190508082111561016a57610169610110565b5b92915050565b5f61017a826100df565b9150610185836100df565b925082820390508181111561019d5761019c610110565b5b9291505056fea264697066735822122078c44612ebfc52f8c09e96e351b62f1c6feebaa2694fa7d29431ccb4ae9ed15064736f6c634300081c0033";
+
+fn execute_runtime(runtime_hex: &str, calldata: Vec<u8>) -> Vec<u8> {
+    use revm::bytecode::Bytecode;
+    use revm::context::result::{ExecutionResult, Output};
+    use revm::context::TxEnv;
+    use revm::database::InMemoryDB;
+    use revm::primitives::{Address, Bytes, TxKind, U256};
+    use revm::state::AccountInfo;
+    use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
+
+    let runtime = hex::decode(runtime_hex.trim_start_matches("0x")).expect("runtime hex");
+    let contract = Address::from([0x11; 20]);
+    let caller = Address::from([0x22; 20]);
+    let mut db = InMemoryDB::default();
+    db.insert_account_info(
+        contract,
+        AccountInfo {
+            nonce: 1,
+            code_hash: revm::primitives::KECCAK_EMPTY,
+            code: Some(Bytecode::new_raw(Bytes::from(runtime))),
+            balance: U256::ZERO,
+        },
+    );
+    db.insert_account_info(
+        caller,
+        AccountInfo {
+            nonce: 0,
+            code_hash: revm::primitives::KECCAK_EMPTY,
+            code: None,
+            balance: U256::from(1_000_000u64),
+        },
+    );
+    let mut evm = Context::mainnet().with_db(db).build_mainnet();
+    let result = evm
+        .transact(TxEnv {
+            caller,
+            gas_limit: 1_000_000,
+            kind: TxKind::Call(contract),
+            data: Bytes::from(calldata),
+            value: U256::ZERO,
+            nonce: 0,
+            ..Default::default()
+        })
+        .expect("execute runtime");
+
+    match result.result {
+        ExecutionResult::Success {
+            output: Output::Call(output),
+            ..
+        } => output.to_vec(),
+        other => panic!("runtime call did not succeed: {other:?}"),
+    }
+}
 
 #[tokio::test]
 async fn test_dispatcher_transformation_and_determinism() {
@@ -59,8 +119,10 @@ async fn test_dispatcher_transformation_and_determinism() {
 
     // Obfuscation with deterministic seed
     let seed = Seed::generate();
-    let config1 = ObfuscationConfig::with_seed(seed.clone());
-    let config2 = ObfuscationConfig::with_seed(seed.clone());
+    let mut config1 = ObfuscationConfig::with_seed(seed.clone());
+    config1.rewrite_function_selectors = true;
+    let mut config2 = ObfuscationConfig::with_seed(seed.clone());
+    config2.rewrite_function_selectors = true;
 
     let result1 = obfuscate_bytecode(SIMPLE_BYTECODE, SIMPLE_BYTECODE, config1)
         .await
@@ -198,13 +260,11 @@ async fn test_counter_dispatcher_detection() {
         "Expected four selectors in Counter dispatcher"
     );
 
-    let result = obfuscate_bytecode(
-        COUNTER_BYTECODE,
-        counter_runtime,
-        ObfuscationConfig::default(),
-    )
-    .await
-    .expect("obfuscator should succeed");
+    let mut config = ObfuscationConfig::with_seed(Seed::from_bytes([0x33; 32]));
+    config.rewrite_function_selectors = true;
+    let result = obfuscate_bytecode(COUNTER_BYTECODE, counter_runtime, config)
+        .await
+        .expect("obfuscator should succeed");
 
     assert!(
         result
@@ -242,5 +302,67 @@ async fn test_counter_dispatcher_detection() {
         mapping.len(),
         dispatcher_info.selectors.len(),
         "Selector mapping should cover all dispatcher selectors"
+    );
+}
+
+#[tokio::test]
+async fn production_profile_never_relabels_msg_sig_observer() {
+    const ORIGINAL_SELECTOR: u32 = 0x11223344;
+    let seed = Seed::from_bytes([0x42; 32]);
+
+    let safe_result = obfuscate_bytecode(
+        MSG_SIG_DEPLOYMENT,
+        MSG_SIG_RUNTIME,
+        ObfuscationConfig::with_seed(seed.clone()),
+    )
+    .await
+    .expect("safe profile accepts the msg.sig fixture without selector rewriting");
+
+    assert!(
+        safe_result.selector_mapping.is_none(),
+        "safe profile must not publish a mapping it did not prove semantically sound"
+    );
+    assert!(
+        !safe_result
+            .metadata
+            .transforms_applied
+            .iter()
+            .any(|name| name == "FunctionDispatcher"),
+        "FunctionDispatcher must remain disabled in the production profile"
+    );
+    let (safe_runtime, _, _, _) = decoder::decode_bytecode(&safe_result.obfuscated_runtime, false)
+        .await
+        .expect("decode safe output");
+    assert!(safe_runtime.iter().any(|instruction| {
+        instruction.op == azoth_core::Opcode::PUSH(4)
+            && instruction.imm.as_deref() == Some("11223344")
+    }));
+    let original_output = execute_runtime(
+        &safe_result.obfuscated_runtime,
+        ORIGINAL_SELECTOR.to_be_bytes().to_vec(),
+    );
+    assert_eq!(&original_output[28..], &ORIGINAL_SELECTOR.to_be_bytes());
+
+    // The legacy operation remains behind an explicit experimental API flag.  This assertion
+    // prevents a future refactor from silently turning it back into a production default.
+    let mut experimental = ObfuscationConfig::with_seed(seed);
+    experimental.transforms.clear();
+    experimental.rewrite_function_selectors = true;
+    let experimental_result = obfuscate_bytecode(MSG_SIG_DEPLOYMENT, MSG_SIG_RUNTIME, experimental)
+        .await
+        .expect("explicit experimental selector rewrite");
+    let mapping = experimental_result
+        .selector_mapping
+        .expect("explicit opt-in produces a selector map");
+    let replacement = mapping
+        .get(&ORIGINAL_SELECTOR)
+        .expect("original selector mapping");
+    assert_ne!(replacement.as_slice(), ORIGINAL_SELECTOR.to_be_bytes());
+    let experimental_output =
+        execute_runtime(&experimental_result.obfuscated_runtime, replacement.clone());
+    assert_eq!(&experimental_output[28..], replacement);
+    assert_ne!(
+        experimental_output, original_output,
+        "adapted call exposes the replacement through msg.sig"
     );
 }

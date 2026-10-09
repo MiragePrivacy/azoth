@@ -23,7 +23,7 @@
 
 use crate::{Result, Transform};
 use azoth_core::cfg_ir::CfgIrBundle;
-use rand::rngs::StdRng;
+use azoth_core::seed::DeterministicRng;
 use tracing::debug;
 
 /// Storage mutation + gate insertion.
@@ -41,7 +41,7 @@ impl Transform for StorageGates {
         "StorageGates"
     }
 
-    fn apply(&self, _ir: &mut CfgIrBundle, _rng: &mut StdRng) -> Result<bool> {
+    fn apply(&self, _ir: &mut CfgIrBundle, _rng: &mut DeterministicRng) -> Result<bool> {
         debug!("StorageGates: placeholder apply (no-op)");
         Ok(false)
     }

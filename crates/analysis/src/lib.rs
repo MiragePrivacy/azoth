@@ -9,6 +9,7 @@
 //!   report.
 
 pub mod decompile_diff;
+pub mod detector;
 pub mod metrics;
 pub use metrics::{Metrics, collect_metrics, compare};
 

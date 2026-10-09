@@ -3,23 +3,29 @@
 
 ## What is Azoth?
 
-Azoth is a deterministic EVM bytecode obfuscator designed to make Mirage's execution contracts indistinguishable from ordinary, unverified deployments on Ethereum. The name "[Azoth](https://www.wikiwand.com/en/articles/Azoth)" derives from medieval alchemy, where it referred to the universal solvent: a hypothetical substance capable of dissolving any material and serving as the essential agent of transformation.
+Azoth is an experimental deterministic EVM bytecode variation engine. Its design goal is to vary Mirage execution contracts while preserving supported EVM behavior, but the current safe profile has **not** demonstrated indistinguishability from ordinary unverified Ethereum deployments. The name "[Azoth](https://www.wikiwand.com/en/articles/Azoth)" derives from medieval alchemy, where it referred to the universal solvent: a hypothetical substance capable of dissolving any material and serving as the essential agent of transformation.
 
 ## How does it work?
 
 1. Dissection: decode the contract’s init/runtime layout, resolve sections, and build a control-flow graph of block bodies and jump targets.
 
-2. Transformation: apply deterministic transformations (e.g dispatcher transforms, block shuffling etc.) that changes the structure of the bytecode without blowing gas or size limits.
+2. Transformation: apply admitted deterministic transformations transactionally. The safe default currently admits relationship-aware cluster shuffling; experimental transforms require separate validation.
 
-3. Recovery: lower the rewritten runtime, patch init-code offsets, and mask any exact constructor-argument suffix so the final bytecode stays deployable without retaining an ABI-aligned plaintext tail.
+3. Recovery: lower the rewritten runtime, patch only proven init-code and immutable-reference locations, preserve compiler suffixes, and enforce EVM size limits. Constructor-argument and selector rewriting are disabled in the safe profile.
 
-Azoth also incorporates a formal verification system that provides mathematical guarantees of functional equivalence between original and obfuscated contracts.
+Formal equivalence verification is not available. The production-facing verifier fails closed with `VerificationUnavailable`; REVM deployment checks and differential tests are useful test evidence, not mathematical proof.
+
+Disassembly in the production pipeline is native and synchronous. Azoth owns the legacy-EVM
+opcode table and performs a one-pass byte walk; it does not invoke Heimdall or EOT. Heimdall remains
+isolated in the analysis crate for optional decompiler/diff views. See the
+[native decoder design](docs/native-bytecode-decoder.md) for fork scope, malformed-byte handling,
+and the protocol-update checklist.
 
 Constructor-argument masking is an obfuscation boundary, not encryption: it defeats verbatim static suffix recovery, but public creation code can still be analyzed or executed to recover values. See the [constructor-argument security and benchmark report](docs/constructor-argument-obfuscation.md).
 
 ## Status
 
-Azoth is under active development: the parsing pipeline, CFG builder, and several core transforms are in daily use, while additional passes, verification tooling, and resilience metrics are landing incrementally as we harden the stack for production-facing deployments.
+Azoth is under active development and is not production-ready. Unsupported bytecode relationships and constructor shapes are rejected or produce an unchanged identity result. An unchanged result is safe fallback behavior, not evidence that a variation objective was achieved.
 
 ## Getting Started
 
@@ -27,7 +33,7 @@ Azoth is available through a command-line interface. This could be used for loca
 
 ## Fuzzing
 
-Azoth includes a built-in fuzzer for testing the obfuscation pipeline. The fuzzer generates random seeds and transform combinations, running them against test contracts to discover edge cases and potential issues.
+Azoth includes a built-in deterministic parameter-campaign harness. A case index fixes its contract, seed, and transform subset, so worker scheduling does not change finite-run coverage. It currently covers the bundled escrow and counter fixtures; it is not an arbitrary-bytecode fuzzer.
 
 ### Basic Usage
 
@@ -44,7 +50,7 @@ cargo run --bin azoth -- fuzz -d 60
 # Use 4 parallel workers
 cargo run --bin azoth -- fuzz -j 4
 
-# Enable deployment verification (checks obfuscated bytecode deploys correctly)
+# Enable the REVM creation smoke check (not behavioral equivalence)
 cargo run --bin azoth -- fuzz --check-deploy
 ```
 
@@ -68,7 +74,7 @@ cargo run --bin azoth -- fuzz replay crashes/crash_abc123.json
 | `-i, --iterations <N>` | Maximum iterations, 0 for infinite (default: 0) |
 | `-d, --duration <SECS>` | Maximum duration in seconds, 0 for infinite (default: 0) |
 | `--crash-dir <PATH>` | Directory to save crash files (default: `crashes/`) |
-| `--check-deploy` | Verify obfuscated bytecode deploys successfully via REVM |
+| `--check-deploy` | Check that creation succeeds in REVM; this does not prove runtime behavior |
 
 ## Contributing
 

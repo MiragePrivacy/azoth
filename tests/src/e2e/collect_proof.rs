@@ -5,17 +5,20 @@
 //! (see `testCollectWithTransferProof_EIP1559`). The baseline flow verifies
 //! that the fixture and REVM harness are valid end-to-end: constructor funding,
 //! bonding, ABI-decoding the `ReceiptProof` struct, block-header parsing, MPT
-//! receipt inclusion, and receipt-log validation. The obfuscated flow then runs
-//! the same scenario against Azoth output to characterize where transforms
-//! currently break that path.
+//! receipt inclusion, and receipt-log validation. The Azoth flows request several
+//! pass recipes and verify the hardened safety boundary: because this constructor
+//! executes `GAS`, every mutating candidate is discarded, the exact input artifact
+//! is authenticated, and the complete flow remains callable through standard ABI
+//! selectors.
 
 use super::{
-    build_standard_calldata, mock_token_bytecode, prepare_bytecode_with_args, EscrowMappings,
-    ObfuscatedCaller, ESCROW_BOND, ESCROW_COLLECT, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+    assert_erc20_identity_fallback, build_standard_calldata, mock_token_bytecode,
+    prepare_bytecode_with_args, ESCROW_BOND, ESCROW_COLLECT, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
     ESCROW_CONTRACT_RUNTIME_BYTECODE,
 };
 use azoth_core::seed::Seed;
 use azoth_transform::arithmetic_chain::ArithmeticChain;
+use azoth_transform::cluster_shuffle::ClusterShuffle;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use azoth_transform::push_split::PushSplit;
 use azoth_transform::slot_shuffle::SlotShuffle;
@@ -431,11 +434,17 @@ async fn build_obfuscated_flow_inputs_with_seed(
     transforms: Vec<Box<dyn Transform>>,
     seed: Seed,
 ) -> Result<(Bytes, Bytes, [u8; 4])> {
-    println!("\n=== Obfuscating escrow bytecode for {} ===", label);
+    println!("\n=== Processing escrow bytecode for {} ===", label);
+    let expected_requested_transforms: Vec<&str> = transforms
+        .iter()
+        .map(|transform| transform.name())
+        .collect();
     let config = ObfuscationConfig {
-        seed,
+        seed: seed.clone(),
         transforms,
         preserve_unknown_opcodes: true,
+        rewrite_function_selectors: false,
+        obfuscate_constructor_arguments: false,
     };
     let obfuscation_result = obfuscate_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
@@ -445,20 +454,14 @@ async fn build_obfuscated_flow_inputs_with_seed(
     .await
     .map_err(|e| eyre!("Failed to obfuscate bytecode for {}: {:?}", label, e))?;
 
-    let selector_mapping = obfuscation_result
-        .selector_mapping
-        .as_ref()
-        .ok_or_else(|| eyre!("No selector mapping in obfuscation result"))?;
-    let mappings = EscrowMappings::from_obfuscator_output(selector_mapping)
-        .map_err(|e| eyre!("Failed to build EscrowMappings for {}: {}", label, e))?;
-    let caller = ObfuscatedCaller::new(mappings);
+    assert_erc20_identity_fallback(&obfuscation_result, &seed, &expected_requested_transforms)?;
     println!(
-        "✓ [{}] built EscrowMappings with {} selectors",
+        "✓ [{}] authenticated exact identity fallback for {} requested pass(es)",
         label,
-        selector_mapping.len()
+        expected_requested_transforms.len()
     );
 
-    // Optional: dump obfuscated bytecode hex for offline disassembly/debug.
+    // Optional: dump the returned artifact for offline disassembly/debug.
     if let Ok(dir) = std::env::var("DUMP_OBFUSCATED") {
         let path = format!("{dir}/{label}.hex");
         let body = obfuscation_result
@@ -476,18 +479,9 @@ async fn build_obfuscated_flow_inputs_with_seed(
         U256::from(REWARD_AMOUNT),
         U256::from(PAYMENT_AMOUNT),
     )?;
-    let bond_calldata = caller.bond_call_data(U256::from(BOND_AMOUNT));
-    let collect_selector: [u8; 4] =
-        caller
-            .collect_call_data()
-            .as_ref()
-            .try_into()
-            .map_err(|_| {
-                eyre!(
-                    "collect_call_data() did not return exactly 4 bytes for {}",
-                    label
-                )
-            })?;
+    let bond_args = U256::from(BOND_AMOUNT).to_be_bytes::<32>();
+    let bond_calldata = build_standard_calldata(ESCROW_BOND, &bond_args);
+    let collect_selector = ESCROW_COLLECT.0;
 
     Ok((deployment_bytecode, bond_calldata, collect_selector))
 }
@@ -567,8 +561,8 @@ async fn test_collect_with_erc20_proof_baseline_succeeds() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_collect_with_erc20_proof_dispatcher_only_succeeds() -> Result<()> {
-    let label = "dispatcher_only";
+async fn test_collect_with_erc20_proof_no_transform_identity_succeeds() -> Result<()> {
+    let label = "no_transform_identity";
     let (deployment_bytecode, bond_calldata, collect_selector) =
         build_obfuscated_flow_inputs(label, vec![]).await?;
     let outcome =
@@ -576,43 +570,11 @@ async fn test_collect_with_erc20_proof_dispatcher_only_succeeds() -> Result<()> 
     assert_collect_flow_success(label, outcome)
 }
 
-// todo(g4titanx): create bugs.md and update bug findings, cause and fix, for posterity
-
-/// Regression probe for three distinct bugs in ArithmeticChain that all
-/// manifested as `collect()` reverting with `WrongEventSignature()`
-/// (selector `0x49b4a8ba`) on the ERC20 `Transfer` event topic check:
-///
-/// 1. `scatter.rs::generate_load_instructions` was pushing the CODECOPY
-///    arguments in the wrong stack order. EVM CODECOPY pops `destOffset`
-///    from the top, then `offset`, then `size`, but the generator emitted
-///    them as `PUSH destOffset; PUSH offset; PUSH size; CODECOPY`, leaving
-///    `size` on top. The EVM then interpreted `size` (`0x20`) as
-///    `destOffset` and `destOffset` (`0x00`) as `size`, performing a
-///    zero-byte copy. The subsequent `MLOAD` always returned
-///    zero-initialised memory, so the chain's first OR reduction
-///    collapsed to `V0 | 0 = V0` and the final value diverged from the
-///    backward-computed target.
-///
-/// 2. `CfgIrBundle::patch_arithmetic_chain_codecopy_offsets` did not
-///    exist. AC recorded its `runtime_length` estimate at Step 3 transform
-///    time, then Step 5's dispatcher reapply passes
-///    (`reapply_stub_patches`, `reapply_decoy_patches`,
-///    `reapply_controller_patches`) widened some PUSHes post-`reindex_pcs`
-///    and grew the runtime past the estimate. AC's CODECOPY offsets still
-///    referenced the old estimate, so they pointed into live runtime code
-///    instead of the appended data section — the chain loaded random
-///    bytecode bytes as `V1`.
-///
-/// 3. The post-reindex patch needed the right pattern after fix (1).
-///    With the corrected `PUSH size; PUSH offset; PUSH destOffset;
-///    CODECOPY` ordering, the offset PUSH moved one slot forward in the
-///    instruction window; the scanner was updated to match the new
-///    shape and capped with `old_value >= estimate` to avoid touching
-///    coincidental `PUSH1 0x20; PUSH<n>; PUSH1 0x00; CODECOPY` sequences
-///    the Solidity compiler emits for unrelated code copies.
+/// A legacy ArithmeticChain request must remain visible in the authenticated
+/// recipe while its mutation is suppressed for this GAS-observing constructor.
 #[tokio::test]
-async fn test_collect_with_erc20_proof_dispatcher_plus_arithmetic_chain_succeeds() -> Result<()> {
-    let label = "dispatcher_plus_arithmetic_chain";
+async fn test_collect_with_erc20_proof_arithmetic_chain_request_is_identity() -> Result<()> {
+    let label = "arithmetic_chain_identity_fallback";
     let (deployment_bytecode, bond_calldata, collect_selector) =
         build_obfuscated_flow_inputs(label, vec![Box::new(ArithmeticChain::new())]).await?;
     let outcome =
@@ -620,33 +582,11 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_arithmetic_chain_succeeds
     assert_collect_flow_success(label, outcome)
 }
 
-/// Regression probe for two PushSplit bugs that both made `collect()`
-/// halt with `InvalidJump` at the 30M gas limit:
-///
-/// 1. `push_split.rs` emitted the split chain as `PUSH p1; op; PUSH p2;
-///    op; ...`, where the first `op` consumed whatever value the
-///    preceding code had left on the stack. The generator expected the
-///    chain to start from the identity element (0 for ADD/XOR), but the
-///    replaced PUSH was a pure stack push — so the produced constant was
-///    `(prev_top) ⊕ p1 ⊕ ... ⊕ p_n` instead of `p1 ⊕ ... ⊕ p_n`, silently
-///    corrupting the literal (in this fixture, the error-selector
-///    constant fed into the `revert CustomError()` emit sequence). Fix
-///    was to prepend a `PUSH0` before the chain so the first op always
-///    starts from zero.
-///
-/// 2. `cfg_ir::remap_orphan_jump_pushes` only scanned blocks ending with
-///    `JUMP`/`JUMPI`. Solidity's inherited-function-call convention
-///    (EscrowERC20 → EscrowBase) pushes the return address in one block
-///    and consumes it from a `JUMP` in a later block, with a `JUMPDEST`
-///    separating them. After PushSplit grew some blocks, those return
-///    addresses were stale but invisible to the extended scan. The fix
-///    drops the JUMP-ending filter and walks every body block, scoped to
-///    `PUSH2+` to avoid false positives on small literals that coincide
-///    with early `JUMPDEST` PCs. This test caught it as a runtime JUMP
-///    at PC `0x07be` consuming a stale PUSH2 from `0x07a6`.
+/// A legacy PushSplit request must be discarded atomically rather than
+/// exposing a partially transformed creation artifact.
 #[tokio::test]
-async fn test_collect_with_erc20_proof_dispatcher_plus_push_split_succeeds() -> Result<()> {
-    let label = "dispatcher_plus_push_split";
+async fn test_collect_with_erc20_proof_push_split_request_is_identity() -> Result<()> {
+    let label = "push_split_identity_fallback";
     let (deployment_bytecode, bond_calldata, collect_selector) =
         build_obfuscated_flow_inputs(label, vec![Box::new(PushSplit::new())]).await?;
     let outcome =
@@ -654,35 +594,11 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_push_split_succeeds() -> 
     assert_collect_flow_success(label, outcome)
 }
 
-/// Regression probe for two SlotShuffle bugs that made `bond()` revert
-/// with `NotFunded()` (selector `0xd5ef09ba`) — i.e. the `funded = true`
-/// SSTORE and the runtime `!funded` SLOAD disagreed on which slot
-/// `funded` lived in:
-///
-/// 1. SlotShuffle's collection and rewrite passes used `parse_slot_candidate`,
-///    which only recognised adjacent `PUSH <slot>; SLOAD/SSTORE`. Solidity's
-///    read-modify-write of a packed bool field emits a `PUSH <slot>; DUP1;
-///    SLOAD; ...; SSTORE` pattern that shares the slot via the DUP — the
-///    PUSH itself was never adjacent to the access, so it never made it
-///    into the shuffle mapping and never got rewritten. The fix replaces
-///    the adjacency check with a trace-based scan that runs backward from
-///    every SLOAD/SSTORE via DUP/SWAP/arithmetic to find the source PUSH,
-///    and records per-block `(push_idx, width, slot_bytes)` so the
-///    rewrite phase patches exactly the PUSHes the collection phase saw.
-///
-/// 2. The CFG only contains runtime-section blocks, but Solidity inlines
-///    the constructor's invocation of `fund()` into the **init section**,
-///    which is never seen by any transform. The init-code
-///    `PUSH1 0x07; SSTORE` that sets `funded = true` would still write to
-///    original slot `7`, while the runtime `PUSH1 0x07; SLOAD` got
-///    remapped to some other slot — the two sections disagreed and
-///    `bond()` read zero. Fix: `slot_shuffle.rs::init_literal_slots`
-///    walks the raw init-section bytes, finds every `PUSH; SLOAD/SSTORE`
-///    pair, and excludes those slot literals from the shuffle mapping so
-///    init-touched slots stay at their original indices.
+/// A legacy SlotShuffle request must not create disagreement between
+/// constructor-written storage and runtime-read storage.
 #[tokio::test]
-async fn test_collect_with_erc20_proof_dispatcher_plus_slot_shuffle_succeeds() -> Result<()> {
-    let label = "dispatcher_plus_slot_shuffle";
+async fn test_collect_with_erc20_proof_slot_shuffle_request_is_identity() -> Result<()> {
+    let label = "slot_shuffle_identity_fallback";
     let (deployment_bytecode, bond_calldata, collect_selector) =
         build_obfuscated_flow_inputs(label, vec![Box::new(SlotShuffle::new())]).await?;
     let outcome =
@@ -691,8 +607,8 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_slot_shuffle_succeeds() -
 }
 
 #[tokio::test]
-async fn test_collect_with_erc20_proof_dispatcher_plus_string_obfuscate_succeeds() -> Result<()> {
-    let label = "dispatcher_plus_string_obfuscate";
+async fn test_collect_with_erc20_proof_string_obfuscate_request_is_identity() -> Result<()> {
+    let label = "string_obfuscate_identity_fallback";
     let (deployment_bytecode, bond_calldata, collect_selector) =
         build_obfuscated_flow_inputs(label, vec![Box::new(StringObfuscate::new())]).await?;
     let outcome =
@@ -702,31 +618,23 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_string_obfuscate_succeeds
 
 #[tokio::test]
 async fn test_collect_with_erc20_proof_default_pipeline_succeeds() -> Result<()> {
-    let label = "default_pipeline";
-    let (deployment_bytecode, bond_calldata, collect_selector) = build_obfuscated_flow_inputs(
-        label,
-        vec![
-            Box::new(ArithmeticChain::new()),
-            Box::new(PushSplit::new()),
-            Box::new(SlotShuffle::new()),
-            Box::new(StringObfuscate::new()),
-        ],
-    )
-    .await?;
+    let label = "safe_default_pipeline_identity_fallback";
+    let (deployment_bytecode, bond_calldata, collect_selector) =
+        build_obfuscated_flow_inputs(label, vec![Box::new(ClusterShuffle::new())]).await?;
     let outcome =
         execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
     assert_collect_flow_success(label, outcome)
 }
 
-/// Seed that produced a failing mainnet `collect()` (reverted with
-/// `WrongEventSignature()` on the ERC20 Transfer-topic check). Reproduces
-/// the report end-to-end against the full default transform pipeline.
+/// Historical seed that exposed a legacy transform interaction. It is retained
+/// to prove that the safety gate now returns an authenticated identity artifact
+/// before that interaction can reach deployment.
 const MAINNET_FAILING_SEED: &str =
     "0xb1314f5c5063267ec70a9b9bb6f3d6b0cfb96b0f54773b3e534f54cd92caa5b4";
 
 #[tokio::test]
-async fn test_collect_with_erc20_proof_failing_seed_default_pipeline() -> Result<()> {
-    let label = "failing_seed_default_pipeline";
+async fn test_collect_with_erc20_proof_historical_seed_legacy_recipe_is_identity() -> Result<()> {
+    let label = "historical_seed_legacy_recipe_identity_fallback";
     let seed = Seed::from_hex(MAINNET_FAILING_SEED).expect("valid seed");
     let (deployment_bytecode, bond_calldata, collect_selector) =
         build_obfuscated_flow_inputs_with_seed(
@@ -745,12 +653,11 @@ async fn test_collect_with_erc20_proof_failing_seed_default_pipeline() -> Result
     assert_collect_flow_success(label, outcome)
 }
 
-/// Bisect the failing seed across transform subsets to localise which
-/// pass (or interaction) corrupts the Transfer topic. Prints the outcome
-/// for each subset; ignored by default (run explicitly with `--run-ignored`).
+/// Optional exhaustive audit that applies the historical seed to legacy pass
+/// subsets and checks that each subset reaches the same safe identity boundary.
 #[tokio::test]
 #[ignore]
-async fn bisect_failing_seed_transform_subsets() -> Result<()> {
+async fn audit_historical_seed_identity_fallback_across_transform_subsets() -> Result<()> {
     type Builder = fn() -> Box<dyn Transform>;
     let all: &[(&str, Builder)] = &[
         ("AC", || Box::new(ArithmeticChain::new())),
@@ -775,42 +682,32 @@ async fn bisect_failing_seed_transform_subsets() -> Result<()> {
         &[0, 1, 2, 3],
     ];
 
-    println!("\n=== bisecting failing seed across subsets ===");
+    println!("\n=== auditing identity fallback across legacy subsets ===");
     for subset in subsets {
         let names: Vec<&str> = subset.iter().map(|&i| all[i].0).collect();
-        let label = format!("bisect[{}]", names.join("+"));
+        let label = format!("subset[{}]", names.join("+"));
         let seed = Seed::from_hex(MAINNET_FAILING_SEED).expect("valid seed");
         let transforms: Vec<Box<dyn Transform>> = subset.iter().map(|&i| (all[i].1)()).collect();
 
-        let built = build_obfuscated_flow_inputs_with_seed(&label, transforms, seed).await;
-        let (deployment_bytecode, bond_calldata, collect_selector) = match built {
-            Ok(v) => v,
-            Err(e) => {
-                println!("  {label}: OBFUSCATION FAILED: {e}");
-                continue;
-            }
-        };
-        match execute_collect_proof_flow(
+        let (deployment_bytecode, bond_calldata, collect_selector) =
+            build_obfuscated_flow_inputs_with_seed(&label, transforms, seed).await?;
+        let outcome = execute_collect_proof_flow(
             deployment_bytecode,
             bond_calldata,
             collect_selector,
             &label,
-        ) {
-            Ok(FlowOutcome::Success { gas_used }) => {
-                println!("  {label}: SUCCESS (gas {gas_used})")
-            }
-            Ok(other) => println!("  {label}: FAIL {other:?}"),
-            Err(e) => println!("  {label}: ERROR {e}"),
-        }
+        )?;
+        assert_collect_flow_success(&label, outcome)?;
     }
     Ok(())
 }
 
-/// Same failing seed, ArithmeticChain only, to localise the corruption to a
-/// single transform if the full-pipeline test fails.
+/// The historical seed must also remain safe when the old ArithmeticChain
+/// recipe is requested by itself.
 #[tokio::test]
-async fn test_collect_with_erc20_proof_failing_seed_arithmetic_chain_only() -> Result<()> {
-    let label = "failing_seed_arithmetic_chain_only";
+async fn test_collect_with_erc20_proof_historical_seed_arithmetic_chain_is_identity() -> Result<()>
+{
+    let label = "historical_seed_arithmetic_chain_identity_fallback";
     let seed = Seed::from_hex(MAINNET_FAILING_SEED).expect("valid seed");
     let (deployment_bytecode, bond_calldata, collect_selector) =
         build_obfuscated_flow_inputs_with_seed(label, vec![Box::new(ArithmeticChain::new())], seed)

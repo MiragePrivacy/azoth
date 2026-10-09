@@ -20,9 +20,7 @@ use crate::{
 /// If a target falls outside the bytecode range or does not land on a JUMPDEST the function
 /// returns an error listing all invalid jump targets found.
 pub async fn validate_jump_targets(bytecode: &[u8]) -> Result<()> {
-    let (instructions, _, _, _) = decoder::decode_bytecode(&hex::encode(bytecode), false)
-        .await
-        .map_err(|e| Error::Heimdall(format!("Failed to decode bytecode for validation: {}", e)))?;
+    let instructions = decoder::decode_executable_bytes(bytecode)?;
     let jumpdests: HashSet<usize> = instructions
         .iter()
         .filter_map(|instr| matches!(instr.op, Opcode::JUMPDEST).then_some(instr.pc))

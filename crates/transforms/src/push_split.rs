@@ -22,8 +22,8 @@
 use crate::{collect_protected_nodes, collect_protected_pcs, Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, BlockControl, CfgIrBundle, JumpTarget};
 use azoth_core::decoder::Instruction;
+use azoth_core::seed::DeterministicRng;
 use azoth_core::Opcode;
-use rand::rngs::StdRng;
 use rand::Rng;
 use std::fmt::Write;
 use tracing::debug;
@@ -43,7 +43,7 @@ impl Transform for PushSplit {
         "PushSplit"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut DeterministicRng) -> Result<bool> {
         debug!("PushSplit: scanning for eligible PUSH4–PUSH16 literals");
 
         let protected_pcs = collect_protected_pcs(ir);
@@ -282,14 +282,18 @@ enum CombineOp {
 }
 
 /// Generate a randomized chain of (push, combine-op) pairs whose reduction yields `value`.
-fn generate_chain(value: u128, width_bytes: u8, rng: &mut StdRng) -> Vec<(u128, CombineOp)> {
+fn generate_chain(
+    value: u128,
+    width_bytes: u8,
+    rng: &mut DeterministicRng,
+) -> Vec<(u128, CombineOp)> {
     let bits = (width_bytes as u32) * 8;
     let max_value = if bits == 128 {
         u128::MAX
     } else {
         (1u128 << bits) - 1
     };
-    let sample = |rng: &mut StdRng| -> u128 { rng.random_range(0..=max_value) };
+    let sample = |rng: &mut DeterministicRng| -> u128 { rng.random_range(0..=max_value) };
     let parts = rng.random_range(2..=4);
 
     let prefer_xor = rng.random_bool(0.4);
@@ -464,7 +468,7 @@ mod tests {
 
     #[test]
     fn generated_chains_preserve_literal_value() {
-        let mut rng = StdRng::seed_from_u64(7);
+        let mut rng = DeterministicRng::seed_from_u64(7);
         for width in 4u8..=16 {
             let bits = (width as u32) * 8;
             let max_value = if bits == 128 {

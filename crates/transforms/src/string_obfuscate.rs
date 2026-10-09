@@ -12,8 +12,8 @@
 use crate::{collect_protected_pcs, Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, CfgIrBundle};
 use azoth_core::decoder::Instruction;
+use azoth_core::seed::DeterministicRng;
 use azoth_core::Opcode;
-use rand::rngs::StdRng;
 use rand::RngCore;
 use std::collections::HashMap;
 use tracing::debug;
@@ -33,7 +33,7 @@ impl Transform for StringObfuscate {
         "StringObfuscate"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut DeterministicRng) -> Result<bool> {
         debug!("StringObfuscate: scanning for Error(string) literals");
 
         let protected_pcs = collect_protected_pcs(ir);

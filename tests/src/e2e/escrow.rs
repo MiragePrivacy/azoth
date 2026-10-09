@@ -1,13 +1,16 @@
-//! End-to-end tests for calling obfuscated contract functions.
+//! End-to-end behavioral coverage for the safe-profile ERC20 escrow result.
 //!
-//! These tests verify that obfuscated contracts not only deploy successfully,
-//! but also execute correctly when functions are called using obfuscated tokens
-//! instead of standard 4-byte selectors.
+//! This fixture's constructor executes `GAS`, so the hardened pipeline must
+//! return the exact input artifact and preserve its standard four-byte Solidity
+//! selectors. The test checks the identity fallback before exercising stateful
+//! calls against the deployed result.
 
 use super::{
-    mock_token_bytecode, prepare_bytecode, EscrowMappings, ObfuscatedCaller,
-    ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, ESCROW_CONTRACT_RUNTIME_BYTECODE, MOCK_TOKEN_ADDR,
+    assert_erc20_identity_fallback, mock_token_bytecode, prepare_bytecode, EscrowMappings,
+    ObfuscatedCaller, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, ESCROW_CONTRACT_RUNTIME_BYTECODE,
+    MOCK_TOKEN_ADDR,
 };
+use azoth_core::seed::Seed;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
@@ -68,7 +71,7 @@ impl Inspector<Context<BlockEnv, TxEnv, CfgEnv, InMemoryDB, Journal<InMemoryDB>,
 }
 
 #[tokio::test]
-async fn test_obfuscated_function_calls() -> Result<()> {
+async fn test_safe_profile_identity_contract_function_calls() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .with_ansi(false)
@@ -133,9 +136,12 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         }
     }
 
-    // obfuscate contract
-    println!("\n=== Proceeding with Obfuscated Deployment ===");
-    let config = ObfuscationConfig::default();
+    // Process through the production-safe profile. ClusterShuffle may produce a
+    // runtime candidate, but the constructor's GAS observation forces that
+    // candidate to be discarded atomically.
+    println!("\n=== Processing Safe-Profile Identity Fallback ===");
+    let seed = Seed::from_bytes([0x32; 32]);
+    let config = ObfuscationConfig::with_seed(seed.clone());
 
     let obfuscation_result = obfuscate_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
@@ -143,31 +149,18 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         config,
     )
     .await
-    .map_err(|e| eyre!("Failed to obfuscate bytecode: {:?}", e))?;
+    .map_err(|e| eyre!("Failed to process bytecode through safe profile: {:?}", e))?;
 
     println!(
-        "✓ Contract obfuscated ({} -> {} bytes, {:+.1}%)",
+        "✓ Safe-profile result ({} -> {} bytes, {:+.1}%)",
         obfuscation_result.original_size,
         obfuscation_result.obfuscated_size,
         obfuscation_result.size_increase_percentage
     );
 
-    // extracting selector mappings
-    let selector_mapping = obfuscation_result
-        .selector_mapping
-        .as_ref()
-        .ok_or_else(|| eyre!("No selector mapping found in obfuscation result"))?;
-    println!("✓ Extracted {} selector mappings", selector_mapping.len());
-
-    println!("Selectors found:");
-    for (selector, token) in selector_mapping.iter() {
-        println!("  0x{:08x} -> 0x{}", selector, hex::encode(token));
-    }
-
-    let escrow_mappings = EscrowMappings::from_obfuscator_output(selector_mapping)
-        .map_err(|e| eyre!("Failed to create escrow mappings: {}", e))?;
-
-    println!("✓ Created EscrowMappings with obfuscated tokens");
+    assert_erc20_identity_fallback(&obfuscation_result, &seed, &["ClusterShuffle"])?;
+    let escrow_mappings = EscrowMappings::identity();
+    println!("✓ Verified identity artifact and standard Solidity selectors");
 
     // setup EVM with mock token contract
     let mut db = InMemoryDB::default();
@@ -299,7 +292,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         }
     };
 
-    println!("✓ Obfuscated contract deployed at: {}", contract_address);
+    println!("✓ Safe-profile result deployed at: {}", contract_address);
 
     // Validate all PUSH+JUMP pairs in deployed bytecode
     println!("\n=== Validating Deployed Bytecode ===");
@@ -329,10 +322,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         .map(|i| i.pc)
         .collect();
 
-    println!(
-        "Obfuscated deployed bytecode has {} JUMPDESTs",
-        jumpdests.len()
-    );
+    println!("Deployed bytecode has {} JUMPDESTs", jumpdests.len());
 
     // Check all PUSH+JUMP/JUMPI pairs
     let mut valid_jumps = 0;
@@ -360,7 +350,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         }
     }
 
-    println!("Obfuscated deployed bytecode jump statistics:");
+    println!("Deployed bytecode jump statistics:");
     println!("  Total jumps: {}", valid_jumps + invalid_jumps.len());
     println!("  Valid jumps: {}", valid_jumps);
     println!("  Invalid jumps: {}", invalid_jumps.len());
@@ -402,7 +392,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
 
     let is_bonded_calldata = caller.is_bonded_call_data();
     println!(
-        "  Calldata (obfuscated): 0x{}",
+        "  Calldata (standard ABI): 0x{}",
         hex::encode(&is_bonded_calldata)
     );
 
@@ -450,7 +440,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     let payment_amount = U256::from(5000);
     let fund_calldata = caller.fund_call_data(reward_amount, payment_amount);
     println!(
-        "  Calldata (obfuscated): 0x{} (reward: {}, payment: {})",
+        "  Calldata (standard ABI): 0x{} (reward: {}, payment: {})",
         hex::encode(&fund_calldata),
         reward_amount,
         payment_amount
@@ -529,7 +519,10 @@ async fn test_obfuscated_function_calls() -> Result<()> {
 
     let bond_amount = U256::from(2500);
     let bond_calldata = caller.bond_call_data(bond_amount);
-    println!("  Calldata (obfuscated): 0x{}", hex::encode(&bond_calldata));
+    println!(
+        "  Calldata (standard ABI): 0x{}",
+        hex::encode(&bond_calldata)
+    );
 
     let bond_tx = TxEnv {
         caller: deployer,
@@ -612,12 +605,12 @@ async fn test_obfuscated_function_calls() -> Result<()> {
 
     println!("  Result after bonding: is_bonded = {}", is_bonded);
 
-    println!("✓ bond() executed successfully on obfuscated contract");
+    println!("✓ bond() executed successfully on the safe identity artifact");
 
-    println!("\n✓ Obfuscated contract executes correctly");
-    println!("✓ Valid tokens route to correct functions");
-    println!("✓ Token extraction works with function arguments (bond with uint256)");
-    println!("✓ State changes are preserved through obfuscation");
+    println!("\n✓ Safe-profile identity artifact executes correctly");
+    println!("✓ Standard selectors route to the expected functions");
+    println!("✓ ABI arguments work for bond(uint256)");
+    println!("✓ Stateful escrow behavior is preserved");
 
     Ok(())
 }

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod arithmetic_chain;
 pub mod cluster_shuffle;
 pub mod constructor_args;
@@ -13,9 +15,9 @@ pub mod storage_gates;
 pub mod string_obfuscate;
 
 use azoth_core::cfg_ir::CfgIrBundle;
+use azoth_core::seed::DeterministicRng;
 use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
-use rand::rngs::StdRng;
 use std::collections::HashSet;
 
 use thiserror::Error;
@@ -50,8 +52,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub trait Transform: Send + Sync {
     /// Returns the transform's name for logging and identification.
     fn name(&self) -> &'static str;
+    /// Returns a canonical identifier for this transform instance's behavior-affecting options.
+    ///
+    /// Parameterless transforms may use this default. A transform with configurable behavior must
+    /// override it and encode every option deterministically. Implementation changes are protocol
+    /// changes and still require a pipeline-profile bump even when the instance options are
+    /// unchanged.
+    fn configuration_id(&self) -> String {
+        format!("{}@parameterless-v1", self.name())
+    }
     /// Applies the transform to the CFG IR, returning whether changes were made.
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool>;
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut DeterministicRng) -> Result<bool>;
 }
 
 /// Parses a PUSH opcode string and returns the corresponding Opcode enum and immediate size.

@@ -293,6 +293,54 @@ fn push_reaches_jump_consumed_by_sload_as_slot_is_rejected() {
 }
 
 #[test]
+fn push_reaches_jump_uses_native_stack_metadata_for_current_opcodes() {
+    for consumer in [Opcode::CLZ, Opcode::BLOBHASH, Opcode::TLOAD] {
+        let instrs = vec![
+            prj_instr(0, Opcode::PUSH(2), Some("0100")),
+            prj_instr(3, consumer, None),
+        ];
+        assert!(
+            !push_reaches_jump(&instrs, 0),
+            "{consumer} consumes the tracked literal"
+        );
+    }
+
+    let blob_base_fee = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("0100")),
+        prj_instr(3, Opcode::BLOBBASEFEE, None),
+        prj_instr(4, Opcode::POP, None),
+        prj_instr(5, Opcode::CLZ, None),
+    ];
+    assert!(!push_reaches_jump(&blob_base_fee, 0));
+
+    let tstore = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("0100")),
+        prj_instr(3, Opcode::PUSH0, None),
+        prj_instr(4, Opcode::TSTORE, None),
+    ];
+    assert!(!push_reaches_jump(&tstore, 0));
+
+    let mcopy = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("0100")),
+        prj_instr(3, Opcode::PUSH0, None),
+        prj_instr(4, Opcode::PUSH0, None),
+        prj_instr(5, Opcode::MCOPY, None),
+    ];
+    assert!(!push_reaches_jump(&mcopy, 0));
+
+    // EXTCODECOPY consumes four operands. Tracking a value three positions below the top catches
+    // the previous hand-maintained model's incorrect three-input assumption.
+    let extcodecopy = vec![
+        prj_instr(0, Opcode::PUSH(2), Some("0100")),
+        prj_instr(3, Opcode::PUSH0, None),
+        prj_instr(4, Opcode::PUSH0, None),
+        prj_instr(5, Opcode::PUSH0, None),
+        prj_instr(6, Opcode::EXTCODECOPY, None),
+    ];
+    assert!(!push_reaches_jump(&extcodecopy, 0));
+}
+
+#[test]
 fn push_reaches_jump_stack_carried_past_internal_call() {
     // Solidity internal-function-call convention:
     //

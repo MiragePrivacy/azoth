@@ -11,7 +11,8 @@ use hex;
 /// # Arguments
 /// * `instructions` - A slice of `Instruction` structs, each containing an opcode and optional
 ///   immediate data.
-/// * `bytecode` - Reference bytecode to extract unknown opcode bytes from using PC.
+/// * `bytecode` - Retained for source compatibility; native opcodes are self-contained and this
+///   reference is never consulted.
 ///
 /// # Returns
 /// A `Result` containing the encoded bytecode as a `Vec<u8>` or an `Error` if encoding fails.
@@ -27,9 +28,9 @@ use hex;
 /// let bytes = encode(&[ins], &[0x60, 0xaa]).unwrap();
 /// assert_eq!(bytes, vec![0x60, 0xaa]);
 /// ```
-pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, Error> {
-    let mut bytes = Vec::with_capacity(instructions.len() * 3);
-    let mut unknown_count = 0;
+pub fn encode(instructions: &[Instruction], _bytecode: &[u8]) -> Result<Vec<u8>, Error> {
+    let capacity = validate_instruction_stream(instructions)?;
+    let mut bytes = Vec::with_capacity(capacity);
 
     for ins in instructions {
         tracing::debug!(
@@ -39,108 +40,27 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
             ins.imm
         );
 
-        // Handle INVALID opcodes by attempting to preserve the original byte.
-        //
-        // Note: INVALID here is often a placeholder from the decoder, not the actual 0xFE opcode.
-        // When heimdall outputs "unknown" without a hex byte, the decoder uses INVALID as a marker.
-        // We recover the actual byte value from the original bytecode using PC, or skip if unavailable.
-        if matches!(ins.op, Opcode::INVALID) {
-            unknown_count += 1;
-            tracing::warn!("Encoding INVALID opcode at pc={}", ins.pc);
-
-            // First try immediate data (might contain the original byte value)
-            if let Some(immediate) = &ins.imm
-                && let Ok(byte_val) = u8::from_str_radix(immediate, 16)
-            {
-                bytes.push(byte_val);
-                tracing::debug!(
-                    "Preserved INVALID opcode from immediate as byte 0x{:02x}",
-                    byte_val
-                );
-                continue;
-            }
-
-            // Then try bytecode lookup
-            if ins.pc < bytecode.len() {
-                let byte_val = bytecode[ins.pc];
-                bytes.push(byte_val);
-                tracing::debug!(
-                    "Preserved INVALID opcode from bytecode as byte 0x{:02x} at pc={}",
-                    byte_val,
-                    ins.pc
-                );
-                continue;
-            }
-
-            // Last resort: SKIP the instruction (cannot determine byte value)
-            tracing::error!(
-                "Cannot determine byte value for INVALID opcode at pc={}, skipping (this may break functionality)",
-                ins.pc
-            );
-            continue; // Skip this instruction instead of encoding 0xFE
-        }
-
         let opcode = ins.op;
+        let opcode_byte = opcode
+            .try_to_byte()
+            .map_err(|error| Error::UnsupportedOpcode(error.to_string()))?;
 
-        tracing::debug!(
-            "Encoding opcode '{}' -> byte 0x{:02x}",
-            opcode,
-            opcode.to_byte()
-        );
-        bytes.push(opcode.to_byte());
+        tracing::debug!("Encoding opcode '{}' -> byte 0x{:02x}", opcode, opcode_byte);
+        bytes.push(opcode_byte);
 
-        // Handle immediate data for PUSH opcodes
-        if let Opcode::PUSH(n) = opcode {
-            if let Some(immediate) = &ins.imm {
-                let imm_bytes = match hex::decode(immediate) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to decode immediate '{}' (len {}) for {} at pc={}: {:?}",
-                            immediate,
-                            immediate.len(),
-                            opcode,
-                            ins.pc,
-                            e
-                        );
-                        return Err(Error::InvalidImmediate(format!(
-                            "invalid hex immediate '{}' for {} at pc={}: {:?}",
-                            immediate, opcode, ins.pc, e
-                        )));
-                    }
-                };
-                if imm_bytes.len() != n as usize {
-                    tracing::error!(
-                        "Invalid immediate length for {}: expected {} bytes, got {} bytes",
-                        opcode,
-                        n,
-                        imm_bytes.len()
-                    );
-                    return Err(Error::InvalidImmediate(format!(
-                        "PUSH{} requires {}-byte immediate, got {} bytes at pc={}",
-                        n,
-                        n,
-                        imm_bytes.len(),
-                        ins.pc
-                    )));
-                }
-                bytes.extend_from_slice(&imm_bytes);
-                tracing::debug!("Added {} immediate bytes for {}", imm_bytes.len(), opcode);
-            } else {
-                tracing::error!("Missing immediate for {} at pc={}", opcode, ins.pc);
-                return Err(Error::InvalidImmediate(format!(
-                    "PUSH{} missing immediate at pc={}",
-                    n, ins.pc
-                )));
-            }
+        if let Opcode::PUSH(_) = opcode {
+            let immediate = ins.imm.as_deref().ok_or_else(|| {
+                Error::InvalidImmediate(format!("{opcode} missing immediate at pc={}", ins.pc))
+            })?;
+            let imm_bytes = hex::decode(immediate).map_err(|error| {
+                Error::InvalidImmediate(format!(
+                    "invalid hex immediate '{immediate}' for {opcode} at pc={}: {error}",
+                    ins.pc
+                ))
+            })?;
+            bytes.extend_from_slice(&imm_bytes);
+            tracing::debug!("Added {} immediate bytes for {}", imm_bytes.len(), opcode);
         }
-    }
-
-    if unknown_count > 0 {
-        tracing::warn!(
-            "Encoded {} unknown opcodes as raw bytes. The resulting bytecode preserves the original bytes but these may represent invalid EVM instructions.",
-            unknown_count
-        );
     }
 
     tracing::debug!(
@@ -149,6 +69,77 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
         bytes.len()
     );
     Ok(bytes)
+}
+
+fn validate_instruction_stream(instructions: &[Instruction]) -> Result<usize, Error> {
+    let mut capacity = 0usize;
+    let mut expected_pc = instructions.first().map_or(0, |instruction| instruction.pc);
+
+    for (index, instruction) in instructions.iter().enumerate() {
+        if instruction.pc != expected_pc {
+            return Err(Error::InvalidBlockStructure(format!(
+                "non-contiguous instruction PCs: expected 0x{expected_pc:x}, found 0x{:x}",
+                instruction.pc
+            )));
+        }
+        instruction
+            .op
+            .try_to_byte()
+            .map_err(|error| Error::UnsupportedOpcode(error.to_string()))?;
+
+        let encoded_size = match instruction.op {
+            Opcode::PUSH(width) => {
+                let immediate = instruction.imm.as_deref().ok_or_else(|| {
+                    Error::InvalidImmediate(format!(
+                        "PUSH{width} missing immediate at pc={}",
+                        instruction.pc
+                    ))
+                })?;
+                let maximum_hex_len = usize::from(width) * 2;
+                if immediate.len() > maximum_hex_len {
+                    return Err(Error::InvalidImmediate(format!(
+                        "PUSH{width} accepts at most {width} immediate bytes, got {} bytes at pc={}",
+                        immediate.len().div_ceil(2),
+                        instruction.pc
+                    )));
+                }
+                if immediate.len() % 2 != 0
+                    || !immediate.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(Error::InvalidImmediate(format!(
+                        "PUSH{width} immediate at pc={} must be whole-byte hexadecimal",
+                        instruction.pc
+                    )));
+                }
+                let immediate_bytes = immediate.len() / 2;
+                if immediate_bytes < usize::from(width) && index + 1 != instructions.len() {
+                    return Err(Error::InvalidImmediate(format!(
+                        "truncated PUSH{width} at pc={} must be the final instruction",
+                        instruction.pc
+                    )));
+                }
+                1usize.checked_add(immediate_bytes).ok_or_else(|| {
+                    Error::InvalidBlockStructure("encoded instruction size overflow".into())
+                })?
+            }
+            _ if instruction.imm.is_some() => {
+                return Err(Error::InvalidImmediate(format!(
+                    "{} at pc={} cannot carry immediate data",
+                    instruction.op, instruction.pc
+                )));
+            }
+            _ => 1,
+        };
+
+        capacity = capacity.checked_add(encoded_size).ok_or_else(|| {
+            Error::InvalidBlockStructure("encoded bytecode length overflow".into())
+        })?;
+        expected_pc = expected_pc
+            .checked_add(encoded_size)
+            .ok_or_else(|| Error::InvalidBlockStructure("instruction PC overflow".into()))?;
+    }
+
+    Ok(capacity)
 }
 
 /// Reassembles the original bytecode by combining runtime bytecode with non-runtime sections.
@@ -161,9 +152,9 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
 /// * `report` - The `CleanReport` containing metadata about removed sections (mutable to update init code).
 ///
 /// # Returns
-/// The reassembled bytecode as a `Vec<u8>`.
-pub fn rebuild(runtime: &[u8], report: &mut CleanReport) -> Vec<u8> {
-    report.reassemble(runtime)
+/// The reassembled bytecode, or an error when init-code relocation cannot be proven safe.
+pub fn rebuild(runtime: &[u8], report: &mut CleanReport) -> Result<Vec<u8>, Error> {
+    report.reassemble(runtime).map_err(Error::ObfuscationFailed)
 }
 
 #[cfg(test)]
@@ -198,19 +189,66 @@ mod tests {
     }
 
     #[test]
-    fn preserves_invalid_from_immediate() {
+    fn invalid_always_encodes_as_fe() {
         let instructions = vec![Instruction {
             pc: 5,
             op: Opcode::INVALID,
-            imm: Some("fe".into()),
+            imm: None,
         }];
 
-        let bytes = encode(&instructions, &[]).expect("encodes invalid from imm");
+        let bytes = encode(&instructions, &[]).expect("encodes invalid");
         assert_eq!(bytes, vec![0xfe]);
     }
 
     #[test]
-    fn preserves_invalid_from_bytecode_fallback() {
+    fn rejects_immediate_on_non_push_opcode() {
+        let instructions = vec![Instruction {
+            pc: 5,
+            op: Opcode::JUMP,
+            imm: Some("1234".into()),
+        }];
+
+        let error = encode(&instructions, &[]).unwrap_err();
+        assert!(matches!(error, Error::InvalidImmediate(_)));
+        assert!(error.to_string().contains("cannot carry immediate data"));
+    }
+
+    #[test]
+    fn rejects_non_contiguous_program_counters() {
+        let instructions = vec![
+            Instruction {
+                pc: 4,
+                op: Opcode::STOP,
+                imm: None,
+            },
+            Instruction {
+                pc: 6,
+                op: Opcode::ADD,
+                imm: None,
+            },
+        ];
+
+        let error = encode(&instructions, &[]).unwrap_err();
+        assert!(matches!(error, Error::InvalidBlockStructure(_)));
+        assert!(error.to_string().contains("non-contiguous instruction PCs"));
+    }
+
+    #[test]
+    fn rejects_oversized_immediate_before_hex_decoding() {
+        let instructions = vec![Instruction {
+            pc: 0,
+            op: Opcode::PUSH(1),
+            imm: Some("z".repeat(1_000_000)),
+        }];
+
+        let error = encode(&instructions, &[]).unwrap_err();
+        assert!(matches!(error, Error::InvalidImmediate(_)));
+        assert!(error.to_string().contains("at most 1 immediate bytes"));
+        assert!(error.to_string().len() < 200);
+    }
+
+    #[test]
+    fn invalid_never_uses_reference_bytecode() {
         let instructions = vec![Instruction {
             pc: 2,
             op: Opcode::INVALID,
@@ -219,7 +257,20 @@ mod tests {
         let reference = [0xaa, 0xbb, 0xcc, 0xdd];
 
         let bytes = encode(&instructions, &reference).expect("encodes invalid from bytecode");
-        assert_eq!(bytes, vec![reference[2]]);
+        assert_eq!(bytes, vec![0xfe]);
+    }
+
+    #[test]
+    fn rejects_assigned_byte_disguised_as_unknown() {
+        let instructions = vec![Instruction {
+            pc: 0,
+            op: Opcode::UNKNOWN(0x56),
+            imm: None,
+        }];
+
+        let error = encode(&instructions, &[]).unwrap_err();
+        assert!(matches!(error, Error::UnsupportedOpcode(_)));
+        assert!(error.to_string().contains("cannot be marked UNKNOWN"));
     }
 
     #[test]
@@ -238,17 +289,22 @@ mod tests {
     }
 
     #[test]
-    fn errors_on_wrong_immediate_length() {
+    fn encodes_truncated_push_only_at_end() {
         let instructions = vec![Instruction {
             pc: 0,
             op: Opcode::PUSH(2),
             imm: Some("aa".into()),
         }];
 
-        let err = encode(&instructions, &[]).unwrap_err();
-        assert!(
-            matches!(err, Error::InvalidImmediate(_)),
-            "unexpected error: {err:?}"
-        );
+        assert_eq!(encode(&instructions, &[]).unwrap(), vec![0x61, 0xaa]);
+
+        let mut followed = instructions;
+        followed.push(Instruction {
+            pc: 2,
+            op: Opcode::STOP,
+            imm: None,
+        });
+        let err = encode(&followed, &[]).unwrap_err();
+        assert!(matches!(err, Error::InvalidImmediate(_)));
     }
 }

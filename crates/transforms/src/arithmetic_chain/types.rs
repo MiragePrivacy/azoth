@@ -4,8 +4,8 @@
 //! transform, including operations, chain definitions, scatter strategies, and
 //! configuration options.
 
+use azoth_core::seed::DeterministicRng;
 use petgraph::graph::NodeIndex;
-use rand::rngs::StdRng;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::ops::RangeInclusive;
@@ -39,7 +39,7 @@ impl ArithmeticOp {
     /// - ADD, SUB, XOR: 25% each (75% total)
     /// - AND, OR: 8% each (16% total)
     /// - MUL, DIV: 4.5% each (9% total)
-    pub fn random(rng: &mut StdRng) -> Self {
+    pub fn random(rng: &mut DeterministicRng) -> Self {
         let roll: f32 = rng.random();
         if roll < 0.25 {
             Self::Add
@@ -62,7 +62,11 @@ impl ArithmeticOp {
     ///
     /// Given `result = a OP b`, computes `(a, b)` such that applying the operation
     /// forward produces `result`.
-    pub fn compute_backward(&self, result: [u8; 32], rng: &mut StdRng) -> ([u8; 32], [u8; 32]) {
+    pub fn compute_backward(
+        &self,
+        result: [u8; 32],
+        rng: &mut DeterministicRng,
+    ) -> ([u8; 32], [u8; 32]) {
         match self {
             Self::Add => {
                 let b = random_sized_value(rng);
@@ -160,7 +164,7 @@ impl ArithmeticOp {
 ///
 /// Prefers even PUSH sizes (2, 4, 8, 16, 32) for better bytecode alignment,
 /// with weighted distribution favoring smaller values.
-fn random_sized_value(rng: &mut StdRng) -> [u8; 32] {
+fn random_sized_value(rng: &mut DeterministicRng) -> [u8; 32] {
     // Preferred even sizes with weights favoring smaller values
     // PUSH2, PUSH4, PUSH8, PUSH16, PUSH32
     let sizes: [(u8, u32); 5] = [
@@ -290,7 +294,7 @@ fn wrapping_div(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 }
 
 /// Pick a factor that divides the result evenly for MUL backward.
-fn pick_exact_divisor(value: &[u8; 32], rng: &mut StdRng) -> [u8; 32] {
+fn pick_exact_divisor(value: &[u8; 32], rng: &mut DeterministicRng) -> [u8; 32] {
     if value.iter().all(|&b| b == 0) {
         let mut result = [0u8; 32];
         result[31] = 1;
@@ -450,8 +454,8 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
 
-    fn test_rng() -> StdRng {
-        StdRng::seed_from_u64(12345)
+    fn test_rng() -> DeterministicRng {
+        DeterministicRng::seed_from_u64(12345)
     }
 
     #[test]

@@ -15,15 +15,15 @@ use super::FunctionDispatcher;
 use azoth_core::cfg_ir::CfgIrBundle;
 use azoth_core::decoder::Instruction;
 use azoth_core::detection::DispatcherInfo;
+use azoth_core::seed::DeterministicRng;
 use petgraph::graph::NodeIndex;
-use rand::rngs::StdRng;
 use std::collections::HashMap;
 
 impl FunctionDispatcher {
     pub(crate) fn build_blueprint(
         &self,
         dispatcher: &DispatcherInfo,
-        rng: &mut StdRng,
+        rng: &mut DeterministicRng,
     ) -> DispatcherBlueprint {
         blueprint::build_blueprint(dispatcher, rng)
     }

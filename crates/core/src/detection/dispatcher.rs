@@ -122,40 +122,36 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
                 }
             }
 
-            Opcode::JUMPI => {
-                if stack.len() >= 2 {
-                    // JUMPI pops: [condition, destination]
-                    // Stack before JUMPI: [..., destination, condition]
-                    // We want stack[len-1] which is the destination
-                    let target_val = stack[stack.len() - 1];
-                    stack.truncate(stack.len() - 2);
+            Opcode::JUMPI if stack.len() >= 2 => {
+                // JUMPI pops: [condition, destination]
+                // Stack before JUMPI: [..., destination, condition]
+                // We want stack[len-1] which is the destination
+                let target_val = stack[stack.len() - 1];
+                stack.truncate(stack.len() - 2);
 
-                    if let StackValue::Const {
-                        addr: address,
-                        def_pc,
-                    } = target_val
-                        && let Some((selector, sel_idx)) = current_selector
-                    {
-                        selectors.push(FunctionSelector {
-                            selector,
-                            target_address: address as u64,
-                            instruction_index: sel_idx,
-                        });
-                        tracing::debug!(
-                            "Paired selector 0x{:08x} -> target 0x{:x} (PUSH at PC 0x{:x})",
-                            selector,
-                            address,
-                            def_pc
-                        );
-                        current_selector = None;
-                    }
+                if let StackValue::Const {
+                    addr: address,
+                    def_pc,
+                } = target_val
+                    && let Some((selector, sel_idx)) = current_selector
+                {
+                    selectors.push(FunctionSelector {
+                        selector,
+                        target_address: address as u64,
+                        instruction_index: sel_idx,
+                    });
+                    tracing::debug!(
+                        "Paired selector 0x{:08x} -> target 0x{:x} (PUSH at PC 0x{:x})",
+                        selector,
+                        address,
+                        def_pc
+                    );
+                    current_selector = None;
                 }
             }
 
-            Opcode::JUMP => {
-                if !stack.is_empty() {
-                    stack.pop();
-                }
+            Opcode::JUMP if !stack.is_empty() => {
+                stack.pop();
             }
 
             Opcode::POP if !stack.is_empty() => {
@@ -170,18 +166,16 @@ pub fn detect_function_dispatcher(instructions: &[Instruction]) -> Option<Dispat
             | Opcode::LT
             | Opcode::GT
             | Opcode::SLT
-            | Opcode::SGT => {
-                if stack.len() >= 2 {
-                    stack.truncate(stack.len() - 2);
-                    stack.push(StackValue::Unknown);
-                }
+            | Opcode::SGT
+                if stack.len() >= 2 =>
+            {
+                stack.truncate(stack.len() - 2);
+                stack.push(StackValue::Unknown);
             }
 
-            Opcode::ISZERO | Opcode::NOT => {
-                if !stack.is_empty() {
-                    stack.pop();
-                    stack.push(StackValue::Unknown);
-                }
+            Opcode::ISZERO | Opcode::NOT if !stack.is_empty() => {
+                stack.pop();
+                stack.push(StackValue::Unknown);
             }
 
             Opcode::REVERT if selectors.len() >= 3 => {
@@ -302,7 +296,7 @@ fn find_dispatcher_preamble(instructions: &[Instruction], extraction_start: usiz
 
     // If no clear preamble pattern found at start, scan backwards from extraction
     // looking for CALLVALUE check or CALLDATASIZE check
-    let search_start = extraction_start.saturating_sub(20).max(0);
+    let search_start = extraction_start.saturating_sub(20);
 
     for i in search_start..extraction_start {
         if i + 2 < instructions.len() {

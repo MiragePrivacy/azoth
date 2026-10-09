@@ -1,18 +1,18 @@
-//! SMT solver integration for formal verification
+//! Experimental SMT formula generation and a deliberately narrow Z3 adapter.
 //!
-//! This module provides SMT-LIB formula generation and Z3 solver integration
-//! for proving contract equivalence and property preservation.
+//! Only the formula forms parsed exactly by this module are accepted. Unsupported
+//! or incomplete obligations are errors; they are never approximated as `true`.
 
 use crate::semantics::{ContractSemantics, FunctionSemantics, ModificationType, StateModification};
 use crate::{Error, VerificationResult};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::time::Duration;
 use z3::{
     ast::{self, Ast},
     Config, Context, Solver,
 };
 
-/// SMT solver for formal verification
+/// SMT solver adapter for definitive satisfiability checks.
 #[derive(Debug)]
 pub struct SmtSolver {
     z3_context: Context,
@@ -25,15 +25,40 @@ struct SmtFormula {
     assertions: Vec<String>,
 }
 
-/// Result from SMT solver
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A definitive result from the SMT solver.
+///
+/// Z3's `unknown` result is returned as [`Error::SolverUnknown`], so this type
+/// can only represent `sat` or `unsat`.
+#[derive(Debug, Clone, Serialize)]
 pub struct SmtResult {
     /// Whether the formula is satisfiable
-    pub satisfiable: bool,
+    satisfiable: bool,
     /// Model (if satisfiable)
-    pub model: Option<String>,
+    model: Option<String>,
     /// Time taken to solve
-    pub solve_time: Duration,
+    solve_time: Duration,
+}
+
+impl SmtResult {
+    /// Whether Z3 definitively returned `sat`.
+    pub fn is_satisfiable(&self) -> bool {
+        self.satisfiable
+    }
+
+    /// Whether Z3 definitively returned `unsat`.
+    pub fn is_unsatisfiable(&self) -> bool {
+        !self.satisfiable
+    }
+
+    /// The model produced for a satisfiable formula, if Z3 supplied one.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// Time spent in the definitive solver check.
+    pub fn solve_time(&self) -> Duration {
+        self.solve_time
+    }
 }
 
 /// Function parameter information extracted from semantic analysis
@@ -83,6 +108,12 @@ impl SmtSolver {
 
     /// Check satisfiability of SMT formulas
     pub async fn check_satisfiability(&self, formulas: &[String]) -> VerificationResult<SmtResult> {
+        if formulas.is_empty() {
+            return Err(Error::IncompleteProof {
+                reason: "no SMT assertions were supplied".to_string(),
+            });
+        }
+
         let start_time = std::time::Instant::now();
         let solver = Solver::new(&self.z3_context);
 
@@ -92,8 +123,7 @@ impl SmtSolver {
         }
 
         // Check satisfiability
-        let result = solver.check();
-        let satisfiable = matches!(result, z3::SatResult::Sat);
+        let satisfiable = Self::definitive_satisfiability(solver.check())?;
 
         // Get model if satisfiable
         let model = if satisfiable {
@@ -111,6 +141,16 @@ impl SmtSolver {
         })
     }
 
+    fn definitive_satisfiability(result: z3::SatResult) -> VerificationResult<bool> {
+        match result {
+            z3::SatResult::Sat => Ok(true),
+            z3::SatResult::Unsat => Ok(false),
+            z3::SatResult::Unknown => Err(Error::SolverUnknown(
+                "Z3 did not return sat or unsat".to_string(),
+            )),
+        }
+    }
+
     /// Parse and add SMT formula to solver
     fn parse_and_add_formula(&self, solver: &z3::Solver, formula: &str) -> VerificationResult<()> {
         if formula.trim().starts_with("(assert") {
@@ -118,27 +158,83 @@ impl SmtSolver {
             let ast = self.parse_assertion_content(&content)?;
             solver.assert(&ast);
             Ok(())
+        } else if formula.trim().starts_with("(declare-") {
+            Err(Error::Unsupported(
+                "standalone declarations are not supported by the typed SMT adapter; no assertion was checked"
+                    .to_string(),
+            ))
         } else {
-            // Handle declarations
-            if formula.trim().starts_with("(declare-") {
-                // For now, skip declarations as they're handled by our type system
-                Ok(())
-            } else {
-                Err(Error::SmtSolver(format!(
-                    "Unsupported formula format: {formula}",
-                )))
-            }
+            Err(Error::Unsupported(format!(
+                "unsupported formula format: {formula}",
+            )))
         }
     }
 
     fn extract_assertion_content(&self, formula: &str) -> VerificationResult<String> {
-        let trimmed = formula.trim();
-        if trimmed.starts_with("(assert") && trimmed.ends_with(')') {
-            let content = &trimmed[8..trimmed.len() - 1].trim();
-            Ok(content.to_string())
-        } else {
-            Err(Error::SmtSolver("Invalid assertion format".to_string()))
+        let content = Self::exact_application_body(formula, "assert")?;
+        if content.is_empty() {
+            return Err(Error::IncompleteProof {
+                reason: "SMT assertion has an empty body".to_string(),
+            });
         }
+        Ok(content.to_string())
+    }
+
+    /// Return the body of one exact S-expression application.
+    ///
+    /// This intentionally rejects trailing commands and unbalanced or surplus
+    /// parentheses. The adapter must never solve a lossy approximation of the
+    /// caller's input.
+    fn exact_application_body<'a>(
+        expression: &'a str,
+        operator: &str,
+    ) -> VerificationResult<&'a str> {
+        let expression = expression.trim();
+        if !expression.starts_with('(') || !expression.ends_with(')') {
+            return Err(Error::Unsupported(format!(
+                "expected one complete `{operator}` expression: {expression}",
+            )));
+        }
+
+        let mut depth = 0usize;
+        for (offset, character) in expression.char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' => {
+                    if depth == 0 {
+                        return Err(Error::Unsupported(format!(
+                            "unbalanced SMT expression: {expression}",
+                        )));
+                    }
+                    depth -= 1;
+                    if depth == 0 && offset + character.len_utf8() != expression.len() {
+                        return Err(Error::Unsupported(format!(
+                            "trailing SMT input is not supported: {expression}",
+                        )));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth != 0 {
+            return Err(Error::Unsupported(format!(
+                "unbalanced SMT expression: {expression}",
+            )));
+        }
+
+        let inner = &expression[1..expression.len() - 1];
+        let rest = inner.strip_prefix(operator).ok_or_else(|| {
+            Error::Unsupported(format!(
+                "expected `{operator}` application, got: {expression}",
+            ))
+        })?;
+        if !rest.is_empty() && !rest.chars().next().is_some_and(char::is_whitespace) {
+            return Err(Error::Unsupported(format!(
+                "invalid `{operator}` application: {expression}",
+            )));
+        }
+
+        Ok(rest.trim())
     }
 
     fn parse_assertion_content(&self, content: &str) -> VerificationResult<ast::Bool<'_>> {
@@ -151,125 +247,63 @@ impl SmtSolver {
             Ok(ast::Bool::from_bool(&self.z3_context, false))
         } else if content.starts_with("(=") {
             self.parse_equality(content)
-        } else if content.starts_with("(>") {
-            self.parse_comparison(content, ">")
         } else if content.starts_with("(>=") {
             self.parse_comparison(content, ">=")
-        } else if content.starts_with("(<") {
-            self.parse_comparison(content, "<")
         } else if content.starts_with("(<=") {
             self.parse_comparison(content, "<=")
-        } else if content.starts_with("(and") {
-            self.parse_and(content)
-        } else if content.starts_with("(or") {
-            self.parse_or(content)
+        } else if content.starts_with("(>") {
+            self.parse_comparison(content, ">")
+        } else if content.starts_with("(<") {
+            self.parse_comparison(content, "<")
         } else if content.starts_with("(not") {
             self.parse_not(content)
-        } else if content.starts_with("(forall") {
-            self.parse_forall(content)
-        } else if content.starts_with("(=>") {
-            self.parse_implies(content)
         } else {
-            // For now, treat unknown formulas as true to avoid failures
-            tracing::warn!("Unknown SMT formula pattern: {content}, treating as true");
-            Ok(ast::Bool::from_bool(&self.z3_context, true))
+            Err(Error::Unsupported(format!(
+                "unsupported SMT assertion: {content}",
+            )))
         }
     }
 
     fn parse_equality(&self, content: &str) -> VerificationResult<ast::Bool<'_>> {
-        // Simple equality parsing: (= a b)
-        if content.len() > 4 {
-            let inner = &content[2..content.len() - 1].trim();
-            let parts: Vec<&str> = inner.split_whitespace().collect();
-            if parts.len() == 2 {
-                let left = self.parse_term(parts[0])?;
-                let right = self.parse_term(parts[1])?;
-                Ok(left._eq(&right))
-            } else {
-                Ok(ast::Bool::from_bool(&self.z3_context, true))
-            }
+        let inner = Self::exact_application_body(content, "=")?;
+        let parts: Vec<&str> = inner.split_whitespace().collect();
+        if parts.len() == 2 {
+            let left = self.parse_term(parts[0])?;
+            let right = self.parse_term(parts[1])?;
+            Ok(left._eq(&right))
         } else {
-            Ok(ast::Bool::from_bool(&self.z3_context, true))
+            Err(Error::Unsupported(format!(
+                "equality requires exactly two simple terms: {content}",
+            )))
         }
     }
 
     fn parse_comparison(&self, content: &str, op: &str) -> VerificationResult<ast::Bool<'_>> {
-        let op_len = op.len() + 1; // +1 for opening paren
-        if content.len() > op_len + 1 {
-            let inner = &content[op_len..content.len() - 1].trim();
-            let parts: Vec<&str> = inner.split_whitespace().collect();
-            if parts.len() == 2 {
-                let left = self.parse_int_term(parts[0])?;
-                let right = self.parse_int_term(parts[1])?;
-                match op {
-                    ">" => Ok(left.gt(&right)),
-                    ">=" => Ok(left.ge(&right)),
-                    "<" => Ok(left.lt(&right)),
-                    "<=" => Ok(left.le(&right)),
-                    _ => Ok(ast::Bool::from_bool(&self.z3_context, true)),
-                }
-            } else {
-                Ok(ast::Bool::from_bool(&self.z3_context, true))
+        let inner = Self::exact_application_body(content, op)?;
+        let parts: Vec<&str> = inner.split_whitespace().collect();
+        if parts.len() == 2 {
+            let left = self.parse_int_term(parts[0])?;
+            let right = self.parse_int_term(parts[1])?;
+            match op {
+                ">" => Ok(left.gt(&right)),
+                ">=" => Ok(left.ge(&right)),
+                "<" => Ok(left.lt(&right)),
+                "<=" => Ok(left.le(&right)),
+                _ => Err(Error::Unsupported(format!(
+                    "unsupported comparison operator: {op}",
+                ))),
             }
         } else {
-            Ok(ast::Bool::from_bool(&self.z3_context, true))
+            Err(Error::Unsupported(format!(
+                "comparison requires exactly two simple terms: {content}",
+            )))
         }
-    }
-
-    fn parse_and(&self, _content: &str) -> VerificationResult<ast::Bool<'_>> {
-        // For now, simplified and parsing
-        Ok(ast::Bool::from_bool(&self.z3_context, true))
-    }
-
-    fn parse_or(&self, _content: &str) -> VerificationResult<ast::Bool<'_>> {
-        // For now, simplified or parsing
-        Ok(ast::Bool::from_bool(&self.z3_context, true))
     }
 
     fn parse_not(&self, content: &str) -> VerificationResult<ast::Bool<'_>> {
-        if content.len() > 5 {
-            let inner = &content[4..content.len() - 1].trim();
-            let inner_ast = self.parse_assertion_content(inner)?;
-            Ok(inner_ast.not())
-        } else {
-            Ok(ast::Bool::from_bool(&self.z3_context, true))
-        }
-    }
-
-    fn parse_forall(&self, content: &str) -> VerificationResult<ast::Bool<'_>> {
-        let content = content.trim();
-        if !content.starts_with("(forall") {
-            return Ok(ast::Bool::from_bool(&self.z3_context, true));
-        }
-
-        // Extract the body part after variable declarations
-        // For now, we'll parse basic forall patterns
-        if let Some(body_start) = content.find(")) ") {
-            let body = &content[body_start + 3..];
-            let body = if let Some(stripped) = body.strip_suffix(')') {
-                stripped
-            } else {
-                body
-            };
-
-            // Parse the body formula
-            self.parse_assertion_content(body)
-        } else {
-            // Fallback for complex quantifiers
-            tracing::warn!("Complex quantifier pattern, approximating as true");
-            Ok(ast::Bool::from_bool(&self.z3_context, true))
-        }
-    }
-
-    fn parse_implies(&self, content: &str) -> VerificationResult<ast::Bool<'_>> {
-        // Implication parsing: (=> a b)
-        if content.len() > 4 {
-            let _inner = &content[3..content.len() - 1].trim();
-            // For now, simplified parsing
-            Ok(ast::Bool::from_bool(&self.z3_context, true))
-        } else {
-            Ok(ast::Bool::from_bool(&self.z3_context, true))
-        }
+        let inner = Self::exact_application_body(content, "not")?;
+        let inner_ast = self.parse_assertion_content(inner)?;
+        Ok(inner_ast.not())
     }
 
     fn parse_term(&self, term: &str) -> VerificationResult<ast::Dynamic<'_>> {
@@ -280,11 +314,12 @@ impl SmtSolver {
             if let Ok(value) = i64::from_str_radix(stripped, 16) {
                 Ok(ast::Int::from_i64(&self.z3_context, value).into())
             } else {
-                // Create integer variable (Z3 automatically infers sort)
-                Ok(ast::Int::new_const(&self.z3_context, term).into())
+                Err(Error::Unsupported(format!(
+                    "invalid or out-of-range hexadecimal integer literal: {term}",
+                )))
             }
         } else {
-            // Variable name - create integer constant
+            self.validate_identifier(term)?;
             Ok(ast::Int::new_const(&self.z3_context, term).into())
         }
     }
@@ -296,10 +331,29 @@ impl SmtSolver {
             if let Ok(value) = i64::from_str_radix(stripped, 16) {
                 Ok(ast::Int::from_i64(&self.z3_context, value))
             } else {
-                Ok(ast::Int::new_const(&self.z3_context, term))
+                Err(Error::Unsupported(format!(
+                    "invalid or out-of-range hexadecimal integer literal: {term}",
+                )))
             }
         } else {
+            self.validate_identifier(term)?;
             Ok(ast::Int::new_const(&self.z3_context, term))
+        }
+    }
+
+    fn validate_identifier(&self, identifier: &str) -> VerificationResult<()> {
+        let mut chars = identifier.chars();
+        let starts_validly = chars
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic() || character == '_');
+        let remainder_is_valid = chars
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'));
+        if starts_validly && remainder_is_valid {
+            Ok(())
+        } else {
+            Err(Error::Unsupported(format!(
+                "unsupported SMT identifier: {identifier}",
+            )))
         }
     }
 
@@ -848,16 +902,13 @@ impl SmtSolver {
     /// Prove that two contracts are equivalent
     pub async fn prove_equivalence(
         &self,
-        original: &ContractSemantics,
-        obfuscated: &ContractSemantics,
+        _original: &ContractSemantics,
+        _obfuscated: &ContractSemantics,
     ) -> VerificationResult<bool> {
-        let equivalence_formula = self.generate_equivalence_formula(original, obfuscated)?;
-
-        // Check satisfiability (if unsatisfiable, then equivalence holds)
-        let result = self.check_satisfiability(&[equivalence_formula]).await?;
-
-        // For equivalence proofs, we want UNSAT (meaning the negation is unsatisfiable)
-        Ok(!result.satisfiable)
+        Err(Error::VerificationUnavailable {
+            reason: "the current equivalence encoding is incomplete and does not encode a negated counterexample obligation"
+                .to_string(),
+        })
     }
 }
 
@@ -883,6 +934,81 @@ mod tests {
 
         let result = solver.check_satisfiability(&formulas).await;
         assert!(result.is_ok());
+        let result = result.unwrap();
+        assert!(!result.is_satisfiable());
+        assert!(result.is_unsatisfiable());
+        assert!(result.model().is_none());
+        assert!(result.solve_time() <= Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn empty_formula_set_is_rejected() {
+        let solver = SmtSolver::new().unwrap();
+
+        let error = solver.check_satisfiability(&[]).await.unwrap_err();
+        assert!(matches!(error, Error::IncompleteProof { .. }));
+
+        for empty_assertion in ["(assert)", "(assert )"] {
+            let error = solver
+                .check_satisfiability(&[empty_assertion.to_string()])
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, Error::IncompleteProof { .. }),
+                "{empty_assertion}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn declaration_is_not_silently_dropped() {
+        let solver = SmtSolver::new().unwrap();
+        let formulas = vec!["(declare-fun x () Int)".to_string()];
+
+        let error = solver.check_satisfiability(&formulas).await.unwrap_err();
+        assert!(matches!(error, Error::Unsupported(_)));
+    }
+
+    #[tokio::test]
+    async fn unsupported_or_malformed_assertions_are_rejected() {
+        let solver = SmtSolver::new().unwrap();
+
+        for formula in [
+            "(assert (and true true))",
+            "(assert (= x))",
+            "(assert (forall ((x Int)) true))",
+            "(assert (= #xnot-hex 1))",
+            "(assert true))",
+            "(assert (= x 1)))",
+            "(assert (= x 1)",
+            "(assert true) (assert false)",
+            "(assertion false)",
+            "(assert (not))",
+        ] {
+            let error = solver
+                .check_satisfiability(&[formula.to_string()])
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::Unsupported(_)), "{formula}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_input_is_not_dropped_after_a_contradiction() {
+        let solver = SmtSolver::new().unwrap();
+        let formulas = vec![
+            "(assert false)".to_string(),
+            "(assert (and true true))".to_string(),
+        ];
+
+        let error = solver.check_satisfiability(&formulas).await.unwrap_err();
+        assert!(matches!(error, Error::Unsupported(_)));
+    }
+
+    #[test]
+    fn solver_unknown_is_not_classified_as_unsat() {
+        let error = SmtSolver::definitive_satisfiability(z3::SatResult::Unknown).unwrap_err();
+        assert!(matches!(error, Error::SolverUnknown(_)));
     }
 
     #[test]

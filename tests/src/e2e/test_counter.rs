@@ -1,3 +1,4 @@
+use azoth_core::seed::Seed;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
@@ -56,10 +57,13 @@ async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
         .without_time()
         .try_init();
 
+    // Selector rewriting is an experimental interface transform, never a production default.
+    let mut config = ObfuscationConfig::with_seed(Seed::from_bytes([0x31; 32]));
+    config.rewrite_function_selectors = true;
     let obfuscation_result = obfuscate_bytecode(
         COUNTER_DEPLOYMENT_BYTECODE,
         COUNTER_RUNTIME_BYTECODE,
-        ObfuscationConfig::default(),
+        config,
     )
     .await
     .map_err(|e| eyre!("Bytecode transformation failed: {}", e))?;

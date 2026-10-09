@@ -1,4 +1,9 @@
-//! Mirage Privacy Protocol - Obfuscation Workflow
+//! Mirage Privacy Protocol - safe-foundation replay workflow.
+//!
+//! This example demonstrates deterministic transformation and authenticated replay. It does not
+//! claim semantic equivalence, indistinguishability, anonymity, or production readiness.
+
+#![recursion_limit = "256"]
 
 use azoth_core::seed::Seed;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig, ObfuscationResult};
@@ -10,7 +15,7 @@ const MIRAGE_ESCROW_RUNTIME_PATH: &str = "escrow-bytecode/artifacts/erc20_runtim
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("Mirage Privacy Protocol - Obfuscation Workflow");
+    println!("Mirage Privacy Protocol - Safe Foundation Replay Workflow");
     println!("=================================================");
 
     // Load contract bytecode (both deployment and runtime)
@@ -24,8 +29,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         runtime_bytecode.len()
     );
 
-    // SENDER: Compile with obfuscation O(S, K2)
-    println!("\nSENDER: Compiling contract with obfuscation...");
+    // SENDER: Run the currently admitted foundation profile O(S, K2).
+    println!("\nSENDER: Applying the safe foundation profile...");
     let obfuscation_result =
         apply_mirage_obfuscation(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
     let obfuscated_bytecode = hex::decode(
@@ -34,13 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .trim_start_matches("0x"),
     )?;
 
-    let size_increase =
-        calculate_percentage_increase(original_bytecode.len(), obfuscated_bytecode.len());
+    let size_delta = calculate_percentage_delta(original_bytecode.len(), obfuscated_bytecode.len());
     println!("   Original:   {} bytes", original_bytecode.len());
     println!(
-        "   Obfuscated: {} bytes (+{:.1}%)",
+        "   Output:     {} bytes ({:+.1}%)",
         obfuscated_bytecode.len(),
-        size_increase
+        size_delta
     );
 
     // Print transform information
@@ -55,8 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
     }
 
-    // VERIFIER: Verify bytecode integrity
-    println!("\nVERIFIER: Verifying deterministic compilation with K2...");
+    // VERIFIER: Replay the exact inputs and authenticate the resulting artifact manifest.
+    println!("\nVERIFIER: Checking deterministic replay with K2...");
     let recompilation_result =
         apply_mirage_obfuscation(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
     let recompiled_bytecode = hex::decode(
@@ -65,43 +69,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .trim_start_matches("0x"),
     )?;
 
-    // Check 1: Deterministic compilation (same seed = same result)
-    let deterministic_verified = obfuscated_bytecode == recompiled_bytecode;
-    if !deterministic_verified {
-        return Err("Deterministic compilation failed - seed produced different results".into());
+    let deterministic_replay_verified = obfuscated_bytecode == recompiled_bytecode
+        && obfuscation_result.obfuscated_runtime == recompilation_result.obfuscated_runtime
+        && obfuscation_result.integrity == recompilation_result.integrity
+        && obfuscation_result.private_interaction_manifest()
+            == recompilation_result.private_interaction_manifest();
+    if !deterministic_replay_verified {
+        return Err("Deterministic replay failed - identical private inputs diverged".into());
     }
-    println!("   Deterministic compilation VERIFIED");
+    println!("   Deterministic replay VERIFIED");
 
-    // Check 2: Effective obfuscation (original ≠ obfuscated)
-    let obfuscation_applied = verify_obfuscation_applied(&original_bytecode, &obfuscated_bytecode);
-    if !obfuscation_applied {
-        return Err("No obfuscation detected - bytecode unchanged".into());
-    }
-    println!("   Obfuscation transformation VERIFIED");
+    obfuscation_result
+        .verify_integrity(&original_bytecode, &runtime_bytecode, &seed_k2)
+        .map_err(|error| format!("Integrity-manifest verification failed: {error}"))?;
+    let integrity_manifest_verified = true;
+    println!("   Authenticated artifact integrity VERIFIED");
 
-    // Check 3: Functional equivalence
-    let functional_equivalence =
-        verify_functional_equivalence(&original_bytecode, &obfuscated_bytecode).await?;
-    if !functional_equivalence {
-        return Err("Functional equivalence failed - behavior changed".into());
-    }
+    let bytecode_changed = original_bytecode != obfuscated_bytecode;
+    println!(
+        "   Variation outcome: {}",
+        if bytecode_changed {
+            "changed artifact"
+        } else {
+            "exact identity (a conservative fallback, not a variation success)"
+        }
+    );
+    println!("   Semantic equivalence: NOT VERIFIED (formal verifier unavailable)");
+    println!("   Indistinguishability/anonymity: NOT EVALUATED");
 
     // Gas analysis
-    println!("\nGAS ANALYSIS:");
+    println!("\nCREATION INPUT INTRINSIC GAS ESTIMATE (not total deployment gas):");
     let gas_analysis = analyze_gas_costs(&original_bytecode, &obfuscated_bytecode);
+    println!("   Original payload:    {} gas", gas_analysis.original_gas);
     println!(
-        "   Original deployment:   {} gas",
-        gas_analysis.original_gas
-    );
-    println!(
-        "   Obfuscated deployment: {} gas",
+        "   Transformed payload: {} gas",
         gas_analysis.obfuscated_gas
     );
-    println!("   Gas overhead: {:.2}%", gas_analysis.overhead_percentage);
+    println!("   Gas delta: {:+.2}%", gas_analysis.delta_percentage);
 
-    // Deterministic compilation verification
-    println!("\nDETERMINISTIC COMPILATION TEST:");
-    verify_deterministic_compilation_test(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
+    println!("\nDETERMINISTIC REPLAY TEST:");
+    let alternate_seed_changed =
+        verify_deterministic_replay_test(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
 
     // Generate comprehensive report
     let report = generate_workflow_report(
@@ -109,19 +117,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         &obfuscated_bytecode,
         &gas_analysis,
         &obfuscation_result,
-        deterministic_verified,
-        obfuscation_applied,
-        functional_equivalence,
+        deterministic_replay_verified,
+        integrity_manifest_verified,
+        bytecode_changed,
+        alternate_seed_changed,
     );
 
     save_report(&report, "mirage_report.json")?;
 
-    println!("\nMIRAGE WORKFLOW COMPLETED SUCCESSFULLY");
-    println!("   Deterministic compilation: VERIFIED");
-    println!("   Obfuscation applied: VERIFIED");
-    println!("   Functional equivalence: VERIFIED");
-    println!("   Gas overhead: {:.2}%", gas_analysis.overhead_percentage);
-    println!("   Size overhead: {size_increase:.1}%");
+    println!("\nFOUNDATION REPLAY WORKFLOW COMPLETED");
+    println!("   Deterministic replay: VERIFIED");
+    println!("   Artifact integrity: VERIFIED");
+    println!(
+        "   Variation outcome: {}",
+        if bytecode_changed {
+            "CHANGED"
+        } else {
+            "IDENTITY"
+        }
+    );
+    println!("   Semantic equivalence: NOT VERIFIED");
+    println!("   Indistinguishability/anonymity: NOT EVALUATED");
+    println!("   Input-gas delta: {:+.2}%", gas_analysis.delta_percentage);
+    println!("   Size delta: {size_delta:+.1}%");
     println!("   Report saved: mirage_report.json");
 
     Ok(())
@@ -160,7 +178,7 @@ fn load_mirage_contract() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Erro
     Ok((deployment, runtime))
 }
 
-/// Apply Mirage obfuscation transforms using the unified pipeline
+/// Apply the currently admitted safe foundation profile using the unified pipeline.
 async fn apply_mirage_obfuscation(
     bytecode: &[u8],
     runtime_bytecode: &[u8],
@@ -169,8 +187,7 @@ async fn apply_mirage_obfuscation(
     let hex_input = format!("0x{}", hex::encode(bytecode));
     let runtime_hex = format!("0x{}", hex::encode(runtime_bytecode));
 
-    // Create Mirage-specific transform configuration
-    let config = create_mirage_config(seed_k2);
+    let config = create_safe_foundation_config(seed_k2);
 
     // Use the unified obfuscation pipeline
     obfuscate_bytecode(&hex_input, &runtime_hex, config)
@@ -178,42 +195,9 @@ async fn apply_mirage_obfuscation(
         .map_err(|e| e.into())
 }
 
-/// Create Mirage-specific obfuscation configuration
-fn create_mirage_config(seed_k2: &Seed) -> ObfuscationConfig {
-    // Build Mirage-specific transforms (function_dispatcher is added automatically)
-    let transforms = vec![
-        Box::new(azoth_transform::shuffle::Shuffle) as Box<dyn azoth_transform::Transform>,
-        Box::new(azoth_transform::jump_address_transformer::JumpAddressTransformer::new()),
-        Box::new(azoth_transform::opaque_predicate::OpaquePredicate::new()),
-    ];
-
-    ObfuscationConfig {
-        seed: seed_k2.clone(),
-        transforms,
-        preserve_unknown_opcodes: true,
-    }
-}
-
-/// Verify that obfuscation was actually applied (original ≠ obfuscated)
-fn verify_obfuscation_applied(original: &[u8], obfuscated: &[u8]) -> bool {
-    original != obfuscated
-}
-
-/// Verify functional equivalence by testing contract behavior
-async fn verify_functional_equivalence(
-    _original: &[u8],
-    _obfuscated: &[u8],
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    println!("   Functional equivalence testing not yet implemented");
-    println!("   Using placeholder verification for development");
-
-    // TODO: Implement actual functional testing:
-    // 1. Deploy both contracts to test environment
-    // 2. Run identical transaction sequences
-    // 3. Compare contract states and outputs
-    // 4. Verify gas costs are reasonable
-
-    Ok(true)
+/// Build the conservative foundation configuration exposed by default.
+fn create_safe_foundation_config(seed_k2: &Seed) -> ObfuscationConfig {
+    ObfuscationConfig::with_seed(seed_k2.clone())
 }
 
 /// Gas analysis results
@@ -221,66 +205,77 @@ async fn verify_functional_equivalence(
 struct GasAnalysis {
     original_gas: u64,
     obfuscated_gas: u64,
-    overhead_percentage: f64,
+    delta_percentage: f64,
 }
 
-/// Analyze gas costs for deployment
+/// Estimate only the intrinsic transaction-data component for the creation payload.
+///
+/// This deliberately excludes init-code execution, memory expansion, EIP-3860 metering, and
+/// code-deposit gas, so it must not be presented as total deployment gas.
 fn analyze_gas_costs(original: &[u8], obfuscated: &[u8]) -> GasAnalysis {
-    let original_gas = calculate_deployment_gas(original);
-    let obfuscated_gas = calculate_deployment_gas(obfuscated);
-    let overhead_percentage = calculate_gas_percentage_increase(original_gas, obfuscated_gas);
+    let original_gas = calculate_intrinsic_input_gas(original);
+    let obfuscated_gas = calculate_intrinsic_input_gas(obfuscated);
+    let delta_percentage = calculate_gas_percentage_delta(original_gas, obfuscated_gas);
 
     GasAnalysis {
         original_gas,
         obfuscated_gas,
-        overhead_percentage,
+        delta_percentage,
     }
 }
 
-/// Calculate deployment gas using EVM formula: 21000 + 4*zeros + 16*nonzeros
-fn calculate_deployment_gas(bytecode: &[u8]) -> u64 {
+/// Calculate the base transaction plus zero/non-zero calldata byte cost.
+fn calculate_intrinsic_input_gas(bytecode: &[u8]) -> u64 {
     let zero_bytes = bytecode.iter().filter(|&&b| b == 0).count() as u64;
     let non_zero_bytes = (bytecode.len() as u64) - zero_bytes;
     21_000 + (zero_bytes * 4) + (non_zero_bytes * 16)
 }
 
 /// Calculate percentage increase between two values
-fn calculate_percentage_increase(original: usize, new: usize) -> f64 {
+fn calculate_percentage_delta(original: usize, new: usize) -> f64 {
     let orig = original as f64;
     let new_val = new as f64;
     ((new_val / orig) - 1.0) * 100.0
 }
 
 /// Calculate percentage increase for gas values
-fn calculate_gas_percentage_increase(original: u64, new: u64) -> f64 {
+fn calculate_gas_percentage_delta(original: u64, new: u64) -> f64 {
     let orig = original as f64;
     let new_val = new as f64;
     ((new_val / orig) - 1.0) * 100.0
 }
 
-/// Verify deterministic compilation produces identical results
-async fn verify_deterministic_compilation_test(
+/// Verify exact same-seed replay and report, without requiring, cross-seed diversity.
+///
+/// Different seeds may legitimately produce the same artifact when a pass has no movable units or
+/// a safety gate returns the unchanged input. Cross-seed equality is therefore an outcome, not a
+/// determinism failure.
+async fn verify_deterministic_replay_test(
     bytecode: &[u8],
     runtime_bytecode: &[u8],
     seed: &Seed,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let result1 = apply_mirage_obfuscation(bytecode, runtime_bytecode, seed).await?;
     let result2 = apply_mirage_obfuscation(bytecode, runtime_bytecode, seed).await?;
 
     if result1.obfuscated_bytecode != result2.obfuscated_bytecode {
-        return Err("Same seed produced different bytecode - not deterministic!".into());
+        return Err("Same seed produced different bytecode - replay is not deterministic".into());
     }
-    println!("   Same seed produces identical bytecode");
+    println!("   Same seed produces identical bytecode: VERIFIED");
 
-    // Test different seeds produce different results
-    let different_seed = Seed::generate();
+    let different_seed = Seed::from_bytes([0xa5; 32]);
     let diff_result = apply_mirage_obfuscation(bytecode, runtime_bytecode, &different_seed).await?;
-    if result1.obfuscated_bytecode == diff_result.obfuscated_bytecode {
-        return Err("Different seeds produced identical bytecode!".into());
-    }
-    println!("   Different seeds produce different bytecode");
+    let alternate_seed_changed = result1.obfuscated_bytecode != diff_result.obfuscated_bytecode;
+    println!(
+        "   Fixed alternate seed outcome: {}",
+        if alternate_seed_changed {
+            "different artifact"
+        } else {
+            "same artifact (permitted for a no-op/identity fallback)"
+        }
+    );
 
-    Ok(())
+    Ok(alternate_seed_changed)
 }
 
 /// Generate comprehensive workflow report
@@ -290,9 +285,10 @@ fn generate_workflow_report(
     obfuscated: &[u8],
     gas_analysis: &GasAnalysis,
     obfuscation_result: &ObfuscationResult,
-    deterministic_verified: bool,
-    obfuscation_applied: bool,
-    functional_equivalence: bool,
+    deterministic_replay_verified: bool,
+    integrity_manifest_verified: bool,
+    bytecode_changed: bool,
+    alternate_seed_changed: bool,
 ) -> serde_json::Value {
     json!({
         "mirage_obfuscation_workflow": {
@@ -300,37 +296,40 @@ fn generate_workflow_report(
             "bytecode_analysis": {
                 "original_bytes": original.len(),
                 "obfuscated_bytes": obfuscated.len(),
-                "size_increase_bytes": obfuscated.len() - original.len(),
-                "size_increase_percentage": calculate_percentage_increase(original.len(), obfuscated.len()),
-                "obfuscation_applied": obfuscation_applied,
+                "size_delta_bytes": obfuscated.len() as i64 - original.len() as i64,
+                "size_delta_percentage": calculate_percentage_delta(original.len(), obfuscated.len()),
+                "variation_outcome": if bytecode_changed { "changed" } else { "exact_identity" },
                 "unknown_opcodes_preserved": obfuscation_result.unknown_opcodes_count,
                 "blocks_created": obfuscation_result.blocks_created,
                 "instructions_added": obfuscation_result.instructions_added
             },
             "gas_analysis": {
-                "original_deployment_gas": gas_analysis.original_gas,
-                "obfuscated_deployment_gas": gas_analysis.obfuscated_gas,
-                "gas_increase": (gas_analysis.obfuscated_gas as i64 - gas_analysis.original_gas as i64),
-                "gas_overhead_percentage": gas_analysis.overhead_percentage
+                "scope": "base transaction plus creation-payload calldata bytes only; not total deployment gas",
+                "original_intrinsic_input_gas_estimate": gas_analysis.original_gas,
+                "transformed_intrinsic_input_gas_estimate": gas_analysis.obfuscated_gas,
+                "gas_delta": (gas_analysis.obfuscated_gas as i64 - gas_analysis.original_gas as i64),
+                "gas_delta_percentage": gas_analysis.delta_percentage
             },
             "verification_results": {
-                "deterministic_compilation": deterministic_verified,
-                "obfuscation_transformation_applied": obfuscation_applied,
-                "functional_equivalence_verified": functional_equivalence,
-                "overall_verification_passed": deterministic_verified && obfuscation_applied && functional_equivalence,
-                "verification_level": "preliminary_functional_testing",
-                "formal_verification_status": "pending_implementation"
+                "deterministic_replay_verified": deterministic_replay_verified,
+                "integrity_manifest_verified": integrity_manifest_verified,
+                "alternate_seed_changed_artifact": alternate_seed_changed,
+                "semantic_equivalence_status": "not_verified",
+                "formal_verification_status": "unavailable_fail_closed",
+                "release_gate_passed": false
             },
-            "security_properties": {
-                "statistical_indistinguishability": obfuscation_applied,
+            "security_assessment": {
+                "statistical_indistinguishability": "not_evaluated",
+                "anonymity_set_membership": "not_demonstrated",
+                "clustering_resistance": "not_demonstrated",
                 "transforms_applied": obfuscation_result.metadata.transforms_applied,
-                "verification_completeness": "basic_structural_validation"
+                "warning": "a changed artifact is not evidence of stealth or semantic equivalence"
             },
             "mirage_protocol": {
-                "sender_workflow": if obfuscation_applied { "Contract successfully obfuscated with seed K2" } else { "ERROR: No obfuscation applied" },
-                "executor_workflow": if deterministic_verified { "Bytecode determinism verified with K2" } else { "ERROR: Non-deterministic compilation" },
-                "anonymity_set": if obfuscation_applied { "Blends with unverified contract deployments" } else { "WARNING: Unchanged bytecode may be recognizable" },
-                "production_readiness": "requires_formal_verification"
+                "authorized_replay": if deterministic_replay_verified { "artifact reproduced from bytecode and K2" } else { "replay failed" },
+                "integrity": if integrity_manifest_verified { "seed-bound artifact hashes authenticated" } else { "integrity check failed" },
+                "interface": "safe profile preserves original selectors; no private selector mapping is needed",
+                "production_readiness": "no_go"
             },
             "obfuscation_details": {
                 "size_limit_exceeded": obfuscation_result.metadata.size_limit_exceeded,
@@ -339,22 +338,15 @@ fn generate_workflow_report(
             },
             "recommendations": {
                 "immediate": [
-                    "Current verification provides basic confidence for development",
-                    "Functional testing validates structural integrity",
-                    "Deterministic compilation ensures Mirage protocol compatibility",
-                    "Function dispatcher obfuscation automatically applied for baseline security"
+                    "Treat deterministic replay and integrity authentication as narrower properties than equivalence",
+                    "Count exact-identity results separately from changed outputs",
+                    "Use the safe profile only for development and evaluation"
                 ],
                 "before_production": [
-                    "Implement formal verification (see GitHub issue)",
-                    "Deploy test contracts with identical transaction sequences",
-                    "Validate all ERC standard compliance",
-                    "Security audit of obfuscated contracts",
-                    "Gas optimization analysis"
-                ],
-                "monitoring": [
-                    "Track obfuscation effectiveness metrics",
-                    "Monitor gas overhead in production",
-                    "Verify deterministic compilation in CI/CD"
+                    "Implement and independently validate complete semantic-equivalence obligations",
+                    "Run differential behavior tests over calls, state, logs, reverts, external calls, and fork contexts",
+                    "Evaluate genuinely changed outputs against a representative Ethereum negative corpus",
+                    "Complete independent security review"
                 ]
             }
         }

@@ -14,8 +14,13 @@ use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+mod relationships;
 mod trace;
 
+pub use relationships::{
+    BlockCluster, BlockLink, BlockRelationships, BlockRole, CodePointerRelocation,
+    RelationshipIndex,
+};
 pub use trace::{
     BlockBodySnapshot, BlockChangeSet, BlockControlSnapshot, BlockModification, BlockPcDiff,
     BlockSnapshot, BlockSnapshotKind, CfgIrDiff, CfgIrSnapshot, EdgeChangeSet, EdgeSnapshot,
@@ -51,6 +56,9 @@ pub struct BlockBody {
     pub instructions: Vec<Instruction>,
     pub max_stack: usize,
     pub control: BlockControl,
+    /// Code section that owns this block.  Section ownership is semantic metadata and must not be
+    /// inferred from a mutable program counter after layout transforms begin.
+    pub section: SectionKind,
 }
 
 impl BlockBody {
@@ -61,16 +69,17 @@ impl BlockBody {
             instructions: Vec::new(),
             max_stack: 0,
             control: BlockControl::Unknown,
+            section: SectionKind::Runtime,
         }
     }
 
-    /// Returns true when this block resides inside the runtime section described by
-    /// `runtime_start`.
-    fn is_runtime(&self, runtime_start: Option<(usize, usize)>) -> bool {
-        if let Some((start, end)) = runtime_start {
-            return self.start_pc >= start && self.start_pc < end;
-        }
-        false
+    /// Returns true when this block belongs to executable runtime code.
+    ///
+    /// Section ownership is stable while program counters are not: transforms may append or move
+    /// a runtime block before lowering assigns its final PC. The retained parameter keeps legacy
+    /// call sites source-compatible while those callers migrate to section-aware APIs.
+    fn is_runtime(&self, runtime_bounds: Option<(usize, usize)>) -> bool {
+        runtime_bounds.is_some() && self.section == SectionKind::Runtime
     }
 }
 
@@ -111,7 +120,7 @@ pub enum JumpTarget {
 }
 
 /// Describes how to interpret the immediate used by a jump.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum JumpEncoding {
     /// Immediate stores an absolute PC.
     Absolute,
@@ -123,7 +132,7 @@ pub enum JumpEncoding {
 }
 
 /// Edge types mirror the legacy representation to avoid touching downstream consumers.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeType {
     Fallthrough,
     Jump,
@@ -165,9 +174,65 @@ pub struct CfgIrBundle {
     /// rewrite every AC-emitted offset PUSH so CODECOPY still points into
     /// the appended data section.
     pub ac_runtime_length_estimate: Option<usize>,
+    /// Intended physical order of body blocks.  `NodeIndex` is stable identity; `start_pc` is only
+    /// a lowered address and is assigned from this order during finalization.
+    pub layout_order: Vec<NodeIndex>,
+    /// Cached structural relationships rebuilt at transform boundaries.
+    pub relationships: RelationshipIndex,
 }
 
 impl CfgIrBundle {
+    /// Returns body blocks in their intended physical bytecode order.
+    pub fn layout_order(&self) -> &[NodeIndex] {
+        &self.layout_order
+    }
+
+    /// Replaces the intended physical layout while preserving stable graph identity.
+    ///
+    /// The proposed order must contain every body block exactly once, keep the entry block first,
+    /// and preserve every fallthrough or PC-relative cluster recorded in the current relationship
+    /// snapshot.  Addresses are not changed until [`Self::reindex_pcs`] lowers this order.
+    pub fn set_layout_order(&mut self, order: Vec<NodeIndex>) -> Result<(), Error> {
+        let relationships = RelationshipIndex::build(self).map_err(Error::InvalidBlockStructure)?;
+        relationships
+            .validate_layout(&order)
+            .map_err(Error::InvalidBlockStructure)?;
+        let blocks_moved = self
+            .layout_order
+            .iter()
+            .zip(&order)
+            .filter(|(before, after)| before != after)
+            .count();
+        self.layout_order = order;
+        self.refresh_relationships()?;
+        let snapshot = snapshot_bundle(self);
+        self.record_operation(
+            OperationKind::ReorderLayout { blocks_moved },
+            CfgIrDiff::FullSnapshot(Box::new(snapshot)),
+            None,
+        );
+        Ok(())
+    }
+
+    /// Rebuilds predecessor, successor, cluster, role, and relocation metadata.
+    pub fn refresh_relationships(&mut self) -> Result<(), Error> {
+        self.relationships =
+            RelationshipIndex::build(self).map_err(Error::InvalidBlockStructure)?;
+        Ok(())
+    }
+
+    /// Returns the most recently refreshed relationship snapshot.
+    pub fn relationships(&self) -> &RelationshipIndex {
+        &self.relationships
+    }
+
+    /// Re-derives and validates all structural relationships without mutating bytecode.
+    pub fn validate_relationships(&self) -> Result<(), Error> {
+        RelationshipIndex::build(self)
+            .map(|_| ())
+            .map_err(Error::InvalidBlockStructure)
+    }
+
     /// Returns cached runtime bounds (start inclusive, end exclusive) if the bytecode contains a
     /// runtime section.
     pub fn runtime_bounds(&self) -> Option<(usize, usize)> {
@@ -176,14 +241,11 @@ impl CfgIrBundle {
 
     /// Returns true when the block referenced by `node` sits inside the runtime section.
     fn block_runtime_status(&self, node: NodeIndex) -> bool {
-        self.runtime_bounds
-            .and_then(|(start, end)| {
-                self.cfg.node_weight(node).map(|block| match block {
-                    Block::Body(body) => body.start_pc >= start && body.start_pc < end,
-                    _ => false,
-                })
-            })
-            .unwrap_or(false)
+        self.runtime_bounds.is_some()
+            && matches!(
+                self.cfg.node_weight(node),
+                Some(Block::Body(body)) if body.section == SectionKind::Runtime
+            )
     }
 
     /// Returns a copy of the block control descriptor, if the node is a body block.
@@ -251,6 +313,9 @@ impl CfgIrBundle {
             Block::Entry | Block::Exit => 0,
         };
         let node = self.cfg.add_node(block);
+        if matches!(self.cfg.node_weight(node), Some(Block::Body(_))) {
+            self.layout_order.push(node);
+        }
 
         // Snapshot the new block for the diff
         let after = snapshot_block_body(self, node);
@@ -571,21 +636,10 @@ impl CfgIrBundle {
 
     /// Finds the next block in program counter order, if any.
     fn find_next_body(&self, node: NodeIndex) -> Option<NodeIndex> {
-        let mut nodes: Vec<_> = self
-            .cfg
-            .node_references()
-            .filter_map(|(idx, block)| match block {
-                Block::Body(body) => Some((idx, body.start_pc)),
-                _ => None,
-            })
-            .collect();
-        nodes.sort_by_key(|(_, pc)| *pc);
-        for (i, (idx, _)) in nodes.iter().enumerate() {
-            if *idx == node {
-                return nodes.get(i + 1).map(|(next_idx, _)| *next_idx);
-            }
-        }
-        None
+        self.layout_order
+            .iter()
+            .position(|candidate| *candidate == node)
+            .and_then(|position| self.layout_order.get(position + 1).copied())
     }
 
     /// Reindexes PCs and refreshes the start_pc mapping. Unlike the legacy implementation this also
@@ -593,20 +647,22 @@ impl CfgIrBundle {
     /// for blocks using the new API.
     /// Renumbers program counters and returns a mapping from old PCs to their new positions.
     pub fn reindex_pcs(&mut self) -> Result<ReindexOutcome, Error> {
+        // Lowering touches every instruction and can fail late if a relocated target no longer
+        // fits its original PUSH width. Work on an isolated bundle so callers never observe a
+        // half-reindexed graph after an error.
+        let mut candidate = self.clone();
+        let outcome = candidate.reindex_pcs_in_place()?;
+        *self = candidate;
+        Ok(outcome)
+    }
+
+    fn reindex_pcs_in_place(&mut self) -> Result<ReindexOutcome, Error> {
         let before_blocks = block_start_pcs(self);
         let mut mapping = HashMap::new();
         let old_runtime_bounds = self.runtime_bounds;
-        let mut blocks: Vec<_> = self
-            .cfg
-            .node_indices()
-            .filter_map(|idx| {
-                self.cfg.node_weight(idx).and_then(|block| match block {
-                    Block::Body(body) => Some((idx, body.start_pc)),
-                    _ => None,
-                })
-            })
-            .collect();
-        blocks.sort_by_key(|(_, start_pc)| *start_pc);
+        self.refresh_relationships()?;
+        let code_pointer_relocations = self.relationships.code_pointer_relocations.clone();
+        let blocks = self.layout_order.clone();
 
         let mut next_pc = 0usize;
         let mut new_pc_to_block = HashMap::new();
@@ -614,22 +670,15 @@ impl CfgIrBundle {
         let mut runtime_first_new_pc: Option<usize> = None;
         let mut runtime_last_new_pc: Option<usize> = None;
 
-        for (idx, _) in blocks {
+        for idx in blocks {
             if let Some(Block::Body(body)) = self.cfg.node_weight_mut(idx) {
                 let old_block_pc = body.start_pc;
-                let in_runtime = body.is_runtime(runtime_bounds);
+                let in_runtime = body.section == SectionKind::Runtime;
                 body.start_pc = next_pc;
                 new_pc_to_block.insert(body.start_pc, idx);
 
                 for instr in &mut body.instructions {
                     mapping.insert(instr.pc, next_pc);
-                    // Preserve INVALID opcode bytes before we erase the original PC.
-                    if matches!(instr.op, Opcode::INVALID)
-                        && instr.imm.is_none()
-                        && instr.pc < self.original_bytecode.len()
-                    {
-                        instr.imm = Some(format!("{:02x}", self.original_bytecode[instr.pc]));
-                    }
                     instr.pc = next_pc;
                     next_pc += instr.byte_size();
                 }
@@ -689,7 +738,7 @@ impl CfgIrBundle {
             }
         }
 
-        let instruction_diffs: Vec<InstructionPcDiff> = mapping
+        let mut instruction_diffs: Vec<InstructionPcDiff> = mapping
             .iter()
             .filter_map(|(old_pc, new_pc)| {
                 if old_pc != new_pc {
@@ -702,13 +751,94 @@ impl CfgIrBundle {
                 }
             })
             .collect();
+        instruction_diffs.sort_by_key(|diff| (diff.old_pc, diff.new_pc));
 
         let diff = diff_from_pc_remap(block_diffs, instruction_diffs);
 
         self.write_symbolic_immediates()?;
+        self.resolve_code_pointer_relocations(&code_pointer_relocations)?;
+        self.refresh_relationships()?;
         self.record_operation(OperationKind::ReindexPcs, diff, Some(mapping.clone()));
 
         Ok((mapping, old_runtime_bounds))
+    }
+
+    /// Resolves stack-proven literal code pointers after layout has assigned concrete PCs.
+    ///
+    /// This covers Solidity internal-call return addresses that are not adjacent to the dynamic
+    /// `JUMP` consuming them. The relationship analysis records stable source/target identities;
+    /// lowering is the only phase that converts those identities back to numeric immediates.
+    fn resolve_code_pointer_relocations(
+        &mut self,
+        relocations: &[CodePointerRelocation],
+    ) -> Result<(), Error> {
+        let runtime_start = self.runtime_bounds.map(|(start, _)| start);
+        let mut before = HashMap::new();
+        let mut resolved = 0usize;
+
+        for relocation in relocations {
+            let target_pc = match self.cfg.node_weight(relocation.target) {
+                Some(Block::Body(target)) => target.start_pc,
+                _ => {
+                    return Err(Error::InvalidBlockStructure(format!(
+                        "relocation target {} is not a body block",
+                        relocation.target.index()
+                    )));
+                }
+            };
+            let value = match relocation.encoding {
+                JumpEncoding::Absolute => target_pc,
+                JumpEncoding::RuntimeRelative => target_pc
+                    .checked_sub(runtime_start.unwrap_or(0))
+                    .ok_or_else(|| {
+                        Error::InvalidBlockStructure(format!(
+                            "runtime relocation target 0x{target_pc:x} precedes runtime"
+                        ))
+                    })?,
+                JumpEncoding::PcRelative => {
+                    return Err(Error::InvalidBlockStructure(
+                        "literal code-pointer relocation cannot use PC-relative encoding".into(),
+                    ));
+                }
+            };
+
+            before
+                .entry(relocation.source)
+                .or_insert_with(|| snapshot_block_body(self, relocation.source));
+            let Some(Block::Body(source)) = self.cfg.node_weight_mut(relocation.source) else {
+                return Err(Error::InvalidBlockStructure(format!(
+                    "relocation source {} is not a body block",
+                    relocation.source.index()
+                )));
+            };
+            let instruction = source
+                .instructions
+                .get_mut(relocation.instruction_index)
+                .ok_or_else(|| {
+                    Error::InvalidBlockStructure(format!(
+                        "relocation source {} has no instruction {}",
+                        relocation.source.index(),
+                        relocation.instruction_index
+                    ))
+                })?;
+            apply_immediate(instruction, value)?;
+            resolved += 1;
+        }
+
+        let mut before: Vec<_> = before.into_iter().collect();
+        before.sort_by_key(|(node, _)| node.index());
+        let changes = before
+            .into_iter()
+            .filter_map(|(node, before)| {
+                block_modification(node, before, snapshot_block_body(self, node))
+            })
+            .collect();
+        self.record_operation(
+            OperationKind::ResolveRelocations { count: resolved },
+            diff_from_block_changes(changes),
+            None,
+        );
+        Ok(())
     }
 
     /// Rewrite jump immediates using the supplied PC mapping. This keeps the method signature used
@@ -1621,7 +1751,7 @@ pub fn build_cfg_ir(
     );
 
     let runtime_bounds = runtime_bounds(sections);
-    let blocks = split_blocks(instructions)?;
+    let blocks = split_blocks(instructions, sections)?;
 
     let mut cfg = StableDiGraph::new();
     let entry = cfg.add_node(Block::Entry);
@@ -1679,7 +1809,10 @@ pub fn build_cfg_ir(
         dispatcher_blocks: HashSet::new(),
         arithmetic_chain_data: None,
         ac_runtime_length_estimate: None,
+        layout_order: ordered_nodes,
+        relationships: RelationshipIndex::default(),
     };
+    bundle.refresh_relationships()?;
     let body_blocks = bundle
         .cfg
         .node_indices()
@@ -1709,7 +1842,7 @@ fn runtime_bounds(sections: &[Section]) -> Option<(usize, usize)> {
 }
 
 /// Breaks the instruction stream into basic blocks and ensures branch boundaries are respected.
-fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
+fn split_blocks(instructions: &[Instruction], sections: &[Section]) -> Result<Vec<Block>, Error> {
     let mut blocks = Vec::new();
     let mut current = BlockBody::new(0);
 
@@ -1720,6 +1853,15 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
         .collect();
 
     for ins in instructions {
+        let instruction_section = section_for_pc(ins.pc, sections);
+        if !current.instructions.is_empty() && current.section != instruction_section {
+            // A basic block cannot straddle code-section ownership. In particular, init and
+            // deployed runtime are separate EVM executions with independent empty operand stacks.
+            blocks.push(Block::Body(current));
+            current = BlockBody::new(ins.pc);
+            current.section = instruction_section;
+        }
+
         if matches!(ins.op, Opcode::JUMPDEST) {
             if !current.instructions.is_empty() {
                 blocks.push(Block::Body(current.clone()));
@@ -1729,12 +1871,14 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
                 instructions: vec![ins.clone()],
                 max_stack: 0,
                 control: BlockControl::Unknown,
+                section: instruction_section,
             };
             continue;
         }
 
         if current.instructions.is_empty() {
             current.start_pc = ins.pc;
+            current.section = instruction_section;
         }
 
         current.instructions.push(ins.clone());
@@ -1751,6 +1895,14 @@ fn split_blocks(instructions: &[Instruction]) -> Result<Vec<Block>, Error> {
 
     validate_jumpdests(&blocks, &jumpdest_pcs)?;
     Ok(blocks)
+}
+
+fn section_for_pc(pc: usize, sections: &[Section]) -> SectionKind {
+    sections
+        .iter()
+        .find(|section| pc >= section.offset && pc < section.offset + section.len)
+        .map(|section| section.kind)
+        .unwrap_or(SectionKind::Runtime)
 }
 
 /// Ensures every `JUMPDEST` discovered in the bytecode starts a corresponding block.
@@ -1999,7 +2151,7 @@ fn analyse_jump_target(
         JumpPattern::PcRelative { push_idx, pc_idx } => {
             let delta = parse_immediate(&body.instructions[push_idx])?;
             let pc_value = body.instructions[pc_idx].pc;
-            let absolute_pc = pc_value + delta;
+            let absolute_pc = pc_value.checked_add(delta)?;
             let target_node = node_by_pc.get(&absolute_pc).copied();
             target_node.map(|node| JumpTarget::Block {
                 node,
@@ -2022,7 +2174,9 @@ fn absolute_target_from_value(
     };
 
     let absolute_pc = match encoding {
-        JumpEncoding::RuntimeRelative => runtime_bounds.map(|(start, _)| start + immediate)?,
+        JumpEncoding::RuntimeRelative => {
+            runtime_bounds.and_then(|(start, _)| start.checked_add(immediate))?
+        }
         JumpEncoding::Absolute => immediate,
         JumpEncoding::PcRelative => unreachable!(),
     };
@@ -2094,9 +2248,9 @@ fn detect_jump_pattern(instructions: &[Instruction]) -> Option<JumpPattern> {
 /// Stack position is tracked as the PUSH's distance from top: 0 right
 /// after the PUSH. DUP of the tracked slot is handled conservatively —
 /// returns `true` immediately because either the copy or the original
-/// could still reach a downstream JUMP. Unknown opcodes also return
-/// `true` so new opcodes added to future hardforks don't silently
-/// introduce false negatives.
+/// could still reach a downstream JUMP. Ordinary operations use the native
+/// opcode table's stack metadata, while an unmodelled non-terminal operation returns `true`
+/// conservatively so future hard-fork additions cannot silently introduce false negatives.
 #[doc(hidden)]
 pub fn push_reaches_jump(instructions: &[Instruction], push_idx: usize) -> bool {
     // `pos` is the tracked value's distance from stack top; 0 = top.
@@ -2105,39 +2259,7 @@ pub fn push_reaches_jump(instructions: &[Instruction], push_idx: usize) -> bool 
     for instr in instructions.iter().skip(push_idx + 1) {
         let op = &instr.op;
         match op {
-            // pop 0, push 1 — every value above us shifts us down by 1
-            Opcode::PUSH(_)
-            | Opcode::PUSH0
-            | Opcode::ADDRESS
-            | Opcode::ORIGIN
-            | Opcode::CALLER
-            | Opcode::CALLVALUE
-            | Opcode::CALLDATASIZE
-            | Opcode::CODESIZE
-            | Opcode::GASPRICE
-            | Opcode::COINBASE
-            | Opcode::TIMESTAMP
-            | Opcode::NUMBER
-            | Opcode::DIFFICULTY
-            | Opcode::GASLIMIT
-            | Opcode::CHAINID
-            | Opcode::SELFBALANCE
-            | Opcode::BASEFEE
-            | Opcode::GAS
-            | Opcode::RETURNDATASIZE
-            | Opcode::PC
-            | Opcode::MSIZE => {
-                pos += 1;
-            }
-
-            Opcode::POP => {
-                if pos == 0 {
-                    return false;
-                }
-                pos -= 1;
-            }
-
-            Opcode::DUP(n) => {
+            Opcode::DUP(n) if (1..=16).contains(n) => {
                 let source_pos = (*n as isize) - 1;
                 if pos == source_pos {
                     // We're the source of the DUP. The copy goes to stack
@@ -2150,141 +2272,13 @@ pub fn push_reaches_jump(instructions: &[Instruction], push_idx: usize) -> bool 
                 pos += 1;
             }
 
-            Opcode::SWAP(n) => {
+            Opcode::SWAP(n) if (1..=16).contains(n) => {
                 let n = *n as isize;
                 if pos == 0 {
                     pos = n;
                 } else if pos == n {
                     pos = 0;
                 }
-            }
-
-            // pop 1, push 1 — net 0, but consumed if our pos was the input
-            Opcode::ISZERO
-            | Opcode::NOT
-            | Opcode::BALANCE
-            | Opcode::CALLDATALOAD
-            | Opcode::EXTCODESIZE
-            | Opcode::BLOCKHASH
-            | Opcode::MLOAD
-            | Opcode::SLOAD
-            | Opcode::EXTCODEHASH => {
-                if pos == 0 {
-                    return false;
-                }
-            }
-
-            // pop 2, push 1 — net -1
-            Opcode::ADD
-            | Opcode::SUB
-            | Opcode::MUL
-            | Opcode::DIV
-            | Opcode::SDIV
-            | Opcode::MOD
-            | Opcode::SMOD
-            | Opcode::EXP
-            | Opcode::SIGNEXTEND
-            | Opcode::LT
-            | Opcode::GT
-            | Opcode::SLT
-            | Opcode::SGT
-            | Opcode::EQ
-            | Opcode::AND
-            | Opcode::OR
-            | Opcode::XOR
-            | Opcode::BYTE
-            | Opcode::SHL
-            | Opcode::SHR
-            | Opcode::SAR
-            | Opcode::KECCAK256 => {
-                if pos < 2 {
-                    return false;
-                }
-                pos -= 1;
-            }
-
-            // pop 3, push 1 — net -2
-            Opcode::ADDMOD | Opcode::MULMOD => {
-                if pos < 3 {
-                    return false;
-                }
-                pos -= 2;
-            }
-
-            // pop 2, push 0 — net -2
-            Opcode::MSTORE | Opcode::MSTORE8 | Opcode::SSTORE => {
-                if pos < 2 {
-                    return false;
-                }
-                pos -= 2;
-            }
-
-            // pop 3, push 0 — net -3
-            Opcode::CODECOPY
-            | Opcode::CALLDATACOPY
-            | Opcode::EXTCODECOPY
-            | Opcode::RETURNDATACOPY => {
-                if pos < 3 {
-                    return false;
-                }
-                pos -= 3;
-            }
-
-            Opcode::LOG0 => {
-                if pos < 2 {
-                    return false;
-                }
-                pos -= 2;
-            }
-            Opcode::LOG1 => {
-                if pos < 3 {
-                    return false;
-                }
-                pos -= 3;
-            }
-            Opcode::LOG2 => {
-                if pos < 4 {
-                    return false;
-                }
-                pos -= 4;
-            }
-            Opcode::LOG3 => {
-                if pos < 5 {
-                    return false;
-                }
-                pos -= 5;
-            }
-            Opcode::LOG4 => {
-                if pos < 6 {
-                    return false;
-                }
-                pos -= 6;
-            }
-
-            // External calls: treat as consuming the target region
-            Opcode::CALL | Opcode::CALLCODE => {
-                if pos < 7 {
-                    return false;
-                }
-                pos -= 6;
-            }
-            Opcode::DELEGATECALL | Opcode::STATICCALL => {
-                if pos < 6 {
-                    return false;
-                }
-                pos -= 5;
-            }
-            Opcode::CREATE => {
-                if pos < 3 {
-                    return false;
-                }
-                pos -= 2;
-            }
-            Opcode::CREATE2 => {
-                if pos < 4 {
-                    return false;
-                }
-                pos -= 3;
             }
 
             Opcode::JUMP => {
@@ -2315,26 +2309,25 @@ pub fn push_reaches_jump(instructions: &[Instruction], push_idx: usize) -> bool 
                 return true;
             }
 
-            // Block-terminating ops other than JUMP/JUMPI: execution ends
-            // in this block without ever branching on our value.
-            Opcode::STOP
-            | Opcode::RETURN
-            | Opcode::REVERT
-            | Opcode::INVALID
-            | Opcode::SELFDESTRUCT => {
+            // No value can reach a later branch after a terminal instruction. This also covers
+            // canonical UNKNOWN bytes, which are exceptional halts in legacy EVM code.
+            op if op.is_terminal() => {
                 return false;
             }
 
-            Opcode::JUMPDEST => {
-                // no stack effect
-            }
-
-            // Unknown / unhandled opcodes (e.g. new hardfork instructions
-            // we don't yet model): be conservative and assume the value
-            // reaches a JUMP so new opcodes never silently introduce
-            // false negatives.
             _ => {
-                return true;
+                // The native opcode table is the single source of truth for ordinary stack
+                // effects. This automatically covers newly modelled non-control opcodes such as
+                // CLZ, TLOAD, MCOPY, BLOBHASH, and BLOBBASEFEE. If the opcode or a manually
+                // constructed parameter is not modelled, retain the conservative answer.
+                let Some(info) = op.info() else {
+                    return true;
+                };
+                let inputs = isize::from(info.inputs);
+                if pos < inputs {
+                    return false;
+                }
+                pos = pos - inputs + isize::from(info.outputs);
             }
         }
     }
@@ -2449,7 +2442,7 @@ fn apply_immediate(instr: &mut Instruction, value: usize) -> Result<(), Error> {
                     value
                 )));
             }
-            instr.imm = Some("00".into());
+            instr.imm = None;
         }
         Opcode::PUSH(width) => {
             let width = width as usize;
@@ -2482,6 +2475,22 @@ fn apply_split_add_immediate(
     push_b_idx: usize,
     total: usize,
 ) -> Result<(), Error> {
+    // Lowering runs even when no transform committed a layout change. Preserve an existing
+    // split verbatim when it already encodes the resolved target: re-canonicalising (for example,
+    // `1 + 5` as `6 + 0`) would make an identity pipeline change bytecode while reporting that no
+    // transform ran.
+    let current_push_value = |instruction: &Instruction| match instruction.op {
+        Opcode::PUSH0 => Some(0),
+        Opcode::PUSH(_) => parse_immediate(instruction),
+        _ => None,
+    };
+    let current_a = current_push_value(&instructions[push_a_idx]);
+    let current_b = current_push_value(&instructions[push_b_idx]);
+    if current_a.and_then(|left| current_b.and_then(|right| left.checked_add(right))) == Some(total)
+    {
+        return Ok(());
+    }
+
     let max_a = push_capacity(&instructions[push_a_idx].op)
         .ok_or_else(|| Error::InvalidImmediate("expected PUSH opcode before ADD".into()))?;
     let max_b = push_capacity(&instructions[push_b_idx].op)
@@ -2502,8 +2511,37 @@ fn apply_split_add_immediate(
         )));
     }
 
-    let part_a = total.min(max_a);
-    let part_b = total.saturating_sub(part_a);
+    // When the target moved, retain one source operand exactly whenever the other PUSH can absorb
+    // the displacement. Besides minimizing the edit, this preserves the input compiler's chosen
+    // arithmetic shape instead of emitting a stable `target + 0` fingerprint.
+    if let Some(part_a) = current_a
+        && let Some(part_b) = total.checked_sub(part_a)
+        && part_b <= max_b
+    {
+        apply_immediate(&mut instructions[push_b_idx], part_b)?;
+        return Ok(());
+    }
+    if let Some(part_b) = current_b
+        && let Some(part_a) = total.checked_sub(part_b)
+        && part_a <= max_a
+    {
+        apply_immediate(&mut instructions[push_a_idx], part_a)?;
+        return Ok(());
+    }
+
+    // Neither original operand can survive. Choose a deterministic value from the feasible
+    // interval, biased toward its midpoint so both operands remain non-zero whenever widths and
+    // the target permit it.
+    let minimum_a = total.saturating_sub(max_b);
+    let maximum_a = total.min(max_a);
+    if minimum_a > maximum_a {
+        return Err(Error::InvalidImmediate(format!(
+            "value 0x{:x} cannot be represented by the supplied PUSH widths",
+            total
+        )));
+    }
+    let part_a = minimum_a + (maximum_a - minimum_a) / 2;
+    let part_b = total - part_a;
 
     apply_immediate(&mut instructions[push_a_idx], part_a)?;
     apply_immediate(&mut instructions[push_b_idx], part_b)?;
@@ -2620,6 +2658,120 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_split_add_target_preserves_exact_operands() {
+        let mut instructions = vec![
+            Instruction {
+                pc: 0,
+                op: Opcode::PUSH(1),
+                imm: Some("01".into()),
+            },
+            Instruction {
+                pc: 2,
+                op: Opcode::PUSH(1),
+                imm: Some("05".into()),
+            },
+            Instruction {
+                pc: 4,
+                op: Opcode::ADD,
+                imm: None,
+            },
+            Instruction {
+                pc: 5,
+                op: Opcode::JUMP,
+                imm: None,
+            },
+        ];
+        let before = instructions.clone();
+
+        apply_split_add_immediate(&mut instructions, 0, 1, 6).unwrap();
+
+        assert_eq!(instructions, before);
+    }
+
+    #[test]
+    fn changed_split_add_target_preserves_one_existing_operand() {
+        let mut instructions = vec![
+            Instruction {
+                pc: 0,
+                op: Opcode::PUSH(1),
+                imm: Some("01".into()),
+            },
+            Instruction {
+                pc: 2,
+                op: Opcode::PUSH(1),
+                imm: Some("05".into()),
+            },
+        ];
+
+        apply_split_add_immediate(&mut instructions, 0, 1, 7).unwrap();
+
+        assert_eq!(instructions[0].imm.as_deref(), Some("01"));
+        assert_eq!(instructions[1].imm.as_deref(), Some("06"));
+    }
+
+    #[test]
+    fn changed_split_add_target_uses_other_operand_when_width_requires_it() {
+        let mut instructions = vec![
+            Instruction {
+                pc: 0,
+                op: Opcode::PUSH(1),
+                imm: Some("fa".into()),
+            },
+            Instruction {
+                pc: 2,
+                op: Opcode::PUSH(1),
+                imm: Some("01".into()),
+            },
+        ];
+
+        apply_split_add_immediate(&mut instructions, 0, 1, 2).unwrap();
+
+        assert_eq!(instructions[0].imm.as_deref(), Some("01"));
+        assert_eq!(instructions[1].imm.as_deref(), Some("01"));
+    }
+
+    #[test]
+    fn changed_split_add_target_fallback_avoids_target_plus_zero() {
+        let mut instructions = vec![
+            Instruction {
+                pc: 0,
+                op: Opcode::PUSH(1),
+                imm: Some("fa".into()),
+            },
+            Instruction {
+                pc: 2,
+                op: Opcode::PUSH(1),
+                imm: Some("fa".into()),
+            },
+        ];
+
+        apply_split_add_immediate(&mut instructions, 0, 1, 100).unwrap();
+
+        assert_eq!(instructions[0].imm.as_deref(), Some("32"));
+        assert_eq!(instructions[1].imm.as_deref(), Some("32"));
+    }
+
+    #[test]
+    fn changed_split_add_target_rejects_combined_width_overflow() {
+        let mut instructions = vec![
+            Instruction {
+                pc: 0,
+                op: Opcode::PUSH(1),
+                imm: Some("ff".into()),
+            },
+            Instruction {
+                pc: 2,
+                op: Opcode::PUSH(1),
+                imm: Some("ff".into()),
+            },
+        ];
+        let before = instructions.clone();
+
+        assert!(apply_split_add_immediate(&mut instructions, 0, 1, 511).is_err());
+        assert_eq!(instructions, before);
+    }
+
+    #[test]
     fn build_cfg_ir_creates_basic_blocks() {
         let instructions = vec![
             Instruction {
@@ -2671,6 +2823,78 @@ mod tests {
         } else {
             panic!("first node should be a body block");
         }
+    }
+
+    #[test]
+    fn oversized_jump_address_arithmetic_fails_closed_without_panicking() {
+        let direct = vec![
+            Instruction {
+                pc: 0,
+                op: Opcode::STOP,
+                imm: None,
+            },
+            Instruction {
+                pc: 1,
+                op: Opcode::PUSH(8),
+                imm: Some("ffffffffffffffff".into()),
+            },
+            Instruction {
+                pc: 10,
+                op: Opcode::JUMP,
+                imm: None,
+            },
+        ];
+        let sections = vec![
+            Section {
+                kind: SectionKind::Init,
+                offset: 0,
+                len: 1,
+            },
+            Section {
+                kind: SectionKind::Runtime,
+                offset: 1,
+                len: 10,
+            },
+        ];
+        let direct_bundle = build_cfg_ir(
+            &direct,
+            &sections,
+            sample_clean_report(11),
+            &sample_bytecode(11),
+        )
+        .expect("overflowing direct target is represented as unresolved, not panicked");
+        assert!(!direct_bundle.relationships().is_relocatable());
+
+        let pc_relative = vec![
+            Instruction {
+                pc: 0,
+                op: Opcode::PUSH(8),
+                imm: Some("ffffffffffffffff".into()),
+            },
+            Instruction {
+                pc: 9,
+                op: Opcode::PC,
+                imm: None,
+            },
+            Instruction {
+                pc: 10,
+                op: Opcode::ADD,
+                imm: None,
+            },
+            Instruction {
+                pc: 11,
+                op: Opcode::JUMP,
+                imm: None,
+            },
+        ];
+        let pc_relative_bundle = build_cfg_ir(
+            &pc_relative,
+            &[sample_runtime_section(12)],
+            sample_clean_report(12),
+            &sample_bytecode(12),
+        )
+        .expect("overflowing PC-relative target is represented as unresolved, not panicked");
+        assert!(!pc_relative_bundle.relationships().is_relocatable());
     }
 
     #[test]

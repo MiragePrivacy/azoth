@@ -1,10 +1,8 @@
 use azoth_core::seed::Seed;
 use azoth_transform::{
     Transform,
-    jump_address_transformer::JumpAddressTransformer,
+    cluster_shuffle::ClusterShuffle,
     obfuscator::{ObfuscationConfig, obfuscate_bytecode},
-    opaque_predicate::OpaquePredicate,
-    shuffle::Shuffle,
 };
 use chrono::{DateTime, Utc};
 use hex::FromHexError;
@@ -18,13 +16,11 @@ use thiserror::Error as ThisError;
 
 /// Default passes applied to each obfuscation run.
 ///
-/// Leaving this empty means the analysis reuses the obfuscator's native defaults
-/// (dispatcher when detected plus any user-specified transforms) instead of
-/// forcing deprecated transforms such as Shuffle.
-pub const DEFAULT_PASSES: &str = "";
+/// The analysis command measures exactly the production-admitted explicit CFG pass.
+pub const DEFAULT_PASSES: &str = "cluster_shuffle";
 
 /// Configuration for running an obfuscation analysis experiment.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AnalysisConfig<'a> {
     /// Number of obfuscated samples to generate.
     pub iterations: usize,
@@ -36,17 +32,25 @@ pub struct AnalysisConfig<'a> {
     pub report_path: PathBuf,
     /// Maximum attempts per iteration before giving up on a seed.
     pub max_attempts: usize,
+    /// Private root seed used to derive a stable per-iteration corpus.
+    pub root_seed: Seed,
 }
 
 impl<'a> AnalysisConfig<'a> {
     /// Create config with sensible defaults.
-    pub fn new(original_bytecode: &'a str, runtime_bytecode: &'a str, iterations: usize) -> Self {
+    pub fn new(
+        original_bytecode: &'a str,
+        runtime_bytecode: &'a str,
+        iterations: usize,
+        root_seed: Seed,
+    ) -> Self {
         Self {
             iterations,
             original_bytecode,
             runtime_bytecode,
             report_path: PathBuf::from("obfuscation_analysis_report.md"),
             max_attempts: 5,
+            root_seed,
         }
     }
 }
@@ -88,7 +92,8 @@ pub struct AnalysisReport {
     pub iterations: usize,
     pub original_length: usize,
     pub transform_counts: BTreeMap<String, usize>,
-    pub seeds: Vec<String>,
+    /// Commitments to the derived sample seeds. Raw private seeds are never written to reports.
+    pub seed_commitments: Vec<String>,
     pub unique_seed_count: usize,
     pub sequence_lengths: Vec<usize>,
     pub top_sequences: Vec<SequenceFrequency>,
@@ -202,13 +207,21 @@ impl AnalysisReport {
         writeln!(out)?;
         writeln!(out, "## Seed Summary")?;
         writeln!(out)?;
-        writeln!(out, "- **Total seeds generated:** {}", self.seeds.len())?;
+        writeln!(
+            out,
+            "- **Total seeds derived:** {}",
+            self.seed_commitments.len()
+        )?;
         writeln!(out, "- **Unique seeds:** {}", self.unique_seed_count)?;
-        if !self.seeds.is_empty() {
-            let preview: Vec<_> = self.seeds.iter().take(5).cloned().collect();
-            writeln!(out, "- **Sample seeds:** {}", preview.join(", "))?;
-            if self.seeds.len() > 5 {
-                writeln!(out, "- _...and {} more_", self.seeds.len() - preview.len())?;
+        if !self.seed_commitments.is_empty() {
+            let preview: Vec<_> = self.seed_commitments.iter().take(5).cloned().collect();
+            writeln!(out, "- **Sample seed commitments:** {}", preview.join(", "))?;
+            if self.seed_commitments.len() > 5 {
+                writeln!(
+                    out,
+                    "- _...and {} more_",
+                    self.seed_commitments.len() - preview.len()
+                )?;
             }
         }
         writeln!(out)?;
@@ -217,7 +230,7 @@ impl AnalysisReport {
         if self.transform_counts.is_empty() {
             writeln!(
                 out,
-                "_No additional transforms were applied beyond dispatcher detection._"
+                "_No configured transform committed a bytecode change in these samples._"
             )?;
         } else {
             writeln!(out, "| Transform | Iterations | Coverage |")?;
@@ -276,40 +289,16 @@ impl AnalysisReport {
             "Average longest common sequence covers **{:.2}%** of the original bytecode.",
             self.summary.preservation_ratio
         )?;
-        if self.summary.preservation_ratio < 10.0 {
-            writeln!(
-                out,
-                "This suggests strong obfuscation with minimal contiguous preservation."
-            )?;
-        } else if self.summary.preservation_ratio < 25.0 {
-            writeln!(
-                out,
-                "This suggests moderate obfuscation with noticeable contiguous preservation."
-            )?;
-        } else {
-            writeln!(
-                out,
-                "This suggests weaker obfuscation: significant contiguous blocks remain."
-            )?;
-        }
+        writeln!(
+            out,
+            "This is a byte-position statistic only. It does not measure semantic equivalence, \"stealth\", or resistance to CFG- or block-multiset normalization."
+        )?;
         writeln!(out)?;
         let diversity = self.ngram_diversity.get(&8).copied().unwrap_or(0.0);
-        if diversity > 90.0 {
-            writeln!(
-                out,
-                "High 8-byte diversity indicates obfuscation yields highly varied byte patterns."
-            )?;
-        } else if diversity > 70.0 {
-            writeln!(
-                out,
-                "Moderate 8-byte diversity indicates reasonable variation across seeds."
-            )?;
-        } else {
-            writeln!(
-                out,
-                "Low 8-byte diversity indicates many recurring patterns across outputs."
-            )?;
-        }
+        writeln!(
+            out,
+            "Observed 8-byte n-gram diversity is **{diversity:.2}%**. Treat it as a descriptive corpus statistic, not a security conclusion; a normalizer can discard ordering and recover much stronger links."
+        )?;
         writeln!(out)?;
         writeln!(out, "---")?;
         writeln!(
@@ -331,6 +320,8 @@ impl AnalysisReport {
 pub enum AnalysisError {
     #[error("analysis requires at least one iteration")]
     EmptyIterations,
+    #[error("analysis requires at least one attempt per iteration")]
+    EmptyAttempts,
     #[error("bytecode decode error: {0}")]
     Decode(#[from] FromHexError),
     #[error("analysis aborted: obfuscation preserved {count} unknown opcode(s)")]
@@ -356,22 +347,24 @@ pub async fn analyze_obfuscation(
     if config.iterations == 0 {
         return Err(AnalysisError::EmptyIterations);
     }
+    if config.max_attempts == 0 {
+        return Err(AnalysisError::EmptyAttempts);
+    }
 
     let passes = parse_passes(DEFAULT_PASSES)?;
     let original_bytes = hex_to_bytes(config.original_bytecode)?;
     let mut sequence_lengths = Vec::with_capacity(config.iterations);
     let mut sequence_counter: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut obfuscated_bytecodes: Vec<Vec<u8>> = Vec::with_capacity(config.iterations);
-    let mut seeds = Vec::with_capacity(config.iterations);
+    let mut seed_commitments = Vec::with_capacity(config.iterations);
     let mut transform_counts: BTreeMap<String, usize> = BTreeMap::new();
-    transform_counts.insert("FunctionDispatcher".to_string(), 0);
 
-    for _ in 0..config.iterations {
+    for iteration in 0..config.iterations {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let seed = Seed::generate();
-            let seed_hex = seed.to_hex();
+            let seed = derive_analysis_seed(&config.root_seed, iteration, attempt - 1);
+            let seed_commitment = seed.hash_hex();
             let mut obfuscation_config = ObfuscationConfig::with_seed(seed.clone());
             obfuscation_config.preserve_unknown_opcodes = true;
             obfuscation_config.transforms = passes.iter().map(|p| p.build()).collect();
@@ -396,7 +389,7 @@ pub async fn analyze_obfuscation(
                     }
                     sequence_lengths.push(sequence.len());
                     obfuscated_bytecodes.push(obfuscated_bytes);
-                    seeds.push(seed_hex);
+                    seed_commitments.push(seed_commitment);
                     break;
                 }
                 Err(_err) if attempt < config.max_attempts => continue,
@@ -415,14 +408,14 @@ pub async fn analyze_obfuscation(
     let top_sequences = compute_top_sequences(sequence_counter);
     let ngram_diversity = compute_ngram_diversity(&obfuscated_bytecodes, &[2, 4, 8]);
 
-    let unique_seed_count = seeds.iter().collect::<HashSet<_>>().len();
+    let unique_seed_count = seed_commitments.iter().collect::<HashSet<_>>().len();
 
     let report = AnalysisReport {
         generated_at: Utc::now(),
         iterations: config.iterations,
         original_length: original_bytes.len(),
         transform_counts,
-        seeds,
+        seed_commitments,
         unique_seed_count,
         sequence_lengths,
         top_sequences,
@@ -607,7 +600,12 @@ fn compute_top_sequences(counter: HashMap<Vec<u8>, usize>) -> Vec<SequenceFreque
             sequence_hex: hex::encode(sequence),
         })
         .collect();
-    frequencies.sort_by(|a, b| b.frequency.cmp(&a.frequency));
+    frequencies.sort_by(|a, b| {
+        b.frequency
+            .cmp(&a.frequency)
+            .then_with(|| b.length.cmp(&a.length))
+            .then_with(|| a.sequence_hex.cmp(&b.sequence_hex))
+    });
     frequencies.truncate(10);
     frequencies
 }
@@ -651,7 +649,7 @@ fn sorted_transform_entries(counts: &BTreeMap<String, usize>) -> Vec<(String, us
 
 fn summarize_transforms(counts: &BTreeMap<String, usize>, iterations: usize) -> String {
     if counts.is_empty() {
-        return "None detected (dispatcher skipped)".to_string();
+        return "No configured transform committed a change".to_string();
     }
     let entries = sorted_transform_entries(counts);
     let mut parts = Vec::new();
@@ -687,9 +685,7 @@ fn parse_passes(passes: &str) -> Result<Vec<TransformSpec>, AnalysisError> {
             continue;
         }
         let spec = match name {
-            "shuffle" => TransformSpec::Shuffle,
-            "opaque_pred" | "opaque_predicate" => TransformSpec::OpaquePredicate,
-            "jump_transform" | "jump_addr" => TransformSpec::JumpTransform,
+            "cluster_shuffle" => TransformSpec::ClusterShuffle,
             other => return Err(AnalysisError::InvalidPass(other.to_string())),
         };
         specs.push(spec);
@@ -698,19 +694,22 @@ fn parse_passes(passes: &str) -> Result<Vec<TransformSpec>, AnalysisError> {
 }
 
 enum TransformSpec {
-    Shuffle,
-    OpaquePredicate,
-    JumpTransform,
+    ClusterShuffle,
 }
 
 impl TransformSpec {
     fn build(&self) -> Box<dyn Transform> {
         match self {
-            TransformSpec::Shuffle => Box::new(Shuffle),
-            TransformSpec::OpaquePredicate => Box::new(OpaquePredicate::new()),
-            TransformSpec::JumpTransform => Box::new(JumpAddressTransformer::new()),
+            TransformSpec::ClusterShuffle => Box::new(ClusterShuffle::new()),
         }
     }
+}
+
+fn derive_analysis_seed(root: &Seed, iteration: usize, attempt: usize) -> Seed {
+    let mut domain = b"azoth-analysis-sample-v1".to_vec();
+    domain.extend_from_slice(&(iteration as u64).to_be_bytes());
+    domain.extend_from_slice(&(attempt as u64).to_be_bytes());
+    root.derive_seed(&domain)
 }
 
 #[cfg(test)]
@@ -730,5 +729,43 @@ mod tests {
         let values = vec![10, 20, 30, 40];
         assert_eq!(percentile(&values, 25.0), 17.5);
         assert_eq!(percentile(&values, 75.0), 32.5);
+    }
+
+    #[test]
+    fn analysis_seed_corpus_is_reproducible_and_domain_separated() {
+        let root = Seed::from_bytes([0x42; 32]);
+        assert_eq!(
+            derive_analysis_seed(&root, 4, 1).as_bytes(),
+            derive_analysis_seed(&root, 4, 1).as_bytes()
+        );
+        assert_ne!(
+            derive_analysis_seed(&root, 4, 1).as_bytes(),
+            derive_analysis_seed(&root, 5, 1).as_bytes()
+        );
+        assert_ne!(
+            derive_analysis_seed(&root, 4, 1).as_bytes(),
+            derive_analysis_seed(&root, 4, 2).as_bytes()
+        );
+    }
+
+    #[test]
+    fn tied_top_sequences_have_stable_ordering() {
+        let counter = HashMap::from([(vec![0x02], 3), (vec![0x01, 0x02], 3), (vec![0x01], 3)]);
+        let ordered = compute_top_sequences(counter);
+        let hex: Vec<_> = ordered
+            .iter()
+            .map(|sequence| sequence.sequence_hex.as_str())
+            .collect();
+        assert_eq!(hex, vec!["0102", "01", "02"]);
+    }
+
+    #[tokio::test]
+    async fn zero_attempt_budget_is_rejected_before_running() {
+        let mut config = AnalysisConfig::new("00", "00", 1, Seed::from_bytes([0x42; 32]));
+        config.max_attempts = 0;
+        assert!(matches!(
+            analyze_obfuscation(config).await,
+            Err(AnalysisError::EmptyAttempts)
+        ));
     }
 }

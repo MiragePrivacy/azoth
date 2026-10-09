@@ -32,10 +32,8 @@ pub fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) -> (bool
             ViewMode::Trace => app.select_prev(),
             ViewMode::DecompileDiff => app.diff_select_prev(),
         },
-        KeyCode::Enter | KeyCode::Char(' ') => {
-            if app.view_mode == ViewMode::Trace {
-                app.toggle_expand();
-            }
+        KeyCode::Enter | KeyCode::Char(' ') if app.view_mode == ViewMode::Trace => {
+            app.toggle_expand();
         }
         KeyCode::PageDown | KeyCode::Char('d') => {
             for _ in 0..10 {

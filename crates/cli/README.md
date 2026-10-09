@@ -24,7 +24,8 @@ azoth decode --deployment 0x608060405234801561001057600080fd5b50
 azoth decode -D path/to/bytecode.hex
 ```
 
-Outputs the raw assembly from Heimdall disassembler followed by a list of instructions with program counters and opcodes.
+Outputs one deterministic assembly listing from Azoth's native decoder. Each line includes the
+program counter, opcode, and any `PUSH` immediate.
 
 ### `azoth strip`
 Extracts runtime bytecode from deployment bytecode, removing init code and auxdata.
@@ -58,38 +59,51 @@ Options:
 Applies obfuscation transformations to bytecode.
 
 ```bash
-azoth obfuscate -D <DEPLOYMENT_BYTECODE> -R <RUNTIME_BYTECODE>
-azoth obfuscate --deployment 0x6080... --runtime 0x6080... --seed 12345
-azoth obfuscate -D path/to/deployment.hex -R path/to/runtime.hex --passes shuffle
-azoth obfuscate -D path/to/deployment.hex -R path/to/runtime.hex --constructor-args 0x...
+azoth obfuscate --deployment 0x6080... --runtime 0x6080... \
+  --seed 0x0000000000000000000000000000000000000000000000000000000000000001
+azoth obfuscate -D path/to/deployment.hex -R path/to/runtime.hex \
+  --seed-stdin --passes cluster_shuffle < /run/secrets/azoth-seed
+azoth obfuscate -D path/to/deployment.hex -R path/to/runtime.hex \
+  --seed 0x0000000000000000000000000000000000000000000000000000000000000001 \
+  --passes cluster_shuffle
 ```
 
 Options:
 - `-D, --deployment <BYTECODE>` - Input deployment bytecode (required)
 - `-R, --runtime <BYTECODE>` - Input runtime bytecode (required)
-- `--constructor-args <HEX>` - ABI-encoded constructor suffix to append and obfuscate; omit when `-D` already contains it
-- `--seed <value>` - Cryptographic seed for deterministic obfuscation
-- `--passes <list>` - Comma-separated list of transforms (default: shuffle)
+- `--constructor-args <HEX>` - ABI-encoded constructor suffix to append unchanged; omit when `-D` already contains it
+- `--seed <HEX>` - Private 32-byte seed, with optional `0x` prefix; retained for compatibility but visible in process arguments and often shell history
+- `--seed-stdin` - Read the private seed from standard input; exactly one of this option and `--seed` is required
+- `--passes <list>` - Comma-separated list of admitted transforms (default: `cluster_shuffle`)
 - `--emit <file>` - Path to write gas/size report as JSON
 - `--emit-debug <PATH>` - Path to emit detailed CFG trace debug report as JSON
+- `--emit-manifest <PATH>` - Path to emit the private interaction/integrity guide
 - `--tui` - Launch TUI to view debug trace after obfuscation
 
-Note: `function_dispatcher` is always applied automatically.
+Legacy transforms and function-selector rewriting are rejected or disabled by the safe CLI
+profile. Library opt-ins remain experimental and are not a production endorsement.
 
-The runtime is used as an exact, authoritative deployment boundary. A supplied runtime that is missing or occurs more than once is rejected. Constructor masking does not parse the ABI and is not cryptographic confidentiality; it removes the stable plaintext suffix while preserving constructor behavior.
+The runtime is used as an exact, authoritative deployment boundary. A supplied runtime that is
+missing or occurs more than once is rejected. Constructor arguments are not masked by the safe
+profile. Private manifests/debug traces are fully written and synced in the destination directory
+before no-clobber publication, use owner-only permissions on Unix, and refuse to overwrite an
+existing destination. They are plaintext capabilities, not encrypted containers; protect them
+like the seed.
 
 ### `azoth analyze`
 Generates multiple obfuscated variants and reports how much of the original bytecode survives unchanged.
 
 ```bash
 azoth analyze <ITERATIONS> -D <DEPLOYMENT_BYTECODE> -R <RUNTIME_BYTECODE>
-azoth analyze 50 --deployment path/to/deployment.hex --runtime path/to/runtime.hex
+azoth analyze 50 --deployment path/to/deployment.hex --runtime path/to/runtime.hex \
+  --seed 0x0000000000000000000000000000000000000000000000000000000000000001
 azoth analyze 25 -D 0x6080... -R 0x6080... --output reports/analysis.md
 ```
 
 Options:
 - `-D, --deployment <BYTECODE>` - Input deployment bytecode (default: examples/escrow-bytecode/artifacts/erc20_deployment.hex)
 - `-R, --runtime <BYTECODE>` - Input runtime bytecode (default: examples/escrow-bytecode/artifacts/erc20_runtime.hex)
+- `--seed <HEX>` - Required private 32-byte root seed for reproducible child seeds
 - `--output <path>` - Where to write the markdown report (default: ./obfuscation_analysis_report.md)
 - `--max-attempts <n>` - Retry budget per iteration when a seed fails (default: 5)
 

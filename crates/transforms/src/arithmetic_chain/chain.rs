@@ -4,7 +4,7 @@
 //! compute a target constant value from scattered initial values.
 
 use super::types::{ArithmeticChainDef, ArithmeticOp, ChainConfig, ScatterStrategy};
-use rand::rngs::StdRng;
+use azoth_core::seed::DeterministicRng;
 use rand::Rng;
 
 /// Generate an arithmetic chain for a target 32-byte constant.
@@ -16,7 +16,7 @@ use rand::Rng;
 pub fn generate_chain(
     target: [u8; 32],
     config: &ChainConfig,
-    rng: &mut StdRng,
+    rng: &mut DeterministicRng,
 ) -> ArithmeticChainDef {
     let depth = rng.random_range(config.chain_depth.clone());
     let operations: Vec<ArithmeticOp> = (0..depth).map(|_| ArithmeticOp::random(rng)).collect();
@@ -35,7 +35,7 @@ pub fn generate_chain(
 fn compute_initial_values(
     target: [u8; 32],
     operations: &[ArithmeticOp],
-    rng: &mut StdRng,
+    rng: &mut DeterministicRng,
 ) -> Vec<[u8; 32]> {
     let mut current = target;
     let mut initial_values = Vec::with_capacity(operations.len() + 1);
@@ -73,7 +73,7 @@ pub fn evaluate_forward(initial_values: &[[u8; 32]], operations: &[ArithmeticOp]
 fn assign_scatter_locations(
     count: usize,
     config: &ChainConfig,
-    rng: &mut StdRng,
+    rng: &mut DeterministicRng,
 ) -> Vec<ScatterStrategy> {
     (0..count)
         .map(|_| {
@@ -114,8 +114,8 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
 
-    fn test_rng() -> StdRng {
-        StdRng::seed_from_u64(42)
+    fn test_rng() -> DeterministicRng {
+        DeterministicRng::seed_from_u64(42)
     }
 
     #[test]

@@ -4,12 +4,12 @@ use azoth_transform::jump_address_transformer::JumpAddressTransformer;
 use azoth_transform::Transform;
 
 #[tokio::test]
-async fn test_jump_address_transformer() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+async fn legacy_jump_address_transformer_fails_closed_on_invalid_layout() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
         .with_ansi(false)
         .without_time()
-        .init();
+        .try_init();
 
     // Simple bytecode with a conditional jump
     let bytecode = "0x60085760015b00"; // PUSH1 0x08, JUMPI, PUSH1 0x01, JUMPDEST, STOP
@@ -17,44 +17,19 @@ async fn test_jump_address_transformer() {
         .await
         .unwrap();
 
-    // Count instructions before transformation
-    let mut instruction_count_before = 0;
-    for node_idx in cfg_ir.cfg.node_indices() {
-        if let azoth_core::cfg_ir::Block::Body(body) = &cfg_ir.cfg[node_idx] {
-            instruction_count_before += body.instructions.len();
-        }
-    }
-
     let seed = Seed::from_hex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
         .unwrap();
     let mut rng = seed.create_deterministic_rng();
 
     let transform = JumpAddressTransformer::new();
 
-    let changed = transform.apply(&mut cfg_ir, &mut rng).unwrap();
-    assert!(changed, "JumpAddressTransformer should modify bytecode");
-
-    // Count instructions after transformation
-    let mut instruction_count_after = 0;
-    for node_idx in cfg_ir.cfg.node_indices() {
-        if let azoth_core::cfg_ir::Block::Body(body) = &cfg_ir.cfg[node_idx] {
-            instruction_count_after += body.instructions.len();
-        }
-    }
-
-    // Should have more instructions after transformation
+    let error = transform
+        .apply(&mut cfg_ir, &mut rng)
+        .expect_err("the legacy pass must not emit overlapping instruction spans");
     assert!(
-        instruction_count_after > instruction_count_before,
-        "Instruction count should increase: before={}, after={}",
-        instruction_count_before,
-        instruction_count_after
-    );
-
-    // Verify we added exactly 2 more instructions (1 PUSH was replaced with 2 PUSH + 1 ADD = net +2)
-    assert_eq!(
-        instruction_count_after,
-        instruction_count_before + 2,
-        "Should add exactly 2 instructions"
+        error.to_string().contains("invalid block structure")
+            && error.to_string().contains("gap or overlap"),
+        "unexpected fail-closed error: {error}"
     );
 }
 

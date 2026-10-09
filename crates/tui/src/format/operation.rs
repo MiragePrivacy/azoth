@@ -27,6 +27,10 @@ pub fn format_operation_kind_short(kind: &OperationKind) -> String {
         OperationKind::SetConditionalJump { source, .. } => format!("Branch({source})"),
         OperationKind::RebuildEdges { node } => format!("Edges({node})"),
         OperationKind::WriteSymbolicImmediates { node } => format!("Symbolic({node})"),
+        OperationKind::ReorderLayout { blocks_moved } => {
+            format!("ReorderLayout({blocks_moved})")
+        }
+        OperationKind::ResolveRelocations { count } => format!("Relocations({count})"),
         OperationKind::ReindexPcs => "ReindexPCs".to_string(),
         OperationKind::PatchJumpImmediates => "PatchJumps".to_string(),
         OperationKind::PatchDispatcher { blocks_modified } => {
@@ -72,6 +76,12 @@ pub fn format_operation_kind_full(kind: &OperationKind) -> String {
         OperationKind::RebuildEdges { node } => format!("Rebuild Edges for {node}"),
         OperationKind::WriteSymbolicImmediates { node } => {
             format!("Write Symbolic Immediates for {node}")
+        }
+        OperationKind::ReorderLayout { blocks_moved } => {
+            format!("Reorder Layout ({blocks_moved} blocks moved)")
+        }
+        OperationKind::ResolveRelocations { count } => {
+            format!("Resolve Code-Pointer Relocations ({count})")
         }
         OperationKind::ReindexPcs => "Reindex PCs".to_string(),
         OperationKind::PatchJumpImmediates => "Patch Jump Immediates".to_string(),
@@ -124,6 +134,8 @@ pub fn format_group_detail_lines(
                         OperationKind::SetConditionalJump { .. } => "SetConditionalJump",
                         OperationKind::RebuildEdges { .. } => "RebuildEdges",
                         OperationKind::WriteSymbolicImmediates { .. } => "WriteSymbolicImmediates",
+                        OperationKind::ReorderLayout { .. } => "ReorderLayout",
+                        OperationKind::ResolveRelocations { .. } => "ResolveRelocations",
                         OperationKind::ReindexPcs => "ReindexPcs",
                         OperationKind::PatchJumpImmediates => "PatchJumpImmediates",
                         OperationKind::PatchDispatcher { .. } => "PatchDispatcher",

@@ -19,10 +19,6 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// Heimdall disassembly operation failed.
-    #[error("heimdall disassembly failed: {0}")]
-    Heimdall(String),
-
     /// Failed to decode hex string.
     #[error("hex decode failed: {0}")]
     HexDecode(#[from] hex::FromHexError),
@@ -38,6 +34,19 @@ pub enum Error {
     /// The immediate data for a PUSH opcode is invalid.
     #[error("invalid immediate: {0}")]
     InvalidImmediate(String),
+
+    /// A final PUSH has fewer physical immediate bytes than its declared width.
+    #[error(
+        "truncated PUSH{width} at byte 0x{pc:x}: expected {width} immediate bytes, found {available}"
+    )]
+    TruncatedPush {
+        /// Byte offset of the PUSH opcode.
+        pc: usize,
+        /// Declared PUSH immediate width.
+        width: usize,
+        /// Number of immediate bytes physically present.
+        available: usize,
+    },
 
     /// Invalid hexadecimal in seed.
     #[error("invalid hexadecimal in seed")]

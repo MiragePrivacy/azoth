@@ -26,11 +26,11 @@ pub fn evaluate_forward(initial_values: &[[u8; 32]], operations: &[ArithmeticOp]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::StdRng;
+    use azoth_core::seed::DeterministicRng;
     use rand::{Rng, SeedableRng};
 
-    fn test_rng() -> StdRng {
-        StdRng::seed_from_u64(12345)
+    fn test_rng() -> DeterministicRng {
+        DeterministicRng::seed_from_u64(12345)
     }
 
     #[test]

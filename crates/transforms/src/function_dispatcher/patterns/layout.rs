@@ -310,11 +310,12 @@ fn create_tier_nodes(
             Instruction {
                 pc: invalid_start + 1,
                 op: Opcode::INVALID,
-                imm: Some("fe".to_string()), // Ensure it encodes as 0xfe, not a random byte
+                imm: None,
             },
         ],
         max_stack: 0,
         control: BlockControl::Terminal,
+        section: azoth_core::detection::SectionKind::Runtime,
     };
     next_pc += 2;
     let invalid_node = ir.add_block(Block::Body(invalid_block));
@@ -392,6 +393,7 @@ fn create_tier_nodes(
         instructions: decoy_instructions,
         max_stack: 2,
         control: BlockControl::Unknown,
+        section: azoth_core::detection::SectionKind::Runtime,
     };
     let decoy_node = ir.add_block(Block::Body(decoy_block));
     ir.pc_to_block.insert(decoy_start, decoy_node);
@@ -434,6 +436,7 @@ fn create_tier_nodes(
         instructions: stub_instructions,
         max_stack: 1,
         control: BlockControl::Unknown,
+        section: azoth_core::detection::SectionKind::Runtime,
     };
     let stub_node = ir.add_block(Block::Body(stub_block));
     ir.pc_to_block.insert(stub_start, stub_node);
@@ -637,6 +640,7 @@ fn create_selector_controller(
         instructions: instructions.clone(),
         max_stack: 2,
         control: BlockControl::Unknown,
+        section: azoth_core::detection::SectionKind::Runtime,
     };
 
     debug!(
@@ -678,15 +682,14 @@ fn locate_target_push(runtime: &[Instruction], selector: &FunctionSelector) -> O
     {
         match instr.op {
             Opcode::JUMPI => break,
-            Opcode::PUSH(_) | Opcode::PUSH0 => {
+            Opcode::PUSH(_) | Opcode::PUSH0
                 if instr
                     .imm
                     .as_ref()
                     .and_then(|imm| usize::from_str_radix(imm, 16).ok())
-                    == Some(target)
-                {
-                    return Some(idx);
-                }
+                    == Some(target) =>
+            {
+                return Some(idx);
             }
             _ => {}
         }

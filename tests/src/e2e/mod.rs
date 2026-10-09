@@ -1,13 +1,13 @@
-//! End to end ethereum tests.
+//! End-to-end Ethereum tests.
 //!
-//! Test variations of obfuscation options:
-//!   - Function dispatch only (all options off)
-//!   - Each transformation type enabled
-//!   - Each combination of 2 transformations
-//!   - All options enabled
-//!
-//! Each test case should assert that the contract is deployable
+//! The ERC20 escrow constructor executes `GAS`. Changing any creation-bytecode byte can therefore
+//! change an observable value through transaction intrinsic gas. The hardened pipeline responds by
+//! authenticating and returning the exact input artifact whenever a requested pass would mutate
+//! this fixture. These tests cover both sides of that contract: the identity fallback itself and
+//! the escrow's behavior through its unchanged Solidity ABI.
 
+use azoth_core::seed::Seed;
+use azoth_transform::obfuscator::ObfuscationResult;
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use revm::bytecode::Bytecode;
@@ -206,6 +206,20 @@ macro_rules! define_contract_selectors {
             }
 
             impl [<$contract Mappings>] {
+                /// Build a mapping that preserves the contract's standard Solidity ABI.
+                ///
+                /// The production profile does not currently rewrite selectors. This constructor
+                /// lets the behavioral harness reuse its calldata builders without pretending an
+                /// interface adaptation occurred.
+                #[allow(dead_code)]
+                pub fn identity() -> Self {
+                    Self {
+                        $(
+                            $fn_name: [<$contract:upper _ $fn_name:upper>],
+                        )*
+                    }
+                }
+
                 /// Create mappings from obfuscator output (HashMap<u32, Vec<u8>>)
                 #[allow(dead_code)]
                 pub fn from_obfuscator_output(
@@ -390,6 +404,66 @@ pub fn build_standard_calldata(selector: Selector, args: &[u8]) -> Bytes {
     let mut data = selector.0.to_vec();
     data.extend_from_slice(args);
     Bytes::from(data)
+}
+
+/// Assert the conservative result required for the GAS-observing ERC20 escrow constructor.
+///
+/// Requested passes remain present in the authenticated replay recipe, but no pass may be reported
+/// as applied and neither the creation payload nor runtime template may change. This distinction
+/// keeps a safe no-op auditable instead of silently presenting it as successful variation.
+#[allow(dead_code)]
+pub fn assert_erc20_identity_fallback(
+    result: &ObfuscationResult,
+    seed: &Seed,
+    expected_requested_transforms: &[&str],
+) -> Result<()> {
+    let input_deployment = hex::decode(azoth_core::normalize_hex_string(
+        ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+    )?)?;
+    let input_runtime = hex::decode(azoth_core::normalize_hex_string(
+        ESCROW_CONTRACT_RUNTIME_BYTECODE,
+    )?)?;
+    let output_deployment = hex::decode(result.obfuscated_bytecode.trim_start_matches("0x"))?;
+    let output_runtime = hex::decode(result.obfuscated_runtime.trim_start_matches("0x"))?;
+
+    assert_eq!(
+        output_deployment, input_deployment,
+        "a GAS-observing constructor requires byte-for-byte stable creation code"
+    );
+    assert_eq!(
+        output_runtime, input_runtime,
+        "identity fallback must preserve the complete runtime template"
+    );
+    assert_eq!(result.original_size, result.obfuscated_size);
+    assert_eq!(result.size_increase_percentage, 0.0);
+    assert!(
+        result.metadata.transforms_applied.is_empty(),
+        "discarded candidates must not be reported as applied"
+    );
+    assert!(result.integrity.transforms_applied.is_empty());
+    assert!(
+        result.selector_mapping.is_none(),
+        "the safe profile must preserve standard Solidity selectors"
+    );
+
+    let configuration = &result.integrity.pipeline_configuration;
+    assert!(configuration.preserve_unknown_opcodes);
+    assert!(!configuration.rewrite_function_selectors);
+    assert!(!configuration.obfuscate_constructor_arguments);
+    let requested_names: Vec<_> = configuration
+        .requested_transforms
+        .iter()
+        .map(|recipe| recipe.name.as_str())
+        .collect();
+    assert_eq!(requested_names, expected_requested_transforms);
+    assert!(configuration
+        .requested_transforms
+        .iter()
+        .all(|recipe| !recipe.configuration_id.is_empty()));
+
+    result
+        .verify_integrity(&input_deployment, &input_runtime, seed)
+        .map_err(color_eyre::eyre::Error::msg)
 }
 
 #[cfg(test)]

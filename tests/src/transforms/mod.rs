@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod cluster_shuffle;
+#[cfg(test)]
 mod determinism;
 #[cfg(test)]
 mod function_dispatcher;

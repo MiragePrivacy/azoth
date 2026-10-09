@@ -1,14 +1,21 @@
 # Constructor-argument obfuscation report
 
+> **Historical experimental result — not a release recommendation.** This document records an
+> earlier constructor-mask prototype and its local measurements. The current safe foundation
+> profile disables constructor-argument masking. Subsequent local red-team evaluation recognized
+> the decoder across the evaluated corpus, so the prototype failed Azoth's stealth gate. Its test
+> counts and benchmark figures below describe that earlier experiment, not the current profile and
+> not production evidence.
+
 ## Executive report
 
-Azoth now removes the report's literal constructor-tail disclosure without changing the input Solidity, source bytecode, ABI, or deployed contract behavior. The deployment runtime supplied to Azoth defines the boundary exactly; all bytes after that complete runtime are masked, and seed-varied init code restores them in memory before the original constructor continues. The returned creation payload therefore no longer contains the original ABI suffix verbatim.
+The experimental pass removed literal constructor-tail disclosure in its supported test shapes without changing the input Solidity, source bytecode, or ABI. The deployment runtime supplied to Azoth defined the boundary exactly; bytes after that complete runtime were masked, and seed-varied init code restored them in memory before the original constructor continued. In those experiments, the returned creation payload no longer contained the original ABI suffix verbatim. This bounded behavior was not a proof for arbitrary constructors or environments.
 
-This is the strongest honest Azoth-only response to `mirage-adversarial-privacy-report.md`. Constructor code and transaction input are public, so bytecode-only obfuscation cannot provide cryptographic confidentiality: a capable analyst can execute the init code or reverse its data flow, and any constructor value later written to public runtime code, storage, logs, calls, or proofs remains observable there. The change specifically raises the report's zero-effort static ABI-tail recovery into a program-analysis problem. It does not claim to solve the report's public-state or proof-disclosure findings, and it does not alter the report's CBOR metadata fingerprint finding.
+This was intended as a bounded Azoth-only response to `mirage-adversarial-privacy-report.md`. Constructor code and transaction input are public, so bytecode-only obfuscation cannot provide cryptographic confidentiality: a capable analyst can execute the init code or reverse its data flow, and any constructor value later written to public runtime code, storage, logs, calls, or proofs remains observable there. The prototype raised the report's zero-effort static ABI-tail recovery into a program-analysis problem for its supported shapes. It did not solve the report's public-state, proof-disclosure, or CBOR metadata-fingerprint findings.
 
-The implementation introduces no ABI-shaped heuristic and emits no Azoth marker, version header, fixed key, or fixed decoder byte string. The full runtime is already a required Azoth input and is used as an authoritative boundary. Decoder chunk order, arithmetic constants, instruction chains, and trampoline form are seed-derived. As with any public program transformation, a semantic classifier may still recognize self-decoding behavior; no non-ZK construction can honestly guarantee otherwise.
+The prototype did not intentionally emit an Azoth marker, version header, fixed key, or one fixed decoder byte string. The full runtime was used as an authoritative boundary, while decoder chunk order, arithmetic constants, instruction chains, and trampoline form were seed-derived. Those variations did not make the construction unrecognizable: the later local detector identified the common self-decoding structure across the evaluated samples. Absence of a literal marker is therefore not evidence of indistinguishability.
 
-Safety is fail-closed. If the supplied runtime is absent or ambiguous, if the constructor has no single supported argument-copy site, if the trampoline cannot preserve existing init-code program counters, or if the result exceeds EIP-170/EIP-3860 limits, obfuscation returns an error instead of exposing plaintext arguments or emitting known-undeployable output.
+The prototype attempted to fail closed for the supported shapes: an absent or ambiguous runtime, an unsupported argument-copy site, an unsafe trampoline, or an EIP-170/EIP-3860 size violation returned an error. That parser and its differential tests were still narrower than complete EVM semantic equivalence.
 
 ## Technical report
 
@@ -16,9 +23,9 @@ Safety is fail-closed. If the supplied runtime is absent or ambiguous, if the co
 
 The previous pipeline treated constructor data as untouched recovery material. Section detection also examined the end of the whole creation payload for Solidity CBOR metadata even though constructor arguments follow the compiler-generated creation bytecode. ABI words could therefore be mistaken for metadata, while the real argument suffix was reassembled unchanged. In the reported deployment this made all six recipient/token/amount rows recoverable by reading aligned words at the tail; no EVM analysis was necessary.
 
-### Design and implementation
+### Historical design and implementation
 
-The fix has four cooperating parts:
+The experimental prototype had four cooperating parts:
 
 1. **Exact section boundaries.** The complete caller-supplied runtime must occur exactly once in the deployment payload. Its start separates init from runtime, its own CBOR trailer is split as auxdata, and every byte after its end is classified as `ConstructorArgs`. This is byte-exact and works for static, dynamic, packed-looking, all-zero, and adversarial argument values without ABI guessing.
 
@@ -28,9 +35,17 @@ The fix has four cooperating parts:
 
 4. **Correct recovery.** Reassembly now distinguishes deployed suffixes such as CBOR auxdata from transaction-only constructor arguments. Runtime `CODECOPY`/`RETURN` lengths exclude the arguments, creation offsets account for decoder growth, and the constructor's original creation-length constant is patched. Immutable-reference offsets continue to be remapped after runtime transforms. The final payload is checked against the 24,576-byte EIP-170 runtime limit and 49,152-byte EIP-3860 initcode limit.
 
-The transform is automatically applied when an argument suffix exists. Callers may pass a full creation payload to `-D`, or pass compiler creation bytecode plus `--constructor-args <HEX>`. Result metadata exposes `constructor_args_obfuscated`, `constructor_argument_bytes`, and `constructor_decoder_bytes` so release tooling can enforce that expected sensitive inputs were actually handled.
+The library retains an explicit experimental opt-in through
+`ObfuscationConfig::obfuscate_constructor_arguments`. It is **not** automatically applied by the
+current safe profile, and the safe CLI does not expose it as an admitted pass. Result metadata still
+records `constructor_args_obfuscated`, `constructor_argument_bytes`, and
+`constructor_decoder_bytes` for research harnesses; those fields are not a release attestation.
 
-### Soundness and adversarial verification
+### Historical test snapshot
+
+The following table was captured during the earlier prototype work. It was useful regression
+evidence for the tested fixtures, but it did not establish complete equivalence or stealth and must
+not be combined with current-profile results.
 
 | Check | Scope | Result |
 |---|---:|---:|
@@ -43,13 +58,13 @@ The transform is automatically applied when an argument suffix exists. Callers m
 | Static analysis | `cargo clippy ... -D warnings` | Passed |
 | Formatting | `cargo fmt --all -- --check` | Passed |
 
-The built-in campaign randomly varied seeds, constructor recipients and amounts, and transform selections. Its existing REVM oracle required every transformed payload whose original deployed successfully to deploy successfully as well. The focused differential test supplied the stronger byte-for-byte deployed-runtime comparison. Unsupported and ambiguous copy layouts have explicit rejection tests.
+The built-in campaign varied seeds, constructor recipients and amounts, and transform selections. Its REVM oracle required successful creation, while the focused test compared deployed runtime bytes for its selected cases. Neither check covered arbitrary calls, state transitions, logs, reverts, external effects, gas-sensitive behavior, forks, or all compiler shapes.
 
-The full workspace build reaches the external Z3-backed verification crate but cannot compile it in the current environment because the system `z3.h` header is not installed. This is an environment prerequisite, not a failure in the changed core/transform/CLI crates; those crates compile and test cleanly.
+At the time of this snapshot, the full workspace build could not compile the external Z3-backed crate because `z3.h` was absent. More importantly, the current production-facing equivalence verifier intentionally returns `VerificationUnavailable`; compiling Z3 does not turn the incomplete encoding into proof evidence.
 
-### Benchmark
+### Historical benchmark
 
-Fixture: the repository's Solidity 0.8.30 ERC20 escrow with a 160-byte constructor suffix. Measurements use a release build and REVM. Size/gas deltas compare the original creation payload with the constructor-mask-only result for one representative deterministic seed; decoder distribution and transform time cover 100 deterministic seeds.
+Fixture: the repository's Solidity 0.8.30 ERC20 escrow with a 160-byte constructor suffix. These earlier measurements used a release build and REVM. Size/gas deltas compare the original creation payload with the experimental constructor-mask-only result for one representative deterministic seed; decoder distribution and transform time covered 100 deterministic seeds. They are retained for historical engineering context only.
 
 | Metric | Before | After | Delta |
 |---|---:|---:|---:|
@@ -61,8 +76,13 @@ Fixture: the repository's Solidity 0.8.30 ERC20 escrow with a 160-byte construct
 
 Across 100 seeds, decoder size averaged 569.7 bytes (433 minimum, 711 maximum), and masking averaged 124.1 microseconds per creation payload in the release benchmark. Cost grows approximately with the number of 32-byte chunks; these figures should not be extrapolated as measurements of the report's larger multi-row payload without benchmarking that exact fixture.
 
-### Security boundary and rollout guidance
+### Security boundary and current decision
 
-This mitigation closes the report's direct plaintext-suffix extraction path. It does not encrypt transaction calldata, hide values after the EVM decodes them, suppress storage/log/call/proof disclosures, remove Solidity CBOR metadata, or prevent dynamic/symbolic recovery. Teams requiring confidentiality from validators, archive nodes, or skilled reverse engineers need a cryptographic protocol change, which was explicitly outside this work.
+In its supported experiments, the pass removed the direct verbatim-suffix extraction path. It did not encrypt transaction calldata, hide values after EVM decoding, suppress storage/log/call/proof disclosures, remove Solidity CBOR metadata, or prevent dynamic/symbolic recovery. The recognizable decoder also created an Azoth-specific classification signal.
 
-For rollout, require `constructor_args_obfuscated: true` whenever an expected deployment has constructor inputs, retain differential deployment testing for each production compiler/version, and treat a fail-closed unsupported-layout error as a release blocker. Re-run the benchmark on the exact production constructor payload because decoder overhead is argument-length dependent.
+**Decision: do not roll this pass into the safe profile.** Current safe-profile evaluation must leave
+`obfuscate_constructor_arguments` disabled. Redesign requires a representative Ethereum negative
+corpus, an out-of-sample detector gate, complete constructor semantic obligations, and differential
+behavior coverage before reconsideration. Teams that require constructor-value confidentiality
+from validators, archive nodes, or skilled reverse engineers need a cryptographic protocol change;
+public self-decoding init code cannot provide that confidentiality.

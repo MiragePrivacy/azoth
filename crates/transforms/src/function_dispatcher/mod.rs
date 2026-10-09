@@ -1,5 +1,8 @@
 //! Function dispatcher transform.
 
+// Retained as research-only source for future redesign. The production and explicit selector
+// relabel paths deliberately do not synthesize these recognizable controller/decoy patterns.
+#[allow(dead_code)]
 mod patterns;
 pub(crate) mod token;
 
@@ -8,11 +11,10 @@ use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, CfgIrBundle};
 use azoth_core::decoder::Instruction;
 use azoth_core::detection::{detect_function_dispatcher, DispatcherInfo};
-use azoth_core::seed::Seed;
+use azoth_core::seed::{DeterministicRng, Seed};
 use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
-use rand::rngs::StdRng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::debug;
 
 #[derive(Default)]
@@ -36,6 +38,7 @@ impl FunctionDispatcher {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn seed(&self) -> Option<&Seed> {
         self.seed.as_ref()
     }
@@ -253,6 +256,7 @@ impl FunctionDispatcher {
     }
 
     /// Syncs internal CALL sites with dispatcher tokens so remapped selectors still fire.
+    #[allow(dead_code)]
     fn update_internal_calls(
         &self,
         ir: &mut CfgIrBundle,
@@ -342,7 +346,7 @@ impl FunctionDispatcher {
                     return Err(Error::Generic(format!(
                         "dispatcher: instruction at pc {} not found in CFG",
                         instruction.pc
-                    )))
+                    )));
                 }
             };
 
@@ -378,7 +382,7 @@ impl Transform for FunctionDispatcher {
         "FunctionDispatcher"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
+    fn apply(&self, ir: &mut CfgIrBundle, _rng: &mut DeterministicRng) -> Result<bool> {
         let (runtime_instructions, index_by_pc) = self.collect_runtime_instructions(ir);
         if runtime_instructions.is_empty() {
             debug!("No runtime instructions available; skipping dispatcher transform");
@@ -398,86 +402,57 @@ impl Transform for FunctionDispatcher {
             return Ok(false);
         }
 
-        let runtime_len = if let Some((start, end)) = ir.runtime_bounds {
-            end.saturating_sub(start)
-        } else {
-            runtime_instructions
-                .last()
-                .map(|instr| instr.pc + instr.byte_size())
-                .unwrap_or(0)
-        };
-        let selector_count = dispatcher_info.selectors.len();
-        let lightweight_dispatcher = selector_count <= 2 || runtime_len <= 96;
-
-        if lightweight_dispatcher {
-            debug!(
-                runtime_len,
-                selectors = selector_count,
-                "Using lightweight dispatcher obfuscation path"
-            );
-            let preserve_bytes = HashMap::new();
-            let seed = self.seed.as_ref().ok_or_else(|| {
-                Error::Generic("dispatcher: seed required for token mapping".into())
-            })?;
-            let mapping =
-                generate_selector_token_mapping(&dispatcher_info.selectors, seed, &preserve_bytes)?;
-            if self.apply_dispatcher_patches(
-                ir,
-                &runtime_instructions,
-                &index_by_pc,
-                &dispatcher_info,
-                &mapping,
-            )? {
-                ir.selector_mapping = Some(mapping);
-                return Ok(true);
-            } else {
-                return Ok(false);
-            }
-        }
-
-        let blueprint = self.build_blueprint(&dispatcher_info, rng);
-        let original_selector_count = blueprint.dispatcher.selectors.len();
-        let selector_assignment_count = blueprint.selectors.len();
-        let tier_count = blueprint
+        // Keep the compiler's native dispatcher shape. Synthesized decoy/controller tails are a
+        // cheap family signature and can depend on storage slots that the original contract owns.
+        // Selector relabeling changes the private interface without adding an opcode motif.
+        let selector_values: HashSet<_> = dispatcher_info
             .selectors
             .iter()
-            .map(|assignment| assignment.tier_index + 1)
-            .max()
-            .unwrap_or(0);
-        debug!(
-            tiers = tier_count,
-            selectors = original_selector_count,
-            assignments = selector_assignment_count,
-            "Prepared multi-tier dispatcher blueprint"
-        );
+            .map(|selector| selector.selector)
+            .collect();
+        let dispatcher_pcs: HashSet<_> = dispatcher_info
+            .selectors
+            .iter()
+            .filter_map(|selector| runtime_instructions.get(selector.instruction_index))
+            .map(|instruction| instruction.pc)
+            .collect();
+        let duplicated_selector = runtime_instructions.iter().any(|instruction| {
+            if dispatcher_pcs.contains(&instruction.pc) {
+                return false;
+            }
+            let Opcode::PUSH(4) = instruction.op else {
+                return false;
+            };
+            instruction
+                .imm
+                .as_deref()
+                .and_then(|immediate| u32::from_str_radix(immediate, 16).ok())
+                .is_some_and(|value| selector_values.contains(&value))
+        });
+        if duplicated_selector {
+            debug!(
+                "Selector literal is used outside the dispatcher; refusing partial interface rewrite"
+            );
+            return Ok(false);
+        }
 
-        let Some(plan) = self.apply_layout_plan(
+        let preserve_bytes = HashMap::new();
+        let seed = self
+            .seed
+            .as_ref()
+            .ok_or_else(|| Error::Generic("dispatcher: seed required for token mapping".into()))?;
+        let mapping =
+            generate_selector_token_mapping(&dispatcher_info.selectors, seed, &preserve_bytes)?;
+        let changed = self.apply_dispatcher_patches(
             ir,
             &runtime_instructions,
             &index_by_pc,
             &dispatcher_info,
-            &blueprint,
-        )?
-        else {
-            debug!("Multi-tier dispatcher layout not applied; skipping transform");
-            return Ok(false);
-        };
-
-        let calls_modified = self.update_internal_calls(ir, &plan.mapping)?;
-
-        if plan.dispatcher_modified || calls_modified {
-            ir.selector_mapping = Some(plan.mapping);
-            // Store dispatcher patch info for post-reindex patching
-            ir.dispatcher_controller_pcs = Some(plan.controller_pcs);
-            ir.dispatcher_patches = Some(plan.dispatcher_patches);
-            ir.stub_patches = Some(plan.stub_patches);
-            ir.decoy_patches = Some(plan.decoy_patches);
-            ir.controller_patches = Some(plan.controller_patches);
-            debug!("Function dispatcher obfuscated via multi-tier layout");
-            Ok(true)
-        } else {
-            debug!("Dispatcher mapping produced no changes");
-            Ok(false)
+            &mapping,
+        )?;
+        if changed {
+            ir.selector_mapping = Some(mapping);
         }
+        Ok(changed)
     }
 }

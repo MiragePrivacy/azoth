@@ -137,16 +137,13 @@ fn init_literal_slots_empty_bytes_yields_empty_result() {
 }
 
 #[test]
-fn init_literal_slots_truncated_push_terminates_cleanly() {
-    // PUSH2 with only 1 immediate byte — decoder stops at the
-    // truncated instruction rather than reading out of bounds or
-    // producing garbage. The preceding PUSH1 0x05; SSTORE pair is
-    // still captured.
+fn init_literal_slots_truncated_push_fails_closed() {
+    // A partial view of init code is unsafe for storage remapping. Report the malformed tail and
+    // discard candidates collected before it so SlotShuffle is disabled atomically.
     let bytes = vec![PUSH1, 0x09, PUSH1, 0x05, SSTORE, PUSH2, 0x12];
     let (touched, unresolved) = init_literal_slots(&bytes);
-    let expected: HashSet<_> = std::iter::once((1usize, vec![0x05u8])).collect();
-    assert_eq!(touched, expected);
-    assert!(unresolved.is_empty());
+    assert!(touched.is_empty());
+    assert_eq!(unresolved, vec![5]);
 }
 
 #[test]

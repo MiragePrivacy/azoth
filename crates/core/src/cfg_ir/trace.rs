@@ -8,8 +8,8 @@ use petgraph::Direction;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use revm::primitives::Bytes;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize, Serializer};
+use std::collections::{BTreeMap, HashMap};
 
 /// Operations recorded in the CFG trace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +57,14 @@ pub enum OperationKind {
     },
     ReindexPcs,
     PatchJumpImmediates,
+    /// Physical body-block order changed without changing stable graph identity.
+    ReorderLayout {
+        blocks_moved: usize,
+    },
+    /// Stack-proven literal code pointers resolved after physical layout was assigned.
+    ResolveRelocations {
+        count: usize,
+    },
     /// Dispatcher selector tokens patched across multiple blocks.
     PatchDispatcher {
         blocks_modified: usize,
@@ -72,6 +80,7 @@ pub enum OperationKind {
 pub struct TraceEvent {
     pub kind: OperationKind,
     pub diff: CfgIrDiff,
+    #[serde(serialize_with = "serialize_optional_usize_map")]
     pub remapped_pcs: Option<HashMap<usize, usize>>,
 }
 
@@ -80,9 +89,11 @@ pub struct TraceEvent {
 pub struct CfgIrSnapshot {
     pub blocks: Vec<BlockSnapshot>,
     pub edges: Vec<EdgeSnapshot>,
+    #[serde(serialize_with = "serialize_usize_map")]
     pub pc_to_block: HashMap<usize, usize>,
     pub clean_report: CleanReport,
     pub sections: Vec<SectionSnapshot>,
+    #[serde(serialize_with = "serialize_optional_selector_map")]
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
     pub original_bytecode: Bytes,
     pub runtime_bounds: Option<(usize, usize)>,
@@ -98,6 +109,9 @@ pub struct CfgIrSnapshot {
     /// PCs that should not be modified by transforms (dispatcher/controller metadata).
     #[serde(default)]
     pub protected_pcs: Vec<usize>,
+    /// Intended physical body-block order by stable node index.
+    #[serde(default)]
+    pub layout_order: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,6 +220,42 @@ pub struct SectionSnapshot {
     pub len: usize,
 }
 
+fn serialize_usize_map<S>(value: &HashMap<usize, usize>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    value
+        .iter()
+        .collect::<BTreeMap<_, _>>()
+        .serialize(serializer)
+}
+
+fn serialize_optional_usize_map<S>(
+    value: &Option<HashMap<usize, usize>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    value
+        .as_ref()
+        .map(|map| map.iter().collect::<BTreeMap<_, _>>())
+        .serialize(serializer)
+}
+
+fn serialize_optional_selector_map<S>(
+    value: &Option<HashMap<u32, Vec<u8>>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    value
+        .as_ref()
+        .map(|map| map.iter().collect::<BTreeMap<_, _>>())
+        .serialize(serializer)
+}
+
 /// Captures a complete snapshot of the current CFG bundle.
 pub fn snapshot_bundle(bundle: &CfgIrBundle) -> CfgIrSnapshot {
     let blocks = bundle
@@ -228,7 +278,7 @@ pub fn snapshot_bundle(bundle: &CfgIrBundle) -> CfgIrSnapshot {
             id: edge.id().index(),
             source: edge.source().index(),
             target: edge.target().index(),
-            kind: edge.weight().clone(),
+            kind: *edge.weight(),
         })
         .collect();
 
@@ -257,6 +307,9 @@ pub fn snapshot_bundle(bundle: &CfgIrBundle) -> CfgIrSnapshot {
     protected_pcs.sort_unstable();
     protected_pcs.dedup();
 
+    let mut dispatcher_blocks: Vec<_> = bundle.dispatcher_blocks.iter().copied().collect();
+    dispatcher_blocks.sort_unstable();
+
     CfgIrSnapshot {
         blocks,
         edges,
@@ -268,8 +321,13 @@ pub fn snapshot_bundle(bundle: &CfgIrBundle) -> CfgIrSnapshot {
         runtime_bounds: bundle.runtime_bounds,
         encoded_runtime: None,
         dispatcher_info: bundle.dispatcher_info.clone(),
-        dispatcher_blocks: bundle.dispatcher_blocks.iter().copied().collect(),
+        dispatcher_blocks,
         protected_pcs,
+        layout_order: bundle
+            .layout_order()
+            .iter()
+            .map(|node| node.index())
+            .collect(),
     }
 }
 
@@ -300,7 +358,7 @@ pub fn snapshot_edges(bundle: &CfgIrBundle, node: NodeIndex) -> Vec<EdgeSnapshot
             id: edge.id().index(),
             source: edge.source().index(),
             target: edge.target().index(),
-            kind: edge.weight().clone(),
+            kind: *edge.weight(),
         })
         .collect()
 }

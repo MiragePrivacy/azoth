@@ -9,12 +9,11 @@
 
 use crate::arithmetic_chain::{compile_chain_inline, generate_chain, ChainConfig, ScatterStrategy};
 use crate::{Error, Result};
+use azoth_core::seed::{DeterministicRng, Seed};
 use azoth_core::strip::CleanReport;
 use azoth_core::{encoder, Opcode};
-use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::{Rng, RngCore, SeedableRng};
-use sha3::{Digest, Sha3_256};
+use rand::{Rng, RngCore};
 
 /// Measurements from constructor-argument obfuscation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -92,11 +91,9 @@ pub fn obfuscate_constructor_args(
     let original_init = report.removed[init_index].data.to_vec();
     let (copy_pc, destination_depth, block_end) = find_argument_copy(&original_init, creation_len)?;
 
-    let mut hasher = Sha3_256::new();
-    hasher.update(b"AZOTH_CONSTRUCTOR_ARGUMENTS_V1");
-    hasher.update(seed);
-    hasher.update((argument_bytes as u64).to_be_bytes());
-    let mut rng = StdRng::from_seed(hasher.finalize().into());
+    let mut rng_domain = b"AZOTH_CONSTRUCTOR_ARGUMENTS_V2".to_vec();
+    rng_domain.extend_from_slice(&(argument_bytes as u64).to_be_bytes());
+    let mut rng = Seed::from_bytes(*seed).derive_rng(&rng_domain);
 
     let original_args = report.removed[args_index].data.to_vec();
     let chunks = argument_bytes.div_ceil(32);
@@ -177,7 +174,7 @@ pub fn obfuscate_constructor_args(
     })
 }
 
-fn emit_stack_neutral_noise(out: &mut Vec<u8>, rng: &mut StdRng) {
+fn emit_stack_neutral_noise(out: &mut Vec<u8>, rng: &mut DeterministicRng) {
     match rng.random_range(0..4) {
         0 => {}
         1 => {
@@ -295,7 +292,7 @@ fn emit_chunk_decoder(
     destination_depth: usize,
     offset: usize,
     mask: [u8; 32],
-    rng: &mut StdRng,
+    rng: &mut DeterministicRng,
 ) -> Result<()> {
     let offset_first = offset > 0 && destination_depth < 16 && rng.random::<bool>();
     if offset_first {
@@ -323,7 +320,18 @@ fn emit_chunk_decoder(
     );
     let mut chain = chain;
     chain.scatter_locations = vec![ScatterStrategy::Inline; chain.initial_values.len()];
-    let instructions = compile_chain_inline(&chain);
+    let mut instructions = compile_chain_inline(&chain);
+    // The chain compiler returns a relocatable fragment. Canonicalize its local PCs before
+    // passing it across the encoder boundary, which deliberately rejects ambiguous IR.
+    let mut next_pc = 0usize;
+    for instruction in &mut instructions {
+        instruction.pc = next_pc;
+        next_pc = next_pc
+            .checked_add(instruction.byte_size())
+            .ok_or_else(|| {
+                Error::EncodingError("constructor argument decoder is too large".into())
+            })?;
+    }
     let encoded = encoder::encode(&instructions, &[])
         .map_err(|error| Error::EncodingError(error.to_string()))?;
     out.extend_from_slice(&encoded);
@@ -337,7 +345,7 @@ fn make_trampoline(
     pc: usize,
     target: usize,
     available: usize,
-    rng: &mut StdRng,
+    rng: &mut DeterministicRng,
 ) -> Result<Vec<u8>> {
     let mut variants = Vec::new();
     if target <= u16::MAX as usize && available >= 4 {
@@ -423,8 +431,8 @@ mod tests {
     use crate::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
     use azoth_core::detection::locate_sections;
     use azoth_core::seed::Seed;
-    use azoth_core::strip::strip_bytecode;
-    use rand::RngCore;
+    use azoth_core::strip::{strip_bytecode, CleanReport};
+    use rand::{RngCore, SeedableRng};
     use revm::bytecode::Bytecode;
     use revm::context::result::{ExecutionResult, Output};
     use revm::context::TxEnv;
@@ -438,6 +446,13 @@ mod tests {
         include_str!("../../../examples/escrow-bytecode/artifacts/erc20_deployment.hex");
     const ESCROW_RUNTIME: &str =
         include_str!("../../../examples/escrow-bytecode/artifacts/erc20_runtime.hex");
+    // A compact, non-GAS constructor fixture. It copies the constructor suffix to memory 0x80,
+    // then deploys a fixed runtime. Both copies satisfy the production provenance contract; the
+    // constructor mask is nevertheless rejected because injecting its decoder would relocate the
+    // constructor's CODESIZE expression.
+    const SUPPORTED_RUNTIME: &str = "0x602a5f5260205ff3";
+    const SUPPORTED_DEPLOYMENT: &str =
+        "0x608061002380380390823950600f565b600861001b5f3960085ff3602a5f5260205ff3";
     const MOCK_TOKEN: Address = Address::new([0x11; 20]);
 
     fn argument_words(recipient: [u8; 20], amount: [u8; 32], payment: [u8; 32]) -> Vec<u8> {
@@ -452,19 +467,39 @@ mod tests {
         args
     }
 
-    fn creation_with_args(args: &[u8]) -> Vec<u8> {
+    fn escrow_creation_with_args(args: &[u8]) -> Vec<u8> {
         let mut deployment =
             hex::decode(ESCROW_DEPLOYMENT.trim().trim_start_matches("0x")).unwrap();
         deployment.extend_from_slice(args);
         deployment
     }
 
-    fn apply_mask(deployment: &[u8], seed: &Seed) -> (Vec<u8>, ConstructorArgsObfuscation) {
-        let runtime = hex::decode(ESCROW_RUNTIME.trim().trim_start_matches("0x")).unwrap();
+    fn supported_creation_with_args(args: &[u8]) -> Vec<u8> {
+        let mut deployment =
+            hex::decode(SUPPORTED_DEPLOYMENT.trim().trim_start_matches("0x")).unwrap();
+        deployment.extend_from_slice(args);
+        deployment
+    }
+
+    fn mask_report(
+        deployment: &[u8],
+        seed: &Seed,
+    ) -> (Vec<u8>, CleanReport, ConstructorArgsObfuscation) {
+        let runtime = hex::decode(SUPPORTED_RUNTIME.trim().trim_start_matches("0x")).unwrap();
         let sections = locate_sections(deployment, &[], &runtime).unwrap();
         let (clean, mut report) = strip_bytecode(deployment, &sections).unwrap();
         let metrics = obfuscate_constructor_args(&mut report, seed.as_bytes()).unwrap();
-        (report.reassemble_checked(&clean).unwrap(), metrics)
+        (clean, report, metrics)
+    }
+
+    fn masked_arguments(report: &CleanReport) -> Vec<u8> {
+        report
+            .removed
+            .iter()
+            .find(|removed| removed.kind == azoth_core::detection::SectionKind::ConstructorArgs)
+            .expect("fixture has constructor arguments")
+            .data
+            .to_vec()
     }
 
     fn deploy(bytecode: &[u8]) -> (Bytes, u64) {
@@ -525,31 +560,35 @@ mod tests {
     }
 
     #[test]
-    fn masked_constructor_deploys_identical_runtime_without_plaintext_suffix() {
+    fn constructor_mask_generation_is_deterministic_but_reassembly_fails_closed() {
         let args = argument_words([0x22; 20], [0; 32], [0; 32]);
-        let original = creation_with_args(&args);
+        let original = supported_creation_with_args(&args);
         let seed = Seed::from_bytes([0x55; 32]);
-        let (masked, metrics) = apply_mask(&original, &seed);
+        let (clean, mut report, metrics) = mask_report(&original, &seed);
+        let masked = masked_arguments(&report);
 
         assert!(metrics.applied);
         assert_eq!(metrics.argument_bytes, args.len());
         assert!(metrics.decoder_bytes > 0);
-        assert!(
-            !masked.windows(args.len()).any(|window| window == args),
-            "the ABI suffix must not survive verbatim"
-        );
+        assert_ne!(masked, args, "the ABI suffix must not survive verbatim");
         assert!(!masked.windows(5).any(|window| window == b"AZOTH"));
-        assert_eq!(deploy(&original).0, deploy(&masked).0);
+        let error = report.reassemble_checked(&clean).unwrap_err();
+        assert!(error.contains("observes CODESIZE"), "{error}");
 
-        let (repeat, _) = apply_mask(&original, &seed);
-        assert_eq!(masked, repeat, "same seed must be deterministic");
-        let (different, _) = apply_mask(&original, &Seed::from_bytes([0x56; 32]));
+        let (_, repeat_report, _) = mask_report(&original, &seed);
+        assert_eq!(
+            masked,
+            masked_arguments(&repeat_report),
+            "same seed must be deterministic"
+        );
+        let (_, different_report, _) = mask_report(&original, &Seed::from_bytes([0x56; 32]));
+        let different = masked_arguments(&different_report);
         assert_ne!(masked, different, "different seeds must vary the payload");
     }
 
     #[test]
-    fn fuzzed_constructor_values_preserve_deployed_runtime() {
-        let mut rng = StdRng::seed_from_u64(0xA207_2026);
+    fn fuzzed_constructor_masks_fail_closed_during_reassembly() {
+        let mut rng = DeterministicRng::seed_from_u64(0xA207_2026);
         for case in 0..64u64 {
             let mut recipient = [0u8; 20];
             let mut amount = [0u8; 32];
@@ -571,130 +610,110 @@ mod tests {
             let mut trailing = vec![0u8; trailing_len];
             rng.fill_bytes(&mut trailing);
             args.extend_from_slice(&trailing);
-            let original = creation_with_args(&args);
-            let (masked, metrics) = apply_mask(&original, &Seed::from_bytes(seed));
+            let original = supported_creation_with_args(&args);
+            let (clean, mut report, metrics) = mask_report(&original, &Seed::from_bytes(seed));
+            let masked = masked_arguments(&report);
             assert!(metrics.applied, "case {case}");
             assert_eq!(metrics.argument_bytes, args.len(), "case {case}");
-            assert!(
-                !masked.windows(args.len()).any(|window| window == args),
-                "plaintext suffix survived fuzz case {case}"
-            );
-            assert_eq!(
-                deploy(&original).0,
-                deploy(&masked).0,
-                "deployed runtime mismatch in fuzz case {case}"
-            );
+            assert_ne!(masked, args, "plaintext suffix survived fuzz case {case}");
+            let error = report.reassemble_checked(&clean).unwrap_err();
+            assert!(error.contains("observes CODESIZE"), "case {case}: {error}");
         }
     }
 
     #[tokio::test]
-    async fn full_pipeline_preserves_constructor_initialized_runtime() {
-        let recipient = [0x22; 20];
-        let amount = [0x33; 32];
-        let args = argument_words(recipient, amount, [0; 32]);
-        let full_creation = creation_with_args(&args);
+    async fn full_pipeline_rejects_constructor_mask_that_would_relocate_codesize() {
+        let mut args = [0x33; 32].to_vec();
+        args.extend_from_slice(&[0x44; 32]);
+        let full_creation = supported_creation_with_args(&args);
         let full_hex = format!("0x{}", hex::encode(&full_creation));
         let seed = Seed::from_bytes([0x77; 32]);
+        let mut config = ObfuscationConfig::with_seed(seed);
+        config.obfuscate_constructor_arguments = true;
 
-        let protected = obfuscate_bytecode(
-            &full_hex,
-            ESCROW_RUNTIME,
-            ObfuscationConfig::with_seed(seed),
-        )
-        .await
-        .unwrap();
-        let protected_creation =
-            hex::decode(protected.obfuscated_bytecode.trim_start_matches("0x")).unwrap();
+        let error = obfuscate_bytecode(&full_hex, SUPPORTED_RUNTIME, config)
+            .await
+            .expect_err("moving a CODESIZE-observing init program must fail closed");
+        assert!(error.message.contains("observes CODESIZE"), "{error:?}");
 
-        assert!(protected.metadata.constructor_args_obfuscated);
-        assert_eq!(protected.metadata.constructor_argument_bytes, args.len());
-        assert!(!protected_creation
-            .windows(args.len())
-            .any(|window| window == args));
-        assert!(!protected_creation
-            .windows(recipient.len())
-            .any(|window| window == recipient));
-        assert!(!protected_creation
-            .windows(amount.len())
-            .any(|window| window == amount));
-        let protected_runtime = deploy(&protected_creation).0;
-        assert!(
-            protected_runtime
-                .windows(recipient.len())
-                .any(|window| window == recipient),
-            "decoded recipient must be written into transformed immutable references"
-        );
-        assert!(
-            protected_runtime
-                .windows(amount.len())
-                .any(|window| window == amount),
-            "decoded amount must be written into transformed immutable references"
+        // The synthetic fixture itself is executable and deploys the supplied runtime;
+        // rejection is caused by the relocation proof boundary, not malformed test bytecode.
+        let original_runtime = deploy(&full_creation).0;
+        assert_eq!(
+            original_runtime.as_ref(),
+            hex::decode(SUPPORTED_RUNTIME.trim_start_matches("0x")).unwrap()
         );
     }
 
     #[tokio::test]
-    async fn full_pipeline_rejects_oversized_decoded_creation_payload() {
-        let mut args = argument_words([0x22; 20], [0x33; 32], [0; 32]);
-        args.resize(10_000, 0x5a);
-        let full_hex = format!("0x{}", hex::encode(creation_with_args(&args)));
+    async fn full_pipeline_suppresses_constructor_mask_when_init_observes_gas() {
+        let args = argument_words([0x22; 20], [0x33; 32], [0; 32]);
+        let full_creation = escrow_creation_with_args(&args);
+        let full_hex = format!("0x{}", hex::encode(&full_creation));
+        let mut config = ObfuscationConfig::with_seed(Seed::from_bytes([0x78; 32]));
+        config.obfuscate_constructor_arguments = true;
 
-        let error = obfuscate_bytecode(
-            &full_hex,
-            ESCROW_RUNTIME,
-            ObfuscationConfig::with_seed(Seed::from_bytes([0x88; 32])),
-        )
-        .await
-        .unwrap_err();
+        let protected = obfuscate_bytecode(&full_hex, ESCROW_RUNTIME, config)
+            .await
+            .expect("GAS-observing init must conservatively produce an identity artifact");
 
-        assert!(error.message.contains("exceeds an EVM size limit"));
+        assert_eq!(protected.obfuscated_bytecode, full_hex);
+        assert!(!protected.metadata.constructor_args_obfuscated);
+        assert_eq!(protected.metadata.constructor_argument_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn oversized_constructor_mask_fails_closed() {
+        let mut args = vec![0x5a; 32];
+        args.resize(20_000, 0x5a);
+        let full_hex = format!("0x{}", hex::encode(supported_creation_with_args(&args)));
+        let mut config = ObfuscationConfig::with_seed(Seed::from_bytes([0x88; 32]));
+        config.obfuscate_constructor_arguments = true;
+
+        let error = obfuscate_bytecode(&full_hex, SUPPORTED_RUNTIME, config)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.message.contains("exceeds an EVM size limit")
+                || error.message.contains("exceeds PUSH2 capacity")
+                || error.message.contains("observes CODESIZE"),
+            "unexpected fail-closed error: {}",
+            error.message
+        );
     }
 
     #[test]
     #[ignore = "release-mode benchmark; run explicitly with --ignored --nocapture"]
-    fn benchmark_constructor_argument_obfuscation() {
+    fn benchmark_constructor_argument_mask_generation() {
         let args = argument_words([0x22; 20], [0x33; 32], [0x44; 32]);
-        let original = creation_with_args(&args);
-        let (original_runtime, original_gas) = deploy(&original);
+        let original = supported_creation_with_args(&args);
         let iterations = 100u64;
         let started = Instant::now();
         let mut decoder_bytes = 0usize;
         let mut min_decoder = usize::MAX;
         let mut max_decoder = 0usize;
-        let mut representative = None;
+        let mut representative_mask = None;
 
         for index in 0..iterations {
             let mut seed = [0u8; 32];
             seed[..8].copy_from_slice(&index.to_be_bytes());
-            let (masked, metrics) = apply_mask(&original, &Seed::from_bytes(seed));
+            let (clean, mut report, metrics) = mask_report(&original, &Seed::from_bytes(seed));
             decoder_bytes += metrics.decoder_bytes;
             min_decoder = min_decoder.min(metrics.decoder_bytes);
             max_decoder = max_decoder.max(metrics.decoder_bytes);
-            representative.get_or_insert(masked);
+            representative_mask.get_or_insert_with(|| masked_arguments(&report));
+            let error = report.reassemble_checked(&clean).unwrap_err();
+            assert!(error.contains("observes CODESIZE"));
         }
         let elapsed = started.elapsed();
-        let masked = representative.unwrap();
-        let (masked_runtime, masked_gas) = deploy(&masked);
-        assert_eq!(original_runtime, masked_runtime);
-
-        let calldata_gas = |bytes: &[u8]| -> u64 {
-            bytes
-                .iter()
-                .map(|byte| if *byte == 0 { 4 } else { 16 })
-                .sum()
-        };
+        let masked = representative_mask.unwrap();
         println!(
-            "BENCH original_bytes={} masked_bytes={} delta_bytes={} original_deploy_gas={} \
-             masked_deploy_gas={} delta_deploy_gas={} original_calldata_gas={} \
-             masked_calldata_gas={} avg_decoder_bytes={:.1} min_decoder_bytes={} \
+            "MASK_GENERATION argument_bytes={} representative_mask_bytes={} \
+             avg_decoder_bytes={:.1} min_decoder_bytes={} \
              max_decoder_bytes={} avg_transform_us={:.1}",
-            original.len(),
+            args.len(),
             masked.len(),
-            masked.len() as i64 - original.len() as i64,
-            original_gas,
-            masked_gas,
-            masked_gas as i64 - original_gas as i64,
-            calldata_gas(&original),
-            calldata_gas(&masked),
             decoder_bytes as f64 / iterations as f64,
             min_decoder,
             max_decoder,

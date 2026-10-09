@@ -8,6 +8,7 @@ azoth-core = { path = "../core" }
 rand.workspace = true
 serde.workspace = true
 sha3.workspace = true
+hmac.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 tracing-subscriber.workspace = true

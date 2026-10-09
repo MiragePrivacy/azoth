@@ -19,7 +19,7 @@ This is a Rust workspace with six main crates:
 - **`crates/core/`**: Core functionality including bytecode decoder, encoder, section detector, bytecode stripper, and CFG-IR generation. The detection module includes section isolation (`detection/sections.rs`) and dispatcher pattern detection (`detection/dispatcher.rs`)
 - **`crates/analysis/`**: Analysis utilities for measuring bytecode complexity and obfuscation quality through comprehensive metrics
 - **`crates/transforms/`**: Obfuscation passes including opaque predicates, control flow shuffling, function dispatcher obfuscation, and jump address transformation. The `obfuscator.rs` module orchestrates all transforms
-- **`crates/verification/`**: Formal verification engine providing mathematical proofs of semantic equivalence using Z3 SMT solver, plus practical testing with REVM. Supports multiple verification levels and generates cryptographic certificates
+- **`crates/verification/`**: Experimental semantic and SMT primitives. The production-facing equivalence entry point fails closed with `VerificationUnavailable`; current proof records and checksums are not mathematical proof evidence or cryptographic certificates. REVM tests provide bounded test evidence only.
 - **`crates/utils/`**: Shared utilities including deterministic seed generation and error types
 - **`crates/cli/`**: Command-line interface (`azoth` binary) with subcommands for decode, strip, cfg, and obfuscate
 
@@ -115,8 +115,9 @@ Write documentation in clear, professional prose rather than fragmented bullet p
 ///
 /// This function performs the core transformation from linear bytecode instructions
 /// into a structured graph representation that enables sophisticated analysis and
-/// obfuscation transforms. The resulting CFG maintains semantic equivalence while
-/// providing the structural information necessary for advanced code analysis.
+/// obfuscation transforms. The resulting CFG preserves decoded structural relationships needed
+/// for analysis and fail-closed transformation checks; CFG construction alone does not prove
+/// semantic equivalence.
 ///
 /// The construction process involves several phases: basic block identification
 /// through control flow analysis, edge creation based on jump target resolution,

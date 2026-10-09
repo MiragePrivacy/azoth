@@ -1,7 +1,8 @@
 use crate::Result;
 use crate::Transform;
 use azoth_core::cfg_ir::{Block, CfgIrBundle};
-use rand::{rngs::StdRng, seq::SliceRandom};
+use azoth_core::seed::DeterministicRng;
+use rand::seq::SliceRandom;
 use tracing::debug;
 
 pub struct Shuffle;
@@ -11,7 +12,7 @@ impl Transform for Shuffle {
         "Shuffle"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut DeterministicRng) -> Result<bool> {
         let mut block_indices: Vec<_> = ir
             .cfg
             .node_indices()

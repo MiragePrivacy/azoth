@@ -1,7 +1,16 @@
 use crate::result::Error;
-use rand::{RngCore, SeedableRng, rngs::StdRng};
+use rand::{RngCore, SeedableRng};
+use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
+
+/// The deterministic byte stream used by Azoth's transformation protocol.
+///
+/// This alias deliberately names a pinned algorithm instead of `rand::rngs::StdRng`, whose
+/// implementation is allowed to change between `rand` releases. Changing this algorithm or the
+/// pinned `rand_chacha` or `rand` version is a protocol change: bump the pipeline profile and
+/// update the golden vectors in this module.
+pub type DeterministicRng = ChaCha20Rng;
 
 /// A 256-bit cryptographic seed
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,19 +50,34 @@ impl Seed {
     ///
     /// Basically, it uses whatever bytes are already stored in that Seed, regardless of how those
     /// bytes were created (randomly via generate(), from hex, from legacy u64, etc.).
-    pub fn create_deterministic_rng(&self) -> StdRng {
-        // Hash the seed to create RNG seed
+    pub fn create_deterministic_rng(&self) -> DeterministicRng {
+        self.derive_rng(b"AZOTH_DEFAULT_STREAM_V3")
+    }
+
+    /// Creates an independent deterministic RNG stream for a domain label.
+    ///
+    /// All 256 derived bits seed the generator. Callers should include the normalized input hash,
+    /// profile version, transform identifier, occurrence, and decision label in `domain` when
+    /// choices must remain isolated from unrelated passes.
+    pub fn derive_rng(&self, domain: &[u8]) -> DeterministicRng {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"AZOTH_BYTECODE_OBFUSCATION");
+        hasher.update(b"AZOTH_RNG_STREAM_V3_CHACHA20");
+        hasher.update((domain.len() as u64).to_be_bytes());
+        hasher.update(domain);
         hasher.update(self.inner);
-        let seed_hash = hasher.finalize();
+        DeterministicRng::from_seed(hasher.finalize().into())
+    }
 
-        // Convert first 8 bytes to u64 for StdRng
-        let mut seed_bytes = [0u8; 8];
-        seed_bytes.copy_from_slice(&seed_hash[..8]);
-        let rng_seed = u64::from_le_bytes(seed_bytes);
-
-        StdRng::seed_from_u64(rng_seed)
+    /// Derives a domain-separated 256-bit child seed.
+    pub fn derive_seed(&self, domain: &[u8]) -> Self {
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"AZOTH_CHILD_SEED_V2");
+        hasher.update((domain.len() as u64).to_be_bytes());
+        hasher.update(domain);
+        hasher.update(self.inner);
+        Self {
+            inner: hasher.finalize().into(),
+        }
     }
 
     /// Get a hash of this seed for integrity/identification purposes
@@ -81,9 +105,9 @@ impl Seed {
 
 #[cfg(test)]
 mod tests {
-    use super::Seed;
+    use super::{DeterministicRng, Seed};
     use crate::result::Error;
-    use rand::{RngCore, SeedableRng, rngs::StdRng};
+    use rand::{RngCore, SeedableRng};
     use sha3::{Digest, Sha3_256};
 
     const SAMPLE_HEX: &str = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
@@ -114,16 +138,46 @@ mod tests {
         let mut rng = seed.create_deterministic_rng();
 
         let mut hasher = Sha3_256::new();
-        hasher.update(b"AZOTH_BYTECODE_OBFUSCATION");
+        let domain = b"AZOTH_DEFAULT_STREAM_V3";
+        hasher.update(b"AZOTH_RNG_STREAM_V3_CHACHA20");
+        hasher.update((domain.len() as u64).to_be_bytes());
+        hasher.update(domain);
         hasher.update(seed.inner);
-        let hash = hasher.finalize();
-        let mut seed_bytes = [0u8; 8];
-        seed_bytes.copy_from_slice(&hash[..8]);
-        let derived = u64::from_le_bytes(seed_bytes);
-        let mut manual_rng = StdRng::seed_from_u64(derived);
+        let mut manual_rng = DeterministicRng::from_seed(hasher.finalize().into());
 
         for _ in 0..4 {
             assert_eq!(rng.next_u64(), manual_rng.next_u64());
         }
+    }
+
+    #[test]
+    fn rng_domains_and_high_seed_bits_are_effective() {
+        let low = Seed::from_bytes([0u8; 32]);
+        let mut high_bytes = [0u8; 32];
+        high_bytes[31] = 1;
+        let high = Seed::from_bytes(high_bytes);
+
+        assert_ne!(
+            low.derive_rng(b"pass-a").next_u64(),
+            high.derive_rng(b"pass-a").next_u64()
+        );
+        assert_ne!(
+            low.derive_rng(b"pass-a").next_u64(),
+            low.derive_rng(b"pass-b").next_u64()
+        );
+    }
+
+    #[test]
+    fn rng_stream_has_a_fixed_golden_vector() {
+        let seed = Seed::from_hex(SAMPLE_HEX).expect("valid sample seed");
+        let mut rng = seed.derive_rng(b"azoth/golden/domain/v1");
+        let mut output = [0u8; 64];
+        rng.fill_bytes(&mut output);
+
+        assert_eq!(
+            hex::encode(output),
+            "12d541e3dd62ec6e96e5ce09b90eccc3be2de3f566877362afabdb66d4c5532a\
+             e09d49b187c3d31cdcfd2961a0540ecf6907017e8721c2e1a130fd7c7809f664"
+        );
     }
 }

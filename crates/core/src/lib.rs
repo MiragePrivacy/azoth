@@ -2,6 +2,7 @@ pub mod cfg_ir;
 pub mod decoder;
 pub mod detection;
 pub mod encoder;
+pub mod opcode;
 pub mod result;
 pub mod seed;
 pub mod strip;
@@ -12,18 +13,15 @@ pub use result::{Error, Result};
 use std::fs;
 use std::path::Path;
 
-pub use eot::UnifiedOpcode as Opcode;
+pub use opcode::Opcode;
 
 /// Returns true if the opcode terminates execution.
 ///
 /// Terminal opcodes are those that end the execution of a program or transaction,
 /// such as STOP, RETURN, REVERT, SELFDESTRUCT, and INVALID.
 #[inline]
-pub fn is_terminal_opcode(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::STOP | Opcode::RETURN | Opcode::REVERT | Opcode::SELFDESTRUCT | Opcode::INVALID
-    )
+pub const fn is_terminal_opcode(opcode: Opcode) -> bool {
+    opcode.is_terminal()
 }
 
 /// Returns true if the opcode ends a basic block.
@@ -31,17 +29,8 @@ pub fn is_terminal_opcode(opcode: Opcode) -> bool {
 /// Block-ending opcodes include terminal opcodes as well as control flow opcodes
 /// like JUMP and JUMPI that transfer control to different parts of the program.
 #[inline]
-pub fn is_block_ending_opcode(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::STOP
-            | Opcode::RETURN
-            | Opcode::REVERT
-            | Opcode::SELFDESTRUCT
-            | Opcode::INVALID
-            | Opcode::JUMP
-            | Opcode::JUMPI
-    )
+pub const fn is_block_ending_opcode(opcode: Opcode) -> bool {
+    opcode.is_block_ending()
 }
 
 /// Normalizes hex strings by removing whitespace, 0x prefix, and ensuring even length.
@@ -106,8 +95,10 @@ pub async fn process_bytecode_to_cfg(
     ),
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    let (instructions, _, _, bytes) =
-        decoder::decode_bytecode(deployment_bytecode, deployment_is_file).await?;
+    // CFG construction does not consume display/hash metadata, so keep the production hot path
+    // to one input normalization and one native byte walk.
+    let bytes = input_to_bytes(deployment_bytecode, deployment_is_file)?;
+    let instructions = decoder::decode_bytes(&bytes)?;
     let runtime_bytes = input_to_bytes(runtime_bytecode, runtime_is_file)?;
     let sections = detection::locate_sections(&bytes, &instructions, &runtime_bytes)?;
     let (_, report) = strip::strip_bytecode(&bytes, &sections)?;
@@ -120,7 +111,10 @@ pub async fn process_bytecode_to_cfg(
         .ok_or("No Runtime section found in bytecode")?;
 
     let runtime_start_pc = runtime_section.offset;
-    let runtime_end_pc = runtime_section.offset + runtime_section.len;
+    let runtime_end_pc = runtime_section
+        .offset
+        .checked_add(runtime_section.len)
+        .ok_or(Error::SectionOutOfBounds(runtime_section.offset))?;
 
     tracing::debug!(
         "Filtering instructions to runtime section: PC range [{}, {})",
@@ -128,11 +122,8 @@ pub async fn process_bytecode_to_cfg(
         runtime_end_pc
     );
 
-    let runtime_instructions: Vec<decoder::Instruction> = instructions
-        .iter()
-        .filter(|instr| instr.pc >= runtime_start_pc && instr.pc < runtime_end_pc)
-        .cloned()
-        .collect();
+    let runtime_instructions =
+        decoder::decode_executable_range(&bytes, runtime_section.offset, runtime_section.len)?;
 
     tracing::debug!(
         "Filtered from {} total instructions to {} runtime instructions",
@@ -199,5 +190,46 @@ mod tests {
 
         assert!(bundle.cfg.node_count() > 0, "cfg contains blocks");
         assert_eq!(bundle.original_bytecode, bytes);
+    }
+
+    #[tokio::test]
+    async fn process_bytecode_rejects_runtime_with_truncated_push() {
+        let error = process_bytecode_to_cfg("0x0061aa", false, "0x0061aa", false)
+            .await
+            .expect_err("moving code after a short final PUSH must fail closed");
+        assert!(
+            error.to_string().contains("truncated PUSH2 at byte 0x1"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_bytecode_decodes_runtime_independently_of_init_data() {
+        // Init returns the three bytes at 0x0c. Dead init data at 0x0a begins PUSH2 and consumes
+        // byte 0x60 at 0x0c in the creation-code linear view; deployed execution starts fresh at
+        // 0x0c and must see that byte as PUSH1.
+        let deployment = "0x6003600c5f3960035ff361aa600000";
+        let runtime = "0x600000";
+        let (bundle, _, sections, _) = process_bytecode_to_cfg(deployment, false, runtime, false)
+            .await
+            .expect("valid overlapping init/runtime interpretations must be accepted");
+
+        let runtime_section = sections
+            .iter()
+            .find(|section| section.kind == SectionKind::Runtime)
+            .unwrap();
+        assert_eq!((runtime_section.offset, runtime_section.len), (0x0c, 3));
+        let runtime_instructions: Vec<_> = bundle
+            .cfg
+            .node_weights()
+            .filter_map(|block| match block {
+                cfg_ir::Block::Body(body) => Some(body.instructions.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(runtime_instructions[0].pc, 0x0c);
+        assert_eq!(runtime_instructions[0].op, Opcode::PUSH(1));
+        assert_eq!(runtime_instructions[0].imm.as_deref(), Some("00"));
     }
 }

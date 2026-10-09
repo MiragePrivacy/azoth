@@ -518,8 +518,7 @@ pub fn validate_sections(sections: &[Section], total_len: usize) -> Result<(), E
     Ok(())
 }
 
-/// Detects Auxdata (CBOR) section from the end of the bytecode, using a canonical length check
-/// and a fallback scan for invalid lengths.
+/// Detects a compiler CBOR auxdata section at an EVM instruction boundary.
 ///
 /// # Arguments
 /// * `bytes` - Raw bytecode bytes.
@@ -545,7 +544,134 @@ fn detect_auxdata(bytes: &[u8]) -> Option<(usize, usize)> {
         return None;
     }
 
-    Some((len - 2 - auxdata_cbor_length, auxdata_cbor_length + 2))
+    let offset = len - 2 - auxdata_cbor_length;
+    let payload = bytes.get(offset..len - 2)?;
+    if !is_structurally_valid_compiler_cbor(payload) {
+        tracing::debug!("Ignoring terminal length marker: claimed payload is not compiler CBOR");
+        return None;
+    }
+    if !is_evm_instruction_boundary(bytes, offset) {
+        tracing::debug!(
+            "Ignoring terminal CBOR candidate: offset {} splits an EVM instruction",
+            offset
+        );
+        return None;
+    }
+
+    Some((offset, auxdata_cbor_length + 2))
+}
+
+/// Solidity emits a definite-length CBOR map containing at least one compiler metadata key.
+/// Parsing the complete payload prevents arbitrary final bytes from becoming a section boundary
+/// solely because they happen to encode a small two-byte length.
+fn is_structurally_valid_compiler_cbor(payload: &[u8]) -> bool {
+    if payload.first().is_none_or(|byte| byte >> 5 != 5) {
+        return false;
+    }
+
+    let has_compiler_key = payload.windows(5).any(|window| window == b"\x64ipfs")
+        || payload.windows(5).any(|window| window == b"\x64solc")
+        || payload.windows(6).any(|window| {
+            window == b"\x65bzzr0" || window == b"\x65bzzr1" || window == b"\x65vyper"
+        });
+    if !has_compiler_key {
+        return false;
+    }
+
+    let mut cursor = 0usize;
+    consume_cbor_item(payload, &mut cursor, 0).is_some() && cursor == payload.len()
+}
+
+fn consume_cbor_item(bytes: &[u8], cursor: &mut usize, depth: usize) -> Option<()> {
+    const MAX_CBOR_DEPTH: usize = 32;
+    if depth >= MAX_CBOR_DEPTH {
+        return None;
+    }
+
+    let initial = *bytes.get(*cursor)?;
+    *cursor += 1;
+    let major = initial >> 5;
+    let additional = initial & 0x1f;
+    let argument = consume_cbor_argument(bytes, cursor, additional)?;
+
+    match major {
+        0 | 1 | 7 => Some(()),
+        2 | 3 => {
+            let length = usize::try_from(argument).ok()?;
+            let end = cursor.checked_add(length)?;
+            if end > bytes.len() {
+                return None;
+            }
+            *cursor = end;
+            Some(())
+        }
+        4 => {
+            let items = usize::try_from(argument).ok()?;
+            if items > bytes.len().saturating_sub(*cursor) {
+                return None;
+            }
+            for _ in 0..items {
+                consume_cbor_item(bytes, cursor, depth + 1)?;
+            }
+            Some(())
+        }
+        5 => {
+            let pairs = usize::try_from(argument).ok()?;
+            let items = pairs.checked_mul(2)?;
+            if items > bytes.len().saturating_sub(*cursor) {
+                return None;
+            }
+            for _ in 0..items {
+                consume_cbor_item(bytes, cursor, depth + 1)?;
+            }
+            Some(())
+        }
+        6 => consume_cbor_item(bytes, cursor, depth + 1),
+        _ => None,
+    }
+}
+
+fn consume_cbor_argument(bytes: &[u8], cursor: &mut usize, additional: u8) -> Option<u64> {
+    let width = match additional {
+        0..=23 => return Some(u64::from(additional)),
+        24 => 1,
+        25 => 2,
+        26 => 4,
+        27 => 8,
+        _ => return None,
+    };
+    let end = cursor.checked_add(width)?;
+    let encoded = bytes.get(*cursor..end)?;
+    *cursor = end;
+    Some(
+        encoded
+            .iter()
+            .fold(0u64, |value, byte| (value << 8) | u64::from(*byte)),
+    )
+}
+
+fn is_evm_instruction_boundary(bytes: &[u8], boundary: usize) -> bool {
+    if boundary > bytes.len() {
+        return false;
+    }
+
+    let mut pc = 0usize;
+    while pc < boundary {
+        let opcode = bytes[pc];
+        let immediate_width = if (0x60..=0x7f).contains(&opcode) {
+            usize::from(opcode - 0x5f)
+        } else {
+            0
+        };
+        let Some(next_pc) = pc.checked_add(1 + immediate_width) else {
+            return false;
+        };
+        if next_pc > boundary {
+            return false;
+        }
+        pc = next_pc;
+    }
+    pc == boundary
 }
 
 /// Detects Padding section before Auxdata.
@@ -674,7 +800,11 @@ mod tests {
 
     #[test]
     fn exact_runtime_places_constructor_args_after_auxdata() {
-        let runtime = vec![0x60, 0x00, 0x00, 0xa1, 0x01, 0x02, 0x00, 0x03];
+        let runtime = vec![
+            0x60, 0x00, 0x00, // runtime code
+            0xa1, 0x64, b's', b'o', b'l', b'c', 0x43, 0x00, 0x08, 0x1e, // CBOR
+            0x00, 0x0a, // CBOR payload length
+        ];
         let mut deployment = vec![0x60, 0x00, 0xf3];
         deployment.extend_from_slice(&runtime);
         deployment.extend_from_slice(&[0xabu8; 64]);
@@ -696,15 +826,51 @@ mod tests {
                 Section {
                     kind: SectionKind::Auxdata,
                     offset: 6,
-                    len: 5,
+                    len: 12,
                 },
                 Section {
                     kind: SectionKind::ConstructorArgs,
-                    offset: 11,
+                    offset: 18,
                     len: 64,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn auxdata_candidate_must_start_on_an_instruction_boundary() {
+        let mut runtime = vec![0x7f];
+        runtime.extend_from_slice(&[0u8; 20]);
+        runtime.extend_from_slice(&[
+            0xa1, 0x64, b's', b'o', b'l', b'c', 0x43, 0x00, 0x08, 0x1e, 0x00, 0x0a,
+        ]);
+
+        assert_eq!(runtime.len(), 33);
+        assert_eq!(detect_auxdata(&runtime), None);
+        assert!(is_evm_instruction_boundary(&runtime, runtime.len()));
+        assert!(!is_evm_instruction_boundary(&runtime, 21));
+
+        let sections = locate_sections_from_exact_runtime(&runtime, &runtime).unwrap();
+        assert_eq!(
+            sections,
+            vec![Section {
+                kind: SectionKind::Runtime,
+                offset: 0,
+                len: runtime.len(),
+            }]
+        );
+    }
+
+    #[test]
+    fn auxdata_candidate_must_be_complete_compiler_cbor() {
+        let runtime = [
+            &[0x00][..],
+            &[0xa1, 0x64, b's', b'o', b'l', b'c', 0x43, 0x00, 0x08][..],
+            &[0x00, 0x09][..],
+        ]
+        .concat();
+
+        assert_eq!(detect_auxdata(&runtime), None);
     }
 
     #[test]

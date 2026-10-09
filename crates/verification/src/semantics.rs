@@ -284,18 +284,25 @@ pub async fn extract_semantics_from_bytecode(
         bytecode.len()
     );
 
-    let (instructions, _, _, _) =
-        decoder::decode_bytecode(&format!("0x{}", hex::encode(bytecode)), false)
-            .await
-            .map_err(|e| Error::BytecodeAnalysis(format!("Failed to decode bytecode: {e}")))?;
+    let instructions = decoder::decode_bytes(bytecode)
+        .map_err(|e| Error::BytecodeAnalysis(format!("Failed to decode bytecode: {e}")))?;
 
     let sections = detection::locate_sections(bytecode, &instructions, runtime_bytes)
         .map_err(|e| Error::BytecodeAnalysis(format!("Failed to detect sections: {e}")))?;
 
+    let runtime = sections
+        .iter()
+        .find(|section| section.kind == detection::SectionKind::Runtime)
+        .ok_or_else(|| Error::BytecodeAnalysis("No runtime section found".to_string()))?;
+    let runtime_instructions =
+        decoder::decode_executable_range(bytecode, runtime.offset, runtime.len).map_err(|e| {
+            Error::BytecodeAnalysis(format!("Failed to decode runtime bytecode: {e}"))
+        })?;
+
     let (_clean_runtime, clean_report) = strip::strip_bytecode(bytecode, &sections)
         .map_err(|e| Error::BytecodeAnalysis(format!("Failed to strip bytecode: {e}")))?;
 
-    let cfg_bundle = cfg_ir::build_cfg_ir(&instructions, &sections, clean_report, bytecode)
+    let cfg_bundle = cfg_ir::build_cfg_ir(&runtime_instructions, &sections, clean_report, bytecode)
         .map_err(|e| Error::BytecodeAnalysis(format!("Failed to build CFG: {e}")))?;
 
     extract_semantics(&cfg_bundle)
@@ -400,12 +407,12 @@ impl SemanticAnalyzer {
                 // Use CFG's existing edge information
                 let incoming_edges: Vec<EdgeType> = cfg
                     .edges_directed(node_idx, petgraph::Direction::Incoming)
-                    .map(|edge| edge.weight().clone())
+                    .map(|edge| *edge.weight())
                     .collect();
 
                 let outgoing_edges: Vec<EdgeType> = cfg
                     .edges_directed(node_idx, petgraph::Direction::Outgoing)
-                    .map(|edge| edge.weight().clone())
+                    .map(|edge| *edge.weight())
                     .collect();
 
                 block_summaries.push(BlockSummary {
@@ -567,18 +574,16 @@ impl SemanticAnalyzer {
                                 });
                             }
                         }
-                        Opcode::SSTORE => {
-                            if stack.len() >= 2 {
-                                let slot = stack[stack.len() - 1].clone();
-                                let value = stack[stack.len() - 2].clone();
-                                self.storage_accesses.push(StorageAccess {
-                                    pc: instruction.pc,
-                                    slot,
-                                    access_type: StorageAccessType::Store,
-                                    stored_value: Some(value),
-                                    conditions: path_conditions.clone(),
-                                });
-                            }
+                        Opcode::SSTORE if stack.len() >= 2 => {
+                            let slot = stack[stack.len() - 1].clone();
+                            let value = stack[stack.len() - 2].clone();
+                            self.storage_accesses.push(StorageAccess {
+                                pc: instruction.pc,
+                                slot,
+                                access_type: StorageAccessType::Store,
+                                stored_value: Some(value),
+                                conditions: path_conditions.clone(),
+                            });
                         }
                         _ => {}
                     }
@@ -726,24 +731,20 @@ impl SemanticAnalyzer {
                     }
                 }
             }
-            Opcode::CALLDATALOAD => {
-                if !stack.is_empty() {
-                    let offset = stack.pop().unwrap();
-                    stack.push(StackValue::Symbolic(format!(
-                        "CALLDATALOAD({})",
-                        self.stack_value_to_string(&offset)
-                    )));
-                }
+            Opcode::CALLDATALOAD if !stack.is_empty() => {
+                let offset = stack.pop().unwrap();
+                stack.push(StackValue::Symbolic(format!(
+                    "CALLDATALOAD({})",
+                    self.stack_value_to_string(&offset)
+                )));
             }
-            Opcode::ADD => {
-                if stack.len() >= 2 {
-                    let b = stack.pop().unwrap();
-                    let a = stack.pop().unwrap();
-                    stack.push(StackValue::Operation {
-                        op: "ADD".to_string(),
-                        operands: vec![Box::new(a), Box::new(b)],
-                    });
-                }
+            Opcode::ADD if stack.len() >= 2 => {
+                let b = stack.pop().unwrap();
+                let a = stack.pop().unwrap();
+                stack.push(StackValue::Operation {
+                    op: "ADD".to_string(),
+                    operands: vec![Box::new(a), Box::new(b)],
+                });
             }
             Opcode::POP => {
                 stack.pop();
@@ -974,23 +975,19 @@ impl SemanticAnalyzer {
 
         for pattern in &self.patterns {
             match pattern.pattern_type {
-                PatternType::ERC20Token => {
-                    if self.is_transfer_function(selector) {
-                        preconditions.push(
-                            "(>= (balance (sender tx) (storage state)) (transfer-amount tx))"
-                                .to_string(),
-                        );
-                        preconditions.push(
-                            "(not (= (recipient tx) #x0000000000000000000000000000000000000000))"
-                                .to_string(),
-                        );
-                        preconditions.push("(> (transfer-amount tx) 0)".to_string());
-                    }
+                PatternType::ERC20Token if self.is_transfer_function(selector) => {
+                    preconditions.push(
+                        "(>= (balance (sender tx) (storage state)) (transfer-amount tx))"
+                            .to_string(),
+                    );
+                    preconditions.push(
+                        "(not (= (recipient tx) #x0000000000000000000000000000000000000000))"
+                            .to_string(),
+                    );
+                    preconditions.push("(> (transfer-amount tx) 0)".to_string());
                 }
-                PatternType::Ownable => {
-                    if self.is_admin_function(selector) {
-                        preconditions.push("(= (sender tx) (owner (storage state)))".to_string());
-                    }
+                PatternType::Ownable if self.is_admin_function(selector) => {
+                    preconditions.push("(= (sender tx) (owner (storage state)))".to_string());
                 }
                 PatternType::ReentrancyGuard => {
                     preconditions.push("(not (guard-locked (storage state)))".to_string());
@@ -1216,6 +1213,8 @@ pub mod tests {
             dispatcher_blocks: std::collections::HashSet::new(),
             arithmetic_chain_data: None,
             ac_runtime_length_estimate: None,
+            layout_order: Vec::new(),
+            relationships: cfg_ir::RelationshipIndex::default(),
         };
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
 
@@ -1248,6 +1247,7 @@ pub mod tests {
             instructions,
             max_stack: 1,
             control: cfg_ir::BlockControl::Unknown,
+            section: azoth_core::detection::SectionKind::Runtime,
         });
 
         let node_idx = cfg.add_node(block);
@@ -1271,6 +1271,8 @@ pub mod tests {
             dispatcher_blocks: std::collections::HashSet::new(),
             arithmetic_chain_data: None,
             ac_runtime_length_estimate: None,
+            layout_order: vec![node_idx],
+            relationships: cfg_ir::RelationshipIndex::default(),
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);
@@ -1300,6 +1302,8 @@ pub mod tests {
             dispatcher_blocks: std::collections::HashSet::new(),
             arithmetic_chain_data: None,
             ac_runtime_length_estimate: None,
+            layout_order: Vec::new(),
+            relationships: cfg_ir::RelationshipIndex::default(),
         };
 
         let analyzer = SemanticAnalyzer::new(cfg_bundle);

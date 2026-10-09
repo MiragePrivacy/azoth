@@ -52,9 +52,9 @@ pub mod types;
 
 use crate::{Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle};
+use azoth_core::seed::DeterministicRng;
 use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
-use rand::rngs::StdRng;
 use rand::Rng;
 use std::collections::HashSet;
 use tracing::debug;
@@ -126,7 +126,7 @@ impl ArithmeticChain {
         &self,
         ir: &CfgIrBundle,
         protected_pcs: &HashSet<usize>,
-        rng: &mut StdRng,
+        rng: &mut DeterministicRng,
     ) -> Vec<(NodeIndex, usize, u8, [u8; 32])> {
         let mut targets = Vec::new();
 
@@ -253,6 +253,7 @@ impl ArithmeticChain {
                 max_stack: body.max_stack,
                 control: body.control.clone(),
                 instructions: new_instructions,
+                section: body.section,
             };
 
             // Use overwrite_block to record the trace
@@ -269,7 +270,22 @@ impl Transform for ArithmeticChain {
         "ArithmeticChain"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
+    fn configuration_id(&self) -> String {
+        let max_targets = self
+            .config
+            .max_targets
+            .map_or_else(|| "none".to_string(), |value| value.to_string());
+        format!(
+            "ArithmeticChain@v1;depth={}..={};inline_ratio_bits={:08x};respect_protected_pcs={};max_targets={max_targets};transform_probability_bits={:08x}",
+            self.config.chain_depth.start(),
+            self.config.chain_depth.end(),
+            self.config.inline_ratio.to_bits(),
+            self.config.respect_protected_pcs,
+            self.config.transform_probability.to_bits(),
+        )
+    }
+
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut DeterministicRng) -> Result<bool> {
         debug!("=== ArithmeticChain Transform Start ===");
 
         let protected_pcs = if self.config.respect_protected_pcs {
@@ -437,6 +453,41 @@ fn instruction_size(instr: &azoth_core::decoder::Instruction) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configuration_id_binds_every_chain_option() {
+        let baseline = ArithmeticChain::new().configuration_id();
+        assert_eq!(baseline, ArithmeticChain::new().configuration_id());
+
+        let variants = [
+            ChainConfig {
+                chain_depth: 3..=8,
+                ..ChainConfig::default()
+            },
+            ChainConfig {
+                inline_ratio: 0.5,
+                ..ChainConfig::default()
+            },
+            ChainConfig {
+                respect_protected_pcs: false,
+                ..ChainConfig::default()
+            },
+            ChainConfig {
+                max_targets: Some(7),
+                ..ChainConfig::default()
+            },
+            ChainConfig {
+                transform_probability: 1.0,
+                ..ChainConfig::default()
+            },
+        ];
+        for variant in variants {
+            assert_ne!(
+                baseline,
+                ArithmeticChain::with_config(variant).configuration_id()
+            );
+        }
+    }
 
     #[test]
     fn parse_push_value_full() {

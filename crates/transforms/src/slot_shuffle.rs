@@ -27,9 +27,9 @@
 
 use crate::{collect_protected_pcs, Error, Result, Transform};
 use azoth_core::cfg_ir::{Block, CfgIrBundle};
-use azoth_core::decoder::Instruction;
+use azoth_core::decoder::{self, Instruction};
+use azoth_core::seed::DeterministicRng;
 use azoth_core::Opcode;
-use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, warn};
@@ -49,7 +49,7 @@ impl Transform for SlotShuffle {
         "SlotShuffle"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
+    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut DeterministicRng) -> Result<bool> {
         debug!("SlotShuffle: scanning for storage slot literals");
 
         let protected_pcs = collect_protected_pcs(ir);
@@ -348,57 +348,6 @@ fn is_storage_slot_push(instructions: &[Instruction], idx: usize) -> bool {
     false
 }
 
-/// Decode a raw byte slice of EVM bytecode into an [`Instruction`] stream
-/// without involving the async Heimdall disassembler. This is a minimal
-/// sync walker that only needs to be correct for the purpose
-/// [`init_literal_slots`] uses it for: identifying `PUSH<n>`/`PUSH0` /
-/// `SLOAD` / `SSTORE` / `DUP(n)` / `SWAP(n)` / arithmetic opcodes so that
-/// `trace_slot_source` can reason about stack flow. Unknown opcodes are
-/// mapped via `Opcode::from(byte)`, which the upstream `eot` crate resolves
-/// to the appropriate variant (including `INVALID` / `UNKNOWN(_)` for
-/// unassigned bytes), and PUSH immediates are captured so the immediate's
-/// value is available for slot normalisation.
-fn decode_raw_instructions(bytes: &[u8]) -> Vec<Instruction> {
-    let mut instructions = Vec::with_capacity(bytes.len());
-    let mut pc = 0usize;
-    while pc < bytes.len() {
-        let byte = bytes[pc];
-        if byte == 0x5f {
-            // PUSH0
-            instructions.push(Instruction {
-                pc,
-                op: Opcode::PUSH0,
-                imm: None,
-            });
-            pc += 1;
-        } else if (0x60..=0x7f).contains(&byte) {
-            // PUSH1..=PUSH32
-            let width = (byte - 0x5f) as usize;
-            let end = pc + 1 + width;
-            if end > bytes.len() {
-                // Truncated PUSH immediate — stop decoding rather than
-                // silently dropping the tail, since whatever follows
-                // isn't really code.
-                break;
-            }
-            instructions.push(Instruction {
-                pc,
-                op: Opcode::PUSH(width as u8),
-                imm: Some(hex::encode(&bytes[pc + 1..end])),
-            });
-            pc = end;
-        } else {
-            instructions.push(Instruction {
-                pc,
-                op: Opcode::from(byte),
-                imm: None,
-            });
-            pc += 1;
-        }
-    }
-    instructions
-}
-
 /// Decode the raw init-section byte slice, then run the same
 /// `slot_push_index` (adjacency + `trace_slot_source` backward walk) over
 /// every init SLOAD/SSTORE that the runtime collection phase uses. Returns
@@ -427,7 +376,11 @@ pub fn init_literal_slots(bytes: &[u8]) -> (HashSet<(usize, Vec<u8>)>, Vec<usize
     let mut touched: HashSet<(usize, Vec<u8>)> = HashSet::new();
     let mut unresolved: Vec<usize> = Vec::new();
 
-    let instructions = decode_raw_instructions(bytes);
+    let instructions = match decoder::decode_executable_bytes(bytes) {
+        Ok(instructions) => instructions,
+        Err(azoth_core::Error::TruncatedPush { pc, .. }) => return (touched, vec![pc]),
+        Err(_) => return (touched, vec![0]),
+    };
     for (idx, instr) in instructions.iter().enumerate() {
         if !matches!(instr.op, Opcode::SLOAD | Opcode::SSTORE) {
             continue;
@@ -574,7 +527,8 @@ fn trace_slot_source(instructions: &[Instruction], sstore_idx: usize) -> Option<
                 }
             }
 
-            // Operations that pop 1, push 1 (net 0): position unchanged
+            // Operations that pop 1 and compute 1 output. Deeper stack entries retain their
+            // position, but the top output is not the original literal operand.
             Opcode::ISZERO
             | Opcode::NOT
             | Opcode::BALANCE
@@ -583,7 +537,11 @@ fn trace_slot_source(instructions: &[Instruction], sstore_idx: usize) -> Option<
             | Opcode::BLOCKHASH
             | Opcode::MLOAD
             | Opcode::SLOAD
-            | Opcode::EXTCODEHASH => {}
+            | Opcode::EXTCODEHASH => {
+                if pos == 0 {
+                    return None;
+                }
+            }
 
             // Binary operations: pop 2, push 1 (net -1)
             Opcode::ADD
@@ -660,12 +618,12 @@ fn trace_slot_source(instructions: &[Instruction], sstore_idx: usize) -> Option<
             }
 
             // Copy operations: pop 3, push 0 (net -3)
-            Opcode::CODECOPY
-            | Opcode::CALLDATACOPY
-            | Opcode::EXTCODECOPY
-            | Opcode::RETURNDATACOPY => {
+            Opcode::CODECOPY | Opcode::CALLDATACOPY | Opcode::RETURNDATACOPY => {
                 pos += 3;
             }
+
+            // EXTCODECOPY also consumes the external account address.
+            Opcode::EXTCODECOPY => pos += 4,
 
             // LOG0-4: pop 2+n, push 0
             Opcode::LOG0 => pos += 2,
@@ -735,7 +693,6 @@ fn format_slot_immediate(bytes: &[u8], width: usize) -> String {
 mod tests {
     use super::*;
     use azoth_core::seed::Seed;
-    use rand::rngs::StdRng;
     use std::collections::HashMap;
 
     fn instr(pc: usize, op: Opcode, imm: Option<&str>) -> Instruction {
@@ -748,7 +705,7 @@ mod tests {
 
     fn build_mapping_for_order(
         ordered_width_slots: &[(usize, Vec<Vec<u8>>)],
-        rng: &mut StdRng,
+        rng: &mut DeterministicRng,
     ) -> HashMap<Vec<u8>, Vec<u8>> {
         let mut mapping = HashMap::new();
         let mut stable_width_slots = ordered_width_slots.to_vec();
@@ -953,6 +910,36 @@ mod tests {
             instr(5, Opcode::SSTORE, None),
         ];
         assert_eq!(trace_slot_source(&instructions, 4), None);
+    }
+
+    #[test]
+    fn trace_fails_for_unary_computed_slot() {
+        let instructions = vec![
+            instr(0, Opcode::PUSH0, None),
+            instr(1, Opcode::ISZERO, None),
+            instr(2, Opcode::SLOAD, None),
+        ];
+
+        assert_eq!(trace_slot_source(&instructions, 2), None);
+        assert_eq!(slot_push_index(&instructions, 2), None);
+    }
+
+    #[test]
+    fn trace_accounts_for_all_four_extcodecopy_inputs() {
+        // The slot stays below the address, destination, offset, and size consumed by
+        // EXTCODECOPY. A three-input model would incorrectly select the address PUSH as the slot.
+        let instructions = vec![
+            instr(0, Opcode::PUSH(1), Some("07")),
+            instr(2, Opcode::PUSH0, None),
+            instr(3, Opcode::PUSH0, None),
+            instr(4, Opcode::PUSH0, None),
+            instr(5, Opcode::PUSH0, None),
+            instr(6, Opcode::EXTCODECOPY, None),
+            instr(7, Opcode::SLOAD, None),
+        ];
+
+        assert_eq!(trace_slot_source(&instructions, 6), Some(0));
+        assert_eq!(slot_push_index(&instructions, 6), Some(0));
     }
 
     #[test]

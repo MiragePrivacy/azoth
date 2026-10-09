@@ -2,17 +2,17 @@ use azoth_analysis::{
     collect_metrics, compare,
     metrics::{dom_overlap, dominator_pairs},
 };
-use azoth_core::{cfg_ir, decoder, detection, result::Error, strip};
+use azoth_core::{cfg_ir, decoder, detection, strip};
 use petgraph::graph::NodeIndex;
 
 /// Tests metrics computation for a simple bytecode with linear control flow.
 #[tokio::test]
 async fn test_collect_metrics_simple() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
         .with_ansi(false)
         .without_time()
-        .init();
+        .try_init();
 
     let bytecode = "0x600160015601"; // PUSH1 0x01, PUSH1 0x01, ADD
     let (instructions, _, _, bytes) = decoder::decode_bytecode(bytecode, false).await.unwrap();
@@ -37,11 +37,11 @@ async fn test_collect_metrics_simple() {
 /// Tests metrics computation for a single-block bytecode.
 #[tokio::test]
 async fn test_collect_metrics_single_block() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
         .with_ansi(false)
         .without_time()
-        .init();
+        .try_init();
 
     let bytecode = "0x600050"; // PUSH1 0x00, STOP
     let (instructions, _, _, bytes) = decoder::decode_bytecode(bytecode, false).await.unwrap();
@@ -63,11 +63,11 @@ async fn test_collect_metrics_single_block() {
 /// Tests metrics computation for a bytecode with conditional branching.
 #[tokio::test]
 async fn test_collect_metrics_branching() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
         .with_ansi(false)
         .without_time()
-        .init();
+        .try_init();
     let bytecode = "0x6000600157600256"; // PUSH1 0x00, JUMPI, JUMPDEST, STOP
     let (instructions, _, _, bytes) = decoder::decode_bytecode(bytecode, false).await.unwrap();
 
@@ -89,28 +89,31 @@ async fn test_collect_metrics_branching() {
     );
 }
 
-/// Tests that decoding an empty bytecode fails with a parse error.
+/// Empty account code is a valid empty instruction stream.
 #[tokio::test]
 async fn test_collect_metrics_empty_input() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
         .with_ansi(false)
         .without_time()
-        .init();
-    let err = decoder::decode_bytecode("0x", false)
+        .try_init();
+    let (instructions, info, assembly, bytes) = decoder::decode_bytecode("0x", false)
         .await
-        .expect_err("empty blob must fail to decode");
-    assert!(matches!(err, Error::ParseError { .. }));
+        .expect("empty account code must decode");
+    assert!(instructions.is_empty());
+    assert_eq!(info.byte_length, 0);
+    assert!(assembly.is_empty());
+    assert!(bytes.is_empty());
 }
 
 /// Tests metrics computation for a CFG with no body blocks.
 #[tokio::test]
 async fn test_collect_metrics_no_body_blocks() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
         .with_ansi(false)
         .without_time()
-        .init();
+        .try_init();
 
     let bytecode = "0x00"; // STOP
     let (instructions, _, _, bytes) = decoder::decode_bytecode(bytecode, false).await.unwrap();
@@ -126,11 +129,11 @@ async fn test_collect_metrics_no_body_blocks() {
 /// Tests the compare function for metrics.
 #[tokio::test]
 async fn test_compare_metrics() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
         .with_ansi(false)
         .without_time()
-        .init();
+        .try_init();
 
     let bytecode_before = "0x600050"; // PUSH1 0x00, STOP
     let (instructions, _, _, bytes) = decoder::decode_bytecode(bytecode_before, false)
@@ -159,11 +162,11 @@ async fn test_compare_metrics() {
 /// Tests invariant: potency score increases with more edges.
 #[tokio::test]
 async fn test_potency_edge_increase() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
         .with_ansi(false)
         .without_time()
-        .init();
+        .try_init();
     let bytecode_simple = "0x600050"; // PUSH1 0x00, STOP
     let (instructions, _, _, bytes) = decoder::decode_bytecode(bytecode_simple, false)
         .await
@@ -191,11 +194,11 @@ async fn test_potency_edge_increase() {
 /// Tests dominator and post-dominator computation for a branching CFG.
 #[tokio::test]
 async fn test_dominator_computation() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::ERROR)
         .with_ansi(false)
         .without_time()
-        .init();
+        .try_init();
     let bytecode = "0x6000600157600256"; // PUSH1 0x00, PUSH1 0x01, JUMPI, PUSH1 0x02, JUMP
     let (cfg_ir, _, _, _) = azoth_core::process_bytecode_to_cfg(bytecode, false, bytecode, false)
         .await

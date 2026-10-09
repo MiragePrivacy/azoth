@@ -30,7 +30,12 @@ pub fn generate_selector_token_mapping(
     let secret: [u8; 32] = hasher.finalize().into();
 
     let mut mapping = HashMap::with_capacity(selectors.len());
-    let mut used_tokens = HashSet::with_capacity(selectors.len());
+    // Reserve the complete original selector set before deriving any replacement.  Merely
+    // checking `candidate != selector` is insufficient: a token for function A could otherwise
+    // equal function B's original selector.  That would create duplicate dispatcher cases and
+    // make even the documented selector adapter ambiguous.
+    let mut used_tokens: HashSet<u32> =
+        selectors.iter().map(|selector| selector.selector).collect();
 
     // First validate all byte indices
     for (selector_val, &byte_index) in preserve_bytes.iter() {
@@ -246,6 +251,55 @@ mod tests {
                 token_bytes[3],
             ]);
             assert_ne!(token, *selector);
+        }
+    }
+
+    #[test]
+    fn generated_tokens_are_disjoint_from_the_complete_original_set() {
+        let seed = Seed::from_bytes([0x5a; 32]);
+        let first_selector = FunctionSelector {
+            selector: 0x11223344,
+            instruction_index: 0,
+            target_address: 0x100,
+        };
+
+        // Construct a second original selector that is exactly the first selector's preferred
+        // token.  This makes the cross-selector collision deterministic instead of relying on a
+        // probabilistic search in the test.
+        let singleton = generate_selector_token_mapping(
+            std::slice::from_ref(&first_selector),
+            &seed,
+            &HashMap::new(),
+        )
+        .expect("singleton token");
+        let candidate = singleton[&first_selector.selector].as_slice();
+        let colliding_selector =
+            u32::from_be_bytes([candidate[0], candidate[1], candidate[2], candidate[3]]);
+        assert_ne!(colliding_selector, first_selector.selector);
+
+        let selectors = vec![
+            first_selector,
+            FunctionSelector {
+                selector: colliding_selector,
+                instruction_index: 10,
+                target_address: 0x200,
+            },
+        ];
+        let mapping = generate_selector_token_mapping(&selectors, &seed, &HashMap::new())
+            .expect("collision-free mapping");
+        let originals: HashSet<u32> = selectors.iter().map(|item| item.selector).collect();
+
+        for replacement in mapping.values() {
+            let replacement = u32::from_be_bytes([
+                replacement[0],
+                replacement[1],
+                replacement[2],
+                replacement[3],
+            ]);
+            assert!(
+                !originals.contains(&replacement),
+                "replacement selector must not collide with any original selector"
+            );
         }
     }
 
