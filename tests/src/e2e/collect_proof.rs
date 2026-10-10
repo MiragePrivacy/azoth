@@ -16,6 +16,8 @@ use super::{
 };
 use azoth_core::seed::Seed;
 use azoth_transform::arithmetic_chain::ArithmeticChain;
+use azoth_transform::cluster_shuffle::ClusterShuffle;
+use azoth_transform::jump_trampoline::JumpTrampoline;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use azoth_transform::push_split::PushSplit;
 use azoth_transform::slot_shuffle::SlotShuffle;
@@ -611,13 +613,16 @@ async fn test_collect_with_erc20_proof_dispatcher_only_succeeds() -> Result<()> 
 ///    coincidental `PUSH1 0x20; PUSH<n>; PUSH1 0x00; CODECOPY` sequences
 ///    the Solidity compiler emits for unrelated code copies.
 #[tokio::test]
-async fn test_collect_with_erc20_proof_dispatcher_plus_arithmetic_chain_succeeds() -> Result<()> {
-    let label = "dispatcher_plus_arithmetic_chain";
-    let (deployment_bytecode, bond_calldata, collect_selector) =
-        build_obfuscated_flow_inputs(label, vec![Box::new(ArithmeticChain::new())]).await?;
-    let outcome =
-        execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
-    assert_collect_flow_success(label, outcome)
+async fn test_collect_with_erc20_proof_arithmetic_chain_fails_closed_on_gas() -> Result<()> {
+    let error = build_obfuscated_flow_inputs(
+        "dispatcher_plus_arithmetic_chain",
+        vec![Box::new(ArithmeticChain::new())],
+    )
+    .await
+    .expect_err("a gas-changing pass must be rejected when runtime observes GAS");
+    assert!(error.to_string().contains("ArithmeticChain"));
+    assert!(error.to_string().contains("GAS observation"));
+    Ok(())
 }
 
 /// Regression probe for two PushSplit bugs that both made `collect()`
@@ -634,24 +639,22 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_arithmetic_chain_succeeds
 ///    was to prepend a `PUSH0` before the chain so the first op always
 ///    starts from zero.
 ///
-/// 2. `cfg_ir::remap_orphan_jump_pushes` only scanned blocks ending with
-///    `JUMP`/`JUMPI`. Solidity's inherited-function-call convention
-///    (EscrowERC20 → EscrowBase) pushes the return address in one block
-///    and consumes it from a `JUMP` in a later block, with a `JUMPDEST`
-///    separating them. After PushSplit grew some blocks, those return
-///    addresses were stale but invisible to the extended scan. The fix
-///    drops the JUMP-ending filter and walks every body block, scoped to
-///    `PUSH2+` to avoid false positives on small literals that coincide
-///    with early `JUMPDEST` PCs. This test caught it as a runtime JUMP
-///    at PC `0x07be` consuming a stale PUSH2 from `0x07a6`.
+/// 2. Relocating a stack-carried return address requires whole-CFG provenance,
+///    because Solidity may push it in one block and consume it at a `JUMP` in
+///    another. Production relocation now proves code-address use path by path
+///    and rejects unresolved or mixed code/data use rather than relying on a
+///    numeric-literal heuristic.
 #[tokio::test]
-async fn test_collect_with_erc20_proof_dispatcher_plus_push_split_succeeds() -> Result<()> {
-    let label = "dispatcher_plus_push_split";
-    let (deployment_bytecode, bond_calldata, collect_selector) =
-        build_obfuscated_flow_inputs(label, vec![Box::new(PushSplit::new())]).await?;
-    let outcome =
-        execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
-    assert_collect_flow_success(label, outcome)
+async fn test_collect_with_erc20_proof_push_split_fails_closed_on_gas() -> Result<()> {
+    let error = build_obfuscated_flow_inputs(
+        "dispatcher_plus_push_split",
+        vec![Box::new(PushSplit::new())],
+    )
+    .await
+    .expect_err("a gas-changing pass must be rejected when runtime observes GAS");
+    assert!(error.to_string().contains("PushSplit"));
+    assert!(error.to_string().contains("GAS observation"));
+    Ok(())
 }
 
 /// Regression probe for two SlotShuffle bugs that made `bond()` revert
@@ -681,23 +684,32 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_push_split_succeeds() -> 
 ///    pair, and excludes those slot literals from the shuffle mapping so
 ///    init-touched slots stay at their original indices.
 #[tokio::test]
-async fn test_collect_with_erc20_proof_dispatcher_plus_slot_shuffle_succeeds() -> Result<()> {
-    let label = "dispatcher_plus_slot_shuffle";
-    let (deployment_bytecode, bond_calldata, collect_selector) =
-        build_obfuscated_flow_inputs(label, vec![Box::new(SlotShuffle::new())]).await?;
-    let outcome =
-        execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
-    assert_collect_flow_success(label, outcome)
+async fn test_collect_with_erc20_proof_slot_shuffle_fails_closed_on_gas() -> Result<()> {
+    let error = build_obfuscated_flow_inputs(
+        "dispatcher_plus_slot_shuffle",
+        vec![Box::new(SlotShuffle::new())],
+    )
+    .await
+    .expect_err("a gas-changing pass must be rejected when runtime observes GAS");
+    assert!(error.to_string().contains("SlotShuffle"));
+    assert!(error.to_string().contains("GAS observation"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_collect_with_erc20_proof_dispatcher_plus_string_obfuscate_succeeds() -> Result<()> {
-    let label = "dispatcher_plus_string_obfuscate";
-    let (deployment_bytecode, bond_calldata, collect_selector) =
-        build_obfuscated_flow_inputs(label, vec![Box::new(StringObfuscate::new())]).await?;
-    let outcome =
-        execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
-    assert_collect_flow_success(label, outcome)
+async fn test_collect_with_erc20_proof_string_obfuscate_fails_closed() -> Result<()> {
+    let error = build_obfuscated_flow_inputs(
+        "dispatcher_plus_string_obfuscate",
+        vec![Box::new(StringObfuscate::new())],
+    )
+    .await
+    .expect_err("unsafe string rewriting must be rejected");
+    assert!(error.to_string().contains("StringObfuscate"));
+    assert!(
+        error.to_string().contains("GAS observation")
+            || error.to_string().contains("StringObfuscate is disabled")
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -706,10 +718,8 @@ async fn test_collect_with_erc20_proof_default_pipeline_succeeds() -> Result<()>
     let (deployment_bytecode, bond_calldata, collect_selector) = build_obfuscated_flow_inputs(
         label,
         vec![
-            Box::new(ArithmeticChain::new()),
-            Box::new(PushSplit::new()),
-            Box::new(SlotShuffle::new()),
-            Box::new(StringObfuscate::new()),
+            Box::new(JumpTrampoline::new()),
+            Box::new(ClusterShuffle::new()),
         ],
     )
     .await?;
@@ -732,10 +742,8 @@ async fn test_collect_with_erc20_proof_failing_seed_default_pipeline() -> Result
         build_obfuscated_flow_inputs_with_seed(
             label,
             vec![
-                Box::new(ArithmeticChain::new()),
-                Box::new(PushSplit::new()),
-                Box::new(SlotShuffle::new()),
-                Box::new(StringObfuscate::new()),
+                Box::new(JumpTrampoline::new()),
+                Box::new(ClusterShuffle::new()),
             ],
             seed,
         )
@@ -809,13 +817,16 @@ async fn bisect_failing_seed_transform_subsets() -> Result<()> {
 /// Same failing seed, ArithmeticChain only, to localise the corruption to a
 /// single transform if the full-pipeline test fails.
 #[tokio::test]
-async fn test_collect_with_erc20_proof_failing_seed_arithmetic_chain_only() -> Result<()> {
-    let label = "failing_seed_arithmetic_chain_only";
+async fn test_collect_with_erc20_proof_failing_seed_arithmetic_chain_fails_closed() -> Result<()> {
     let seed = Seed::from_hex(MAINNET_FAILING_SEED).expect("valid seed");
-    let (deployment_bytecode, bond_calldata, collect_selector) =
-        build_obfuscated_flow_inputs_with_seed(label, vec![Box::new(ArithmeticChain::new())], seed)
-            .await?;
-    let outcome =
-        execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
-    assert_collect_flow_success(label, outcome)
+    let error = build_obfuscated_flow_inputs_with_seed(
+        "failing_seed_arithmetic_chain_only",
+        vec![Box::new(ArithmeticChain::new())],
+        seed,
+    )
+    .await
+    .expect_err("a gas-changing pass must be rejected when runtime observes GAS");
+    assert!(error.to_string().contains("ArithmeticChain"));
+    assert!(error.to_string().contains("GAS observation"));
+    Ok(())
 }

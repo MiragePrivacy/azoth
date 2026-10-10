@@ -60,7 +60,7 @@ Applies obfuscation transformations to bytecode.
 ```bash
 azoth obfuscate -D <DEPLOYMENT_BYTECODE> -R <RUNTIME_BYTECODE>
 azoth obfuscate --deployment 0x6080... --runtime 0x6080... --seed 12345
-azoth obfuscate -D path/to/deployment.hex -R path/to/runtime.hex --passes shuffle
+azoth obfuscate -D path/to/deployment.hex -R path/to/runtime.hex --passes jump_trampoline,cluster_shuffle
 azoth obfuscate -D path/to/deployment.hex -R path/to/runtime.hex --constructor-args 0x...
 ```
 
@@ -69,12 +69,14 @@ Options:
 - `-R, --runtime <BYTECODE>` - Input runtime bytecode (required)
 - `--constructor-args <HEX>` - ABI-encoded constructor suffix to append and obfuscate; omit when `-D` already contains it
 - `--seed <value>` - Cryptographic seed for deterministic obfuscation
-- `--passes <list>` - Comma-separated list of transforms (default: shuffle)
-- `--emit <file>` - Path to write gas/size report as JSON
+- `--passes <list>` - Comma-separated runtime transforms (default: `jump_trampoline,cluster_shuffle`)
+- `--emit <file>` - Write byte sizes and exact deployed-runtime code-deposit gas as JSON
 - `--emit-debug <PATH>` - Path to emit detailed CFG trace debug report as JSON
 - `--tui` - Launch TUI to view debug trace after obfuscation
 
-Note: `function_dispatcher` is always applied automatically.
+When a supported Solidity-style dispatcher is detected, selector-only `function_dispatcher` runs before the listed passes and the result includes the selector-token mapping callers must use. It is skipped when no dispatcher is detected. Supplying `--passes` replaces the two listed default passes; it does not disable dispatcher detection.
+
+The `--emit` gas fields cover only the EVM's `200 gas/byte` code-deposit charge. Creation calldata, EIP-3860 word cost, constructor execution, and runtime execution require measurement in an EVM and are intentionally not estimated.
 
 The runtime is used as an exact, authoritative deployment boundary. A supplied runtime that is missing or occurs more than once is rejected. Constructor masking does not parse the ABI and is not cryptographic confidentiality; it removes the stable plaintext suffix while preserving constructor behavior.
 
@@ -93,7 +95,7 @@ Options:
 - `--output <path>` - Where to write the markdown report (default: ./obfuscation_analysis_report.md)
 - `--max-attempts <n>` - Retry budget per iteration when a seed fails (default: 5)
 
-The analysis runs with the dispatcher when detected and otherwise mirrors the obfuscator's default transform selection (no extra passes are forced). The summary printed to stdout mirrors the generated report and includes average/percentile longest preserved block sizes plus n-gram diversity metrics.
+The analysis runs with the dispatcher when detected and otherwise mirrors the obfuscator's default transform selection (no extra passes are forced). The stdout summary mirrors the generated report and includes longest contiguous runs, conservative ordered-byte retention, aligned original and seed-to-seed differences, and pairwise n-gram Jaccard similarity.
 
 ## Input Formats
 

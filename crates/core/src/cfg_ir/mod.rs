@@ -12,7 +12,7 @@ use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableDiGraph;
 use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 mod trace;
 
@@ -28,6 +28,43 @@ pub use trace::{
 type PcRemap = HashMap<usize, usize>;
 type RuntimeBounds = Option<(usize, usize)>;
 type ReindexOutcome = (PcRemap, RuntimeBounds);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PushOrigin {
+    node: NodeIndex,
+    instruction: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AbstractStackValue {
+    /// Candidate PUSH instructions whose value is carried by this stack item.
+    origins: HashSet<PushOrigin>,
+    /// Exact values are retained only through PUSH/DUP/SWAP. Any arithmetic or
+    /// environmental operation makes the value unknown.
+    constants: Option<HashSet<usize>>,
+    /// The value may originate from PUSH0. Unlike PUSH1 0x00, PUSH0 has no
+    /// immediate bytes that can be rewritten if runtime-relative PC zero moves.
+    push0: bool,
+}
+
+/// Evidence produced by the stack-provenance relocation analysis.
+#[derive(Debug, Clone, Default)]
+pub struct JumpAddressProof {
+    pub pushes: Vec<(NodeIndex, usize, usize)>,
+    pub uses_push0_target: bool,
+}
+
+const PUSH_USED_AS_JUMP: u8 = 1;
+const PUSH_USED_AS_DATA: u8 = 2;
+const MAX_PROVENANCE_PATH_STATES: usize = 32_768;
+const MAX_PROVENANCE_STACK_CELLS: usize = 1_000_000;
+const MAX_PROVENANCE_FACT_GROWTH: usize = 1_250_000;
+const MAX_PROVENANCE_TRANSFER_FACTS: usize = 1_250_000;
+const MAX_PROVENANCE_ITERATIONS: usize = 250_000;
+
+type ProvenanceShape = Vec<u8>;
+type ProvenanceStates = HashMap<NodeIndex, HashMap<ProvenanceShape, Vec<AbstractStackValue>>>;
+type ProvenanceKey = (NodeIndex, ProvenanceShape);
 
 /// CFG node representation.
 #[derive(Debug, Clone)]
@@ -759,240 +796,352 @@ impl CfgIrBundle {
         Ok(())
     }
 
-    /// Remap return-address PUSH instructions in Solidity internal function call patterns.
+    /// Proves which literal PUSH instructions are used as jump destinations.
     ///
-    /// After `reindex_pcs` shifts PCs, `write_symbolic_immediates` and `patch_jump_immediates`
-    /// update PUSH values that feed directly into JUMP/JUMPI. However, return addresses pushed
-    /// earlier in a block (the `PUSH ret_addr` in `PUSH ret_addr; PUSH func_entry; JUMP`) are
-    /// not part of any recognized jump pattern and become stale. This pass finds those specific
-    /// return-address PUSHes and remaps them.
-    pub fn remap_orphan_jump_pushes(
+    /// Solidity carries internal-function return addresses across basic blocks.
+    /// A previous implementation guessed that every stack-carried literal equal
+    /// to a `JUMPDEST` was a return address. That silently rewrote ordinary data
+    /// constants on numeric collisions. This analysis instead propagates exact
+    /// PUSH provenance through every reachable CFG path. A literal is eligible
+    /// for relocation only when it is consumed as a JUMP/JUMPI target and never
+    /// as data. Unknown dynamic control flow and mixed address/data uses fail
+    /// closed.
+    pub fn prove_jump_address_pushes(&self) -> Result<JumpAddressProof, Error> {
+        let bounds = self.runtime_bounds;
+        let runtime_start = bounds.map(|(start, _)| start).unwrap_or(0);
+        let mut runtime_nodes: Vec<_> = self
+            .cfg
+            .node_indices()
+            .filter_map(|node| match &self.cfg[node] {
+                Block::Body(body)
+                    if bounds.is_none_or(|(start, end)| {
+                        body.start_pc >= start && body.start_pc < end
+                    }) =>
+                {
+                    Some((body.start_pc, node))
+                }
+                _ => None,
+            })
+            .collect();
+        runtime_nodes.sort_by_key(|(pc, _)| *pc);
+        let Some((_, entry)) = runtime_nodes.first().copied() else {
+            return Ok(JumpAddressProof::default());
+        };
+
+        let physical_next: HashMap<_, _> = runtime_nodes
+            .windows(2)
+            .map(|pair| (pair[0].1, pair[1].1))
+            .collect();
+        let mut jumpdest_by_value = HashMap::new();
+        for (_, node) in &runtime_nodes {
+            let Block::Body(body) = &self.cfg[*node] else {
+                continue;
+            };
+            for instruction in &body.instructions {
+                if matches!(instruction.op, Opcode::JUMPDEST) {
+                    let value = instruction.pc.checked_sub(runtime_start).ok_or_else(|| {
+                        Error::InvalidBlockStructure(
+                            "runtime JUMPDEST precedes runtime start".into(),
+                        )
+                    })?;
+                    jumpdest_by_value.insert(value, *node);
+                }
+            }
+        }
+
+        // Keep one conservative abstract stack per node, stack height, and
+        // slot-wise value class (unknown, known non-target, or JUMPDEST
+        // candidate). At compatible joins, union PUSH origins and candidate
+        // JUMPDEST values slot-wise. This can over-approximate an impossible
+        // origin/target pairing, but never drops a real use: spurious data uses
+        // merely make relocation fail closed, and spurious dynamic targets are
+        // still restricted to actual JUMPDESTs. Separating the three value
+        // classes prevents an unknown/non-target path from being hidden by a
+        // target-bearing path. Retaining every exact call path instead makes
+        // normal Solidity internal-call graphs grow exponentially.
+        let mut seen = ProvenanceStates::new();
+        seen.insert(entry, HashMap::from([(Vec::new(), Vec::new())]));
+        let entry_key = (entry, Vec::new());
+        let mut queue = VecDeque::from([entry_key.clone()]);
+        let mut queued = HashSet::from([entry_key]);
+        let mut uses: HashMap<PushOrigin, u8> = HashMap::new();
+        let mut origin_values: HashMap<PushOrigin, usize> = HashMap::new();
+        let mut resources = ProvenanceResources {
+            path_states: 1,
+            ..ProvenanceResources::default()
+        };
+        let mut transfer_fact_count = 0usize;
+        let mut iterations = 0usize;
+        let mut uses_push0_target = false;
+
+        while let Some((node, shape)) = queue.pop_front() {
+            queued.remove(&(node, shape.clone()));
+            let Some(mut stack) = seen
+                .get(&node)
+                .and_then(|states| states.get(&shape))
+                .cloned()
+            else {
+                continue;
+            };
+            iterations += 1;
+            if iterations > MAX_PROVENANCE_ITERATIONS {
+                return Err(Error::ObfuscationFailed(
+                    "jump-address provenance did not converge".into(),
+                ));
+            }
+            transfer_fact_count = transfer_fact_count
+                .checked_add(abstract_stack_fact_count(&stack))
+                .ok_or_else(|| {
+                    Error::ObfuscationFailed(
+                        "jump-address provenance transfer work overflowed".into(),
+                    )
+                })?;
+            if transfer_fact_count > MAX_PROVENANCE_TRANSFER_FACTS {
+                return Err(Error::ObfuscationFailed(format!(
+                    "jump-address provenance exceeded its transfer-work budget ({transfer_fact_count} abstract facts)"
+                )));
+            }
+            let Block::Body(body) = &self.cfg[node] else {
+                continue;
+            };
+            let control = body.control.clone();
+            let instructions = body.instructions.clone();
+            let mut successors = Vec::new();
+
+            for (index, instruction) in instructions.iter().enumerate() {
+                match instruction.op {
+                    Opcode::PUSH(_) => {
+                        let immediate = instruction.imm.as_deref().ok_or_else(|| {
+                            Error::InvalidImmediate(format!(
+                                "PUSH at pc 0x{:x} has no immediate",
+                                instruction.pc
+                            ))
+                        })?;
+                        // Values wider than the host address space cannot be a
+                        // legacy runtime PC (EIP-170 is far below usize::MAX),
+                        // so retain them as unknown non-PC data rather than
+                        // rejecting ordinary PUSH32 masks and constants.
+                        let value = usize::from_str_radix(immediate, 16).ok();
+                        let origin = PushOrigin {
+                            node,
+                            instruction: index,
+                        };
+                        let mut origins = HashSet::new();
+                        let mut constants = HashSet::new();
+                        if let Some(value) = value
+                            && jumpdest_by_value.contains_key(&value)
+                        {
+                            origins.insert(origin);
+                            constants.insert(value);
+                            origin_values.insert(origin, value);
+                        }
+                        stack.push(AbstractStackValue {
+                            origins,
+                            // Only a literal that names an actual JUMPDEST can
+                            // influence this relocation proof. Collapsing all
+                            // other known literals to the same empty set keeps
+                            // ordinary data from multiplying path states while
+                            // an empty set still fails closed if later consumed
+                            // as a dynamic jump target.
+                            constants: Some(constants),
+                            push0: false,
+                        });
+                    }
+                    Opcode::PUSH0 => {
+                        let constants = if jumpdest_by_value.contains_key(&0) {
+                            HashSet::from([0])
+                        } else {
+                            HashSet::new()
+                        };
+                        stack.push(AbstractStackValue {
+                            origins: HashSet::new(),
+                            constants: Some(constants),
+                            push0: true,
+                        });
+                    }
+                    Opcode::DUP(depth) => {
+                        let depth = depth as usize;
+                        if depth == 0 || depth > stack.len() {
+                            return Err(Error::InvalidBlockStructure(format!(
+                                "DUP{depth} underflow during jump-address provenance"
+                            )));
+                        }
+                        stack.push(stack[stack.len() - depth].clone());
+                    }
+                    Opcode::SWAP(depth) => {
+                        let depth = depth as usize;
+                        if depth == 0 || depth >= stack.len() {
+                            return Err(Error::InvalidBlockStructure(format!(
+                                "SWAP{depth} underflow during jump-address provenance"
+                            )));
+                        }
+                        let top = stack.len() - 1;
+                        stack.swap(top, top - depth);
+                    }
+                    Opcode::POP => {
+                        pop_abstract(&mut stack, instruction.pc)?;
+                    }
+                    Opcode::JUMP => {
+                        let target = pop_abstract(&mut stack, instruction.pc)?;
+                        uses_push0_target |= target.push0;
+                        mark_origins(&mut uses, &target.origins, PUSH_USED_AS_JUMP);
+                        successors = jump_successors(&control, &target, &jumpdest_by_value, false)?;
+                        break;
+                    }
+                    Opcode::JUMPI => {
+                        let target = pop_abstract(&mut stack, instruction.pc)?;
+                        let condition = pop_abstract(&mut stack, instruction.pc)?;
+                        uses_push0_target |= target.push0;
+                        mark_origins(&mut uses, &target.origins, PUSH_USED_AS_JUMP);
+                        mark_origins(&mut uses, &condition.origins, PUSH_USED_AS_DATA);
+                        successors = jump_successors(&control, &target, &jumpdest_by_value, true)?;
+                        if let Some(next) = physical_next.get(&node).copied()
+                            && !successors.contains(&next)
+                        {
+                            successors.push(next);
+                        }
+                        break;
+                    }
+                    Opcode::STOP | Opcode::INVALID | Opcode::SELFDESTRUCT => {
+                        if matches!(instruction.op, Opcode::SELFDESTRUCT) {
+                            let value = pop_abstract(&mut stack, instruction.pc)?;
+                            mark_origins(&mut uses, &value.origins, PUSH_USED_AS_DATA);
+                        }
+                        break;
+                    }
+                    Opcode::UNKNOWN(_)
+                    | Opcode::RJUMP
+                    | Opcode::RJUMPI
+                    | Opcode::RJUMPV
+                    | Opcode::CALLF
+                    | Opcode::RETF
+                    | Opcode::JUMPF
+                    | Opcode::DUPN
+                    | Opcode::SWAPN
+                    | Opcode::EXCHANGE => {
+                        return Err(Error::UnsupportedOpcode(format!(
+                            "{} in jump-address provenance",
+                            instruction.op
+                        )));
+                    }
+                    _ => {
+                        let info =
+                            instruction.op.as_opcode().info().ok_or_else(|| {
+                                Error::UnsupportedOpcode(instruction.op.to_string())
+                            })?;
+                        let mut consumed = Vec::with_capacity(info.inputs as usize);
+                        for _ in 0..info.inputs {
+                            consumed.push(pop_abstract(&mut stack, instruction.pc)?);
+                        }
+                        for value in &consumed {
+                            mark_origins(&mut uses, &value.origins, PUSH_USED_AS_DATA);
+                        }
+                        for _ in 0..info.outputs {
+                            stack.push(AbstractStackValue::default());
+                        }
+                        if info.terminates {
+                            break;
+                        }
+                    }
+                }
+
+                if stack.len() > 1024 {
+                    return Err(Error::InvalidBlockStructure(
+                        "abstract stack exceeds the EVM 1024-item limit".into(),
+                    ));
+                }
+
+                if index + 1 == instructions.len()
+                    && let Some(next) = physical_next.get(&node).copied()
+                {
+                    successors.push(next);
+                }
+            }
+
+            if instructions.is_empty()
+                && let Some(next) = physical_next.get(&node).copied()
+            {
+                successors.push(next);
+            }
+
+            for successor in successors {
+                enqueue_abstract_path(
+                    &mut seen,
+                    &mut queue,
+                    &mut queued,
+                    successor,
+                    &stack,
+                    &mut resources,
+                )?;
+            }
+        }
+
+        let mut proven = Vec::new();
+        for (origin, value) in origin_values {
+            match uses.get(&origin).copied().unwrap_or(0) {
+                PUSH_USED_AS_JUMP => proven.push((origin.node, origin.instruction, value)),
+                PUSH_USED_AS_DATA | 0 => {}
+                flags if flags == PUSH_USED_AS_JUMP | PUSH_USED_AS_DATA => {
+                    return Err(Error::ObfuscationFailed(format!(
+                        "PUSH at block {} instruction {} is used as both a jump address and data",
+                        origin.node.index(),
+                        origin.instruction
+                    )));
+                }
+                _ => unreachable!("only address/data use bits are assigned"),
+            }
+        }
+        proven.sort_by_key(|(node, index, _)| (node.index(), *index));
+        Ok(JumpAddressProof {
+            pushes: proven,
+            uses_push0_target,
+        })
+    }
+
+    /// Relocate only PUSH instructions proven by [`Self::prove_jump_address_pushes`].
+    pub fn remap_proven_jump_pushes(
         &mut self,
+        proven: &[(NodeIndex, usize, usize)],
         pc_mapping: &HashMap<usize, usize>,
         old_runtime_bounds: Option<(usize, usize)>,
     ) -> Result<(), Error> {
-        let old_runtime_start = old_runtime_bounds.map(|(s, _)| s);
-        let new_runtime_start = self.runtime_bounds.map(|(s, _)| s);
+        let old_runtime_start = old_runtime_bounds.map(|(start, _)| start).unwrap_or(0);
+        let new_runtime_start = self.runtime_bounds.map(|(start, _)| start).unwrap_or(0);
+        let mut remapped = 0usize;
 
-        // Build set of old JUMPDEST PCs so we can verify candidates are real jump targets.
-        let inverse: HashMap<usize, usize> =
-            pc_mapping.iter().map(|(&old, &new)| (new, old)).collect();
-        let mut old_jumpdest_pcs: HashSet<usize> = HashSet::new();
-        for node in self.cfg.node_indices() {
-            if let Some(Block::Body(body)) = self.cfg.node_weight(node) {
-                for instr in &body.instructions {
-                    if matches!(instr.op, Opcode::JUMPDEST)
-                        && let Some(&old_pc) = inverse.get(&instr.pc)
-                    {
-                        old_jumpdest_pcs.insert(old_pc);
-                    }
-                }
-            }
-        }
-
-        if old_jumpdest_pcs.is_empty() {
-            return Ok(());
-        }
-
-        // First pass: collect (node, instruction_index) pairs that need remapping.
-        // We look for the internal call pattern: PUSH ret_addr; PUSH func_entry; JUMP
-        // The return address PUSH is at push_idx - 1 in a Direct pattern.
-        let nodes: Vec<_> = self.cfg.node_indices().collect();
-        let mut edits: Vec<(NodeIndex, usize, usize)> = Vec::new(); // (node, instr_idx, new_value)
-
-        for &node in &nodes {
-            let Some(Block::Body(body)) = self.cfg.node_weight(node) else {
-                continue;
+        for &(node, instruction_index, old_value) in proven {
+            let old_target = old_runtime_start
+                .checked_add(old_value)
+                .ok_or_else(|| Error::InvalidImmediate("jump target address overflowed".into()))?;
+            let new_target = pc_mapping.get(&old_target).copied().ok_or_else(|| {
+                Error::InvalidBlockStructure(format!(
+                    "proven jump target 0x{old_target:x} has no PC relocation"
+                ))
+            })?;
+            let new_value = new_target.checked_sub(new_runtime_start).ok_or_else(|| {
+                Error::InvalidImmediate("relocated jump precedes runtime start".into())
+            })?;
+            let Block::Body(body) = self.cfg.node_weight_mut(node).ok_or_else(|| {
+                Error::InvalidBlockStructure("proven jump PUSH block disappeared".into())
+            })?
+            else {
+                return Err(Error::InvalidBlockStructure(
+                    "proven jump PUSH is not in a body block".into(),
+                ));
             };
-
-            let in_runtime = body.is_runtime(self.runtime_bounds);
-
-            // compute the remapped value for a PUSH instruction
-            let try_remap = |push_value: usize| -> Option<usize> {
-                let old_pc_abs = if in_runtime {
-                    old_runtime_start.unwrap_or(0).saturating_add(push_value)
-                } else {
-                    push_value
-                };
-                if !old_jumpdest_pcs.contains(&old_pc_abs) {
-                    return None;
-                }
-                let &new_pc_abs = pc_mapping.get(&old_pc_abs)?;
-                let new_value = if in_runtime {
-                    new_runtime_start
-                        .map(|s| new_pc_abs.saturating_sub(s))
-                        .unwrap_or(new_pc_abs)
-                } else {
-                    new_pc_abs
-                };
-                if push_value != new_value {
-                    Some(new_value)
-                } else {
-                    None
-                }
-            };
-
-            // Find the terminal jump pattern
-            let pattern = detect_jump_pattern(&body.instructions);
-
-            if let Some(ref pat) = pattern {
-                // check the PUSH immediately before the jump pattern
-                let pattern_first_push_idx = match pat {
-                    JumpPattern::Direct { push_idx } => *push_idx,
-                    JumpPattern::SplitAdd { push_a_idx, .. } => *push_a_idx,
-                    JumpPattern::PcRelative { push_idx, .. } => *push_idx,
-                };
-
-                if pattern_first_push_idx > 0 {
-                    let ret_idx = pattern_first_push_idx - 1;
-                    let ret_instr = &body.instructions[ret_idx];
-                    if matches!(ret_instr.op, Opcode::PUSH(_))
-                        && let Some(imm) = &ret_instr.imm
-                        && let Ok(push_value) = usize::from_str_radix(imm, 16)
-                        && let Some(new_value) = try_remap(push_value)
-                    {
-                        let old_pc_abs = if in_runtime {
-                            old_runtime_start.unwrap_or(0).saturating_add(push_value)
-                        } else {
-                            push_value
-                        };
-                        let new_pc_abs = pc_mapping.get(&old_pc_abs).copied().unwrap_or(0);
-                        tracing::debug!(
-                            "remap_orphan_jump_pushes: block {} instr {} at pc=0x{:x}: \
-                             0x{:x} -> 0x{:x} (abs: 0x{:x} -> 0x{:x})",
-                            node.index(),
-                            ret_idx,
-                            ret_instr.pc,
-                            push_value,
-                            new_value,
-                            old_pc_abs,
-                            new_pc_abs,
-                        );
-                        edits.push((node, ret_idx, new_value));
-                    }
-                }
-            }
-
-            // Extended scan: scan ALL PUSH2+ instructions in EVERY body block
-            // for values matching old JUMPDEST PCs. Solidity's internal
-            // function call convention routinely pushes a return address in
-            // one block and consumes it from a JUMP in a *later* block
-            // (stack-carried), e.g.
-            //
-            //     Block A:
-            //       PUSH2 ret_addr   ← return address
-            //       SLOAD
-            //       ...              ← no JUMP here, block ends by falling
-            //                          through at a JUMPDEST
-            //     Block B (starts at the JUMPDEST):
-            //       ... address mask ...
-            //       SWAP1
-            //       JUMP             ← consumes the ret_addr pushed in A
-            //
-            // If we only scanned blocks that end with JUMP/JUMPI, the
-            // return-address PUSH in Block A would never be visited and
-            // would stay stale after PC-shifting transforms (PushSplit,
-            // ArithmeticChain). That produced the InvalidJump regression
-            // documented in tests/src/e2e/collect_proof.rs.
-            //
-            // Constraining to PUSH2+ avoids false positives on small
-            // literals that happen to coincide with early JUMPDEST PCs
-            // (slot indices, loop bounds, etc.) — Solidity would use PUSH2
-            // for any jump target in a contract whose code is >256 bytes.
-            let pattern_indices: HashSet<usize> = match &pattern {
-                Some(JumpPattern::Direct { push_idx }) => {
-                    [*push_idx, push_idx.wrapping_sub(1)].into_iter().collect()
-                }
-                Some(JumpPattern::SplitAdd {
-                    push_a_idx,
-                    push_b_idx,
-                }) => [*push_a_idx, *push_b_idx, push_a_idx.wrapping_sub(1)]
-                    .into_iter()
-                    .collect(),
-                Some(JumpPattern::PcRelative { push_idx, .. }) => {
-                    [*push_idx, push_idx.wrapping_sub(1)].into_iter().collect()
-                }
-                None => HashSet::new(),
-            };
-
-            for (idx, instr) in body.instructions.iter().enumerate() {
-                if pattern_indices.contains(&idx) {
-                    continue;
-                }
-                let push_width = match instr.op {
-                    Opcode::PUSH(w) if w >= 2 => w,
-                    _ => continue,
-                };
-                let _ = push_width;
-                let Some(imm) = &instr.imm else {
-                    continue;
-                };
-                let Ok(push_value) = usize::from_str_radix(imm, 16) else {
-                    continue;
-                };
-                if let Some(new_value) = try_remap(push_value) {
-                    // Narrow false positives: only remap if the value
-                    // actually flows into a JUMP/JUMPI. Without this check
-                    // a PUSH2 whose 16-bit value numerically matches a
-                    // JUMPDEST PC but is really a bit mask, deadline
-                    // constant, or other non-target literal would be
-                    // silently rewritten (PUSH2 values span `0..=0xffff`
-                    // which heavily overlaps the PC range of sub-64KB
-                    // runtimes). `push_reaches_jump` forward-walks from
-                    // the PUSH within its block and returns `false` only
-                    // when the value is unambiguously consumed by a
-                    // non-jump op; stack-carried values (survive to
-                    // block end or flow through a JUMP to a callee) and
-                    // within-block JUMP targets still return `true`, so
-                    // return addresses remain detectable.
-                    if !push_reaches_jump(&body.instructions, idx) {
-                        tracing::debug!(
-                            "remap_orphan_jump_pushes: skipping block {} instr {} at pc=0x{:x} \
-                             (value 0x{:x} matches JUMPDEST PC but is consumed by non-jump op)",
-                            node.index(),
-                            idx,
-                            instr.pc,
-                            push_value
-                        );
-                        continue;
-                    }
-                    let old_pc_abs = if in_runtime {
-                        old_runtime_start.unwrap_or(0).saturating_add(push_value)
-                    } else {
-                        push_value
-                    };
-                    let new_pc_abs = pc_mapping.get(&old_pc_abs).copied().unwrap_or(0);
-                    tracing::debug!(
-                        "remap_orphan_jump_pushes: block {} instr {} at pc=0x{:x}: \
-                         0x{:x} -> 0x{:x} (abs: 0x{:x} -> 0x{:x}) [extended scan]",
-                        node.index(),
-                        idx,
-                        instr.pc,
-                        push_value,
-                        new_value,
-                        old_pc_abs,
-                        new_pc_abs,
-                    );
-                    edits.push((node, idx, new_value));
-                }
+            let instruction = body
+                .instructions
+                .get_mut(instruction_index)
+                .ok_or_else(|| {
+                    Error::InvalidBlockStructure("proven jump PUSH instruction disappeared".into())
+                })?;
+            if new_value != old_value {
+                apply_immediate(instruction, new_value)?;
+                remapped += 1;
             }
         }
 
-        // Second pass: apply the edits
-        let total_remapped = edits.len();
-        for (node, instr_idx, new_value) in edits {
-            if let Some(Block::Body(body)) = self.cfg.node_weight_mut(node) {
-                apply_immediate(&mut body.instructions[instr_idx], new_value)?;
-            }
-        }
-
-        if total_remapped > 0 {
-            tracing::debug!(
-                "remap_orphan_jump_pushes: remapped {} internal-call return address PUSHes",
-                total_remapped
-            );
-        }
-
+        tracing::debug!(remapped, "remapped proven jump-address PUSH instructions");
         Ok(())
     }
 
@@ -2048,6 +2197,204 @@ fn absolute_target_from_value(
 //    the terminal check in `ensure_jump_pattern`.
 // Keeping them together looks slightly repetitive, but they feed different workflows
 
+fn pop_abstract(
+    stack: &mut Vec<AbstractStackValue>,
+    pc: usize,
+) -> Result<AbstractStackValue, Error> {
+    stack.pop().ok_or_else(|| {
+        Error::InvalidBlockStructure(format!(
+            "stack underflow at pc 0x{pc:x} during jump-address provenance"
+        ))
+    })
+}
+
+fn mark_origins(uses: &mut HashMap<PushOrigin, u8>, origins: &HashSet<PushOrigin>, flag: u8) {
+    for origin in origins {
+        *uses.entry(*origin).or_default() |= flag;
+    }
+}
+
+fn jump_successors(
+    control: &BlockControl,
+    target: &AbstractStackValue,
+    jumpdest_by_value: &HashMap<usize, NodeIndex>,
+    conditional: bool,
+) -> Result<Vec<NodeIndex>, Error> {
+    let typed = match (conditional, control) {
+        (
+            false,
+            BlockControl::Jump {
+                target: JumpTarget::Block { node, .. },
+            },
+        ) => Some(*node),
+        (
+            true,
+            BlockControl::Branch {
+                true_target: JumpTarget::Block { node, .. },
+                ..
+            },
+        ) => Some(*node),
+        _ => None,
+    };
+    if let Some(node) = typed {
+        return Ok(vec![node]);
+    }
+
+    let constants = target.constants.as_ref().ok_or_else(|| {
+        Error::ObfuscationFailed(
+            "unresolved dynamic JUMP/JUMPI prevents sound PC relocation".into(),
+        )
+    })?;
+    if constants.is_empty() {
+        return Err(Error::ObfuscationFailed(
+            "empty dynamic jump target set prevents sound PC relocation".into(),
+        ));
+    }
+    let mut successors = Vec::with_capacity(constants.len());
+    for value in constants {
+        let node = jumpdest_by_value.get(value).copied().ok_or_else(|| {
+            Error::ObfuscationFailed(format!(
+                "dynamic jump target 0x{value:x} is not a proven JUMPDEST"
+            ))
+        })?;
+        if !successors.contains(&node) {
+            successors.push(node);
+        }
+    }
+    Ok(successors)
+}
+
+fn enqueue_abstract_path(
+    seen: &mut ProvenanceStates,
+    queue: &mut VecDeque<ProvenanceKey>,
+    queued: &mut HashSet<ProvenanceKey>,
+    node: NodeIndex,
+    incoming: &[AbstractStackValue],
+    resources: &mut ProvenanceResources,
+) -> Result<(), Error> {
+    if incoming.len() > 1024 {
+        return Err(Error::InvalidBlockStructure(
+            "abstract stack exceeds the EVM 1024-item limit".into(),
+        ));
+    }
+    let paths = seen.entry(node).or_default();
+    let shape = provenance_shape(incoming);
+    let mut candidate = incoming.to_vec();
+    let mut is_new_shape = true;
+    let mut fact_growth = 0usize;
+    if let Some(existing) = paths.get_mut(&shape) {
+        let mut changed = false;
+        for (current, next) in existing.iter_mut().zip(incoming) {
+            let old_origin_count = current.origins.len();
+            current.origins.extend(next.origins.iter().copied());
+            let added_origins = current.origins.len() - old_origin_count;
+            fact_growth = fact_growth.saturating_add(added_origins);
+            changed |= added_origins != 0;
+
+            match (&mut current.constants, &next.constants) {
+                (Some(current), Some(next)) => {
+                    let old_constant_count = current.len();
+                    current.extend(next.iter().copied());
+                    let added_constants = current.len() - old_constant_count;
+                    fact_growth = fact_growth.saturating_add(added_constants);
+                    changed |= added_constants != 0;
+                }
+                (slot @ Some(_), None) => {
+                    *slot = None;
+                    fact_growth = fact_growth.saturating_add(1);
+                    changed = true;
+                }
+                (None, Some(_) | None) => {}
+            }
+            if next.push0 && !current.push0 {
+                current.push0 = true;
+                fact_growth = fact_growth.saturating_add(1);
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
+        candidate = existing.clone();
+        is_new_shape = false;
+    } else {
+        fact_growth = abstract_stack_fact_count(incoming);
+    }
+
+    let next_fact_growth = resources
+        .fact_growth
+        .checked_add(fact_growth)
+        .ok_or_else(|| {
+            Error::ObfuscationFailed("jump-address provenance fact growth overflowed".into())
+        })?;
+    if next_fact_growth > MAX_PROVENANCE_FACT_GROWTH {
+        return Err(Error::ObfuscationFailed(format!(
+            "jump-address provenance exceeded its fact-growth budget ({next_fact_growth} abstract facts)"
+        )));
+    }
+
+    if is_new_shape {
+        let next_path_count = resources.path_states.checked_add(1).ok_or_else(|| {
+            Error::ObfuscationFailed("jump-address provenance path count overflowed".into())
+        })?;
+        let next_stack_cells = resources
+            .stack_cells
+            .checked_add(incoming.len())
+            .ok_or_else(|| {
+                Error::ObfuscationFailed(
+                    "jump-address provenance stack-cell count overflowed".into(),
+                )
+            })?;
+        if next_path_count > MAX_PROVENANCE_PATH_STATES
+            || next_stack_cells > MAX_PROVENANCE_STACK_CELLS
+        {
+            return Err(Error::ObfuscationFailed(format!(
+                "jump-address provenance exceeded its resource budget ({next_path_count} path states, {next_stack_cells} stack cells)"
+            )));
+        }
+        paths.insert(shape.clone(), candidate);
+        resources.path_states = next_path_count;
+        resources.stack_cells = next_stack_cells;
+    }
+    resources.fact_growth = next_fact_growth;
+
+    // Queue the state key at most once. Consumers always read the latest joined
+    // state from `seen`, so incremental fan-in cannot create a backlog of stale
+    // full-stack snapshots.
+    let key = (node, shape);
+    if queued.insert(key.clone()) {
+        queue.push_back(key);
+    }
+    Ok(())
+}
+
+fn abstract_stack_fact_count(stack: &[AbstractStackValue]) -> usize {
+    stack.iter().fold(stack.len(), |count, value| {
+        count
+            .saturating_add(value.origins.len())
+            .saturating_add(value.constants.as_ref().map_or(0, HashSet::len))
+            .saturating_add(usize::from(value.push0))
+    })
+}
+
+#[derive(Default)]
+struct ProvenanceResources {
+    path_states: usize,
+    stack_cells: usize,
+    fact_growth: usize,
+}
+
+fn provenance_shape(stack: &[AbstractStackValue]) -> Vec<u8> {
+    stack
+        .iter()
+        .map(|value| match &value.constants {
+            None => 0,
+            Some(constants) if constants.is_empty() => 1,
+            Some(_) => 2,
+        })
+        .collect()
+}
+
 enum JumpPattern {
     /// `PUSH <target>; JUMP/JUMPI`
     Direct { push_idx: usize },
@@ -2792,5 +3139,47 @@ mod tests {
 
         let expected = format!("{:04x}", max_block_start.saturating_sub(start));
         assert_eq!(push_imm.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn provenance_path_state_budget_fails_closed() {
+        let mut seen = HashMap::new();
+        let mut queue = VecDeque::new();
+        let mut queued = HashSet::new();
+        let mut resources = ProvenanceResources::default();
+
+        for value in 0..MAX_PROVENANCE_PATH_STATES {
+            let node = NodeIndex::new(value);
+            let incoming = [AbstractStackValue {
+                origins: HashSet::new(),
+                constants: Some(HashSet::from([value])),
+                push0: false,
+            }];
+            enqueue_abstract_path(
+                &mut seen,
+                &mut queue,
+                &mut queued,
+                node,
+                &incoming,
+                &mut resources,
+            )
+            .expect("states inside the budget should enqueue");
+        }
+
+        let over_budget = [AbstractStackValue {
+            origins: HashSet::new(),
+            constants: Some(HashSet::from([MAX_PROVENANCE_PATH_STATES])),
+            push0: false,
+        }];
+        let error = enqueue_abstract_path(
+            &mut seen,
+            &mut queue,
+            &mut queued,
+            NodeIndex::new(MAX_PROVENANCE_PATH_STATES),
+            &over_budget,
+            &mut resources,
+        )
+        .expect_err("one additional unique path must fail closed");
+        assert!(error.to_string().contains("resource budget"));
     }
 }

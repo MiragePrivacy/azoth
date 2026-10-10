@@ -1,7 +1,7 @@
-//! Azoth's Formal Verification Engine
+//! Azoth's experimental formal verification API.
 //!
-//! This crate provides formal guarantees that obfuscated contracts are functionally
-//! equivalent to their original versions through formal verification using SMT solvers.
+//! No production equivalence proof is implemented yet. Public verification entry points
+//! fail closed with [`Error::Unsupported`] instead of returning placeholder success.
 
 pub mod proofs;
 pub mod properties;
@@ -12,8 +12,6 @@ pub mod smt;
 pub use proofs::{FormalProof, ProofStatement, ProofType};
 pub use properties::{ArithmeticOperation, SecurityProperty};
 pub use result::{Error, Result};
-
-use std::time::Instant;
 
 /// Result type for verification operations (alias for backward compatibility)
 pub type VerificationResult<T> = Result<T>;
@@ -36,188 +34,14 @@ impl FormalVerifier {
     /// Main entry point: prove that two contracts are equivalent
     pub async fn prove_equivalence(
         &mut self,
-        original_bytecode: &[u8],
-        original_runtime: &[u8],
-        obfuscated_bytecode: &[u8],
-        obfuscated_runtime: &[u8],
-        security_properties: &[SecurityProperty],
+        _original_bytecode: &[u8],
+        _original_runtime: &[u8],
+        _obfuscated_bytecode: &[u8],
+        _obfuscated_runtime: &[u8],
+        _security_properties: &[SecurityProperty],
     ) -> VerificationResult<FormalProof> {
-        let start_time = Instant::now();
-
-        tracing::info!("Starting formal verification of contract equivalence");
-
-        // Parse both contracts into semantic representations
-        let original_semantics =
-            semantics::extract_semantics_from_bytecode(original_bytecode, original_runtime).await?;
-        let obfuscated_semantics =
-            semantics::extract_semantics_from_bytecode(obfuscated_bytecode, obfuscated_runtime)
-                .await?;
-
-        tracing::debug!("Extracted semantics for both contracts");
-
-        // Generate proof statements
-        let mut statements = Vec::new();
-
-        // 1. Prove bisimulation (step-by-step equivalence)
-        if let Ok(bisim_statement) = self
-            .prove_bisimulation(&original_semantics, &obfuscated_semantics)
-            .await
-        {
-            statements.push(bisim_statement);
-        }
-
-        // 2. Prove state equivalence
-        if let Ok(state_statement) = self
-            .prove_state_equivalence(&original_semantics, &obfuscated_semantics)
-            .await
-        {
-            statements.push(state_statement);
-        }
-
-        // 3. Prove property preservation
-        for property in security_properties {
-            if let Ok(prop_statement) = self
-                .prove_property_preservation(&original_semantics, &obfuscated_semantics, property)
-                .await
-            {
-                statements.push(prop_statement);
-            }
-        }
-
-        // 4. Prove gas bounds
-        if let Ok(gas_statement) = self
-            .prove_gas_bounds(&original_semantics, &obfuscated_semantics)
-            .await
-        {
-            statements.push(gas_statement);
-        }
-
-        let proof_time = start_time.elapsed();
-        let _statements_clone = statements.clone(); // Clone for hash computation
-
-        let proof = FormalProof::new(
-            ProofType::Combined(vec![
-                ProofType::Bisimulation,
-                ProofType::StateEquivalence,
-                ProofType::PropertyPreservation,
-                ProofType::GasBounds,
-            ]),
-            statements,
-            proof_time,
-        );
-
-        tracing::info!(
-            "Formal verification completed in {:.2}s, valid: {}",
-            proof_time.as_secs_f64(),
-            proof.valid
-        );
-
-        Ok(proof)
-    }
-
-    /// Prove bisimulation: every execution step is equivalent
-    async fn prove_bisimulation(
-        &mut self,
-        _original: &semantics::ContractSemantics,
-        _obfuscated: &semantics::ContractSemantics,
-    ) -> VerificationResult<ProofStatement> {
-        let start_time = Instant::now();
-
-        tracing::debug!("Proving bisimulation between contracts");
-
-        // Create bisimulation assertion
-        let bisim_formula = "(assert (forall ((state State) (input Input))
-            (= (execute-original state input)
-               (execute-obfuscated state input))))"
-            .to_string();
-
-        // TODO: Implement actual SMT verification
-        let proven = true; // Placeholder
-        let proof_time = start_time.elapsed();
-
-        Ok(ProofStatement::new(
-            "Bisimulation: Every execution step produces identical results".to_string(),
-            bisim_formula,
-            proven,
-            proof_time,
-        ))
-    }
-
-    /// Prove state equivalence: final states are identical
-    async fn prove_state_equivalence(
-        &mut self,
-        _original: &semantics::ContractSemantics,
-        _obfuscated: &semantics::ContractSemantics,
-    ) -> VerificationResult<ProofStatement> {
-        let start_time = Instant::now();
-
-        tracing::debug!("Proving state equivalence between contracts");
-
-        let state_equiv_formula = "(assert (forall ((initial-state State) (transaction Tx))
-            (= (final-state (execute-original initial-state transaction))
-               (final-state (execute-obfuscated initial-state transaction)))))"
-            .to_string();
-
-        // TODO: Implement actual SMT verification
-        let proven = true;
-        let proof_time = start_time.elapsed();
-
-        Ok(ProofStatement::new(
-            "State Equivalence: Final contract states are identical".to_string(),
-            state_equiv_formula,
-            proven,
-            proof_time,
-        ))
-    }
-
-    /// Prove that security properties are preserved
-    async fn prove_property_preservation(
-        &mut self,
-        _original: &semantics::ContractSemantics,
-        _obfuscated: &semantics::ContractSemantics,
-        property: &SecurityProperty,
-    ) -> VerificationResult<ProofStatement> {
-        let start_time = Instant::now();
-
-        let description = property.description();
-        let formal_statement = property.to_smt_formula();
-
-        // TODO: Implement actual property verification
-        let proven = true;
-        let proof_time = start_time.elapsed();
-
-        Ok(ProofStatement::new(
-            description,
-            formal_statement,
-            proven,
-            proof_time,
-        ))
-    }
-
-    /// Prove gas consumption bounds
-    async fn prove_gas_bounds(
-        &mut self,
-        _original: &semantics::ContractSemantics,
-        _obfuscated: &semantics::ContractSemantics,
-    ) -> VerificationResult<ProofStatement> {
-        let start_time = Instant::now();
-
-        tracing::debug!("Proving gas consumption bounds");
-
-        let gas_bound_formula = "(assert (forall ((input Input))
-            (<= (gas-consumed (execute-obfuscated input))
-                (* 1.15 (gas-consumed (execute-original input))))))"
-            .to_string();
-
-        // TODO: Implement actual gas bounds verification
-        let proven = true;
-        let proof_time = start_time.elapsed();
-
-        Ok(ProofStatement::new(
-            "Gas Bounds: Obfuscated contract uses at most 15% more gas".to_string(),
-            gas_bound_formula,
-            proven,
-            proof_time,
+        Err(Error::Unsupported(
+            "contract equivalence proofs are not implemented".to_string(),
         ))
     }
 }
@@ -246,9 +70,18 @@ mod tests {
     #[tokio::test]
     async fn test_formal_verifier_creation() {
         let verifier = FormalVerifier::new();
+        assert!(verifier.is_ok());
+    }
 
-        // Should create successfully (even if SMT solver not available)
-        assert!(verifier.is_ok() || matches!(verifier.unwrap_err(), Error::SmtSolver(_)));
+    #[tokio::test]
+    async fn equivalence_verification_fails_closed_as_unsupported() {
+        let mut verifier = FormalVerifier::new().unwrap();
+        let error = verifier
+            .prove_equivalence(&[], &[], &[], &[], &[])
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Error::Unsupported(_)));
     }
 
     #[test]

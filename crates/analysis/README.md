@@ -1,6 +1,6 @@
 # Azoth Analysis
 
-The `azoth-analysis` crate provides analytical metrics for evaluating EVM bytecode obfuscation transforms. This crate implements a minimal set of metrics to assess transform potency and gas efficiency.
+The `azoth-analysis` crate provides analytical metrics for evaluating EVM bytecode obfuscation transforms. It measures structure, size, original-byte retention, and seed-to-seed diversity; it does not measure execution gas or prove semantic equivalence.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ The analysis crate focuses on quantifying bytecode complexity through:
 2. **Stack Usage** - Maximum stack height measurements  
 3. **Dominator Analysis** - Control flow critical points using dominator/post-dominator overlap
 4. **Size Metrics** - Bytecode length tracking
-5. **Obfuscation Persistence** - Longest preserved byte sequences and n-gram diversity across randomized obfuscations
+5. **Obfuscation Persistence** - Conservative ordered-byte retention, longest contiguous runs, aligned differences, and pairwise n-gram similarity across randomized obfuscations
 
 ## Key Components
 
@@ -18,7 +18,7 @@ The analysis crate focuses on quantifying bytecode complexity through:
 
 Implements core metrics for evaluating bytecode complexity and transformation effectiveness:
 
-- **Bytecode Size** (`byte_len`) - Size of cleaned runtime bytecode in bytes
+- **Bytecode Size** (`byte_len`) - Encoded size of the current runtime CFG plus appended transform data
 - **Block Count** (`block_cnt`) - Number of basic blocks in the CFG (excluding Entry/Exit)
 - **Edge Count** (`edge_cnt`) - Number of edges in the CFG
 - **Maximum Stack Peak** (`max_stack_peak`) - Maximum stack height across all body blocks
@@ -29,7 +29,8 @@ Implements core metrics for evaluating bytecode complexity and transformation ef
 
 The crate provides these primary functions:
 
-- `collect_metrics(ir: &CfgIrBundle, report: &CleanReport) -> Result<Metrics, MetricsError>` - Collects all metrics from CFG and clean report
+- `collect_metrics(ir: &CfgIrBundle) -> Result<Metrics, Error>` - Collects metrics from the current CFG, including its current transformed byte length
+- `current_byte_len(ir: &CfgIrBundle) -> usize` - Measures the instruction stream and appended transform data directly
 - `dominator_pairs(g: &DiGraph<Block, EdgeType, Ix>) -> (DominatorMap<Ix>, DominatorMap<Ix>)` - Computes dominator and post-dominator pairs
 - `dom_overlap(doms: &DominatorMap<Ix>, pdoms: &DominatorMap<Ix>) -> f64` - Calculates dominator overlap fraction
 - `compare(before: &Metrics, after: &Metrics) -> f64` - Compares metrics between transformations
@@ -62,6 +63,9 @@ Runs multiple obfuscation attempts with randomized seeds and aggregates:
 - Summary statistics (average, median, percentiles, range, standard deviation)  
 - Histogram distribution of preserved lengths  
 - Top ten most frequent preserved sequences  
-- N-gram diversity (n = 2, 4, 8) across obfuscated outputs
+- Conservative longest-common-subsequence retention and aligned original-to-output difference
+- Pairwise aligned seed difference and pairwise n-gram set Jaccard similarity (n = 2, 4, 8)
+
+Pairwise n-gram Jaccard replaces the former pooled unique-window percentage, whose value decreased mechanically as more iterations were added. The report stores ratios in `0.0..=1.0` and renders them as percentages.
 
 Use `AnalysisConfig` to configure iterations, transform passes, and output path, then call `analyze_obfuscation(config)` to produce a markdown report. The CLI subcommand `azoth analyze` builds on this module.

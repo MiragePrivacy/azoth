@@ -3,23 +3,27 @@
 
 ## What is Azoth?
 
-Azoth is a deterministic EVM bytecode obfuscator designed to make Mirage's execution contracts indistinguishable from ordinary, unverified deployments on Ethereum. The name "[Azoth](https://www.wikiwand.com/en/articles/Azoth)" derives from medieval alchemy, where it referred to the universal solvent: a hypothetical substance capable of dissolving any material and serving as the essential agent of transformation.
+Azoth is a deterministic EVM bytecode obfuscator that varies deployment and runtime bytecode while preserving the behavior of supported contracts. Its research goal is to reduce static linkability and make transformed contracts resemble the broad population of unverified Ethereum deployments. Indistinguishability is an evaluation target, not a guarantee. The name "[Azoth](https://www.wikiwand.com/en/articles/Azoth)" derives from medieval alchemy, where it referred to the universal solvent: a hypothetical substance capable of dissolving any material and serving as the essential agent of transformation.
 
 ## How does it work?
 
 1. Dissection: decode the contract’s init/runtime layout, resolve sections, and build a control-flow graph of block bodies and jump targets.
 
-2. Transformation: apply deterministic transformations (e.g dispatcher transforms, block shuffling etc.) that changes the structure of the bytecode without blowing gas or size limits.
+2. Transformation: apply seed-derived passes transactionally. The production default is selector-only `FunctionDispatcher` when a supported dispatcher is detected, followed by low-density `JumpTrampoline` topology diversification and LCS-bounded `ClusterShuffle` layout diversification.
 
 3. Recovery: lower the rewritten runtime, patch init-code offsets, and mask any exact constructor-argument suffix so the final bytecode stays deployable without retaining an ABI-aligned plaintext tail.
 
-Azoth also incorporates a formal verification system that provides mathematical guarantees of functional equivalence between original and obfuscated contracts.
+The verification crate is experimental scaffolding. Contract-equivalence entry points currently return `Unsupported`; Azoth does not provide a formal proof or mathematical guarantee of semantic equivalence. Safety must instead be established with compiler-specific differential deployment and behavioral tests for the exact contract and pass set.
 
 Constructor-argument masking is an obfuscation boundary, not encryption: it defeats verbatim static suffix recovery, but public creation code can still be analyzed or executed to recover values. See the [constructor-argument security and benchmark report](docs/constructor-argument-obfuscation.md).
 
 ## Status
 
-Azoth is under active development: the parsing pipeline, CFG builder, and several core transforms are in daily use, while additional passes, verification tooling, and resilience metrics are landing incrementally as we harden the stack for production-facing deployments.
+Azoth is under active development. The current pipeline fails closed for unsupported self-code-layout and gas-observation patterns, including all `EXTCODE*` introspection because its target may alias the current contract, as well as ambiguous dispatcher selector uses, unsupported constructor layouts, and EVM size-limit violations. Those guards reduce known risks but do not establish equivalence for arbitrary bytecode. Treat generated deployments as experimental until they pass contract-specific differential tests.
+
+The optional JSON report records byte sizes and exact EVM code-deposit gas for the deployed runtime (`200 gas/byte`). It deliberately does not estimate creation calldata cost, EIP-3860 word cost, constructor execution, or runtime execution gas; measure those with an EVM harness.
+
+The current hardening results, benchmark methodology, red-team findings, and remaining limitations are documented in the [technical report](docs/AZOTH_TECHNICAL_REPORT.md) and [executive report](docs/AZOTH_EXECUTIVE_REPORT.md).
 
 ## Getting Started
 

@@ -1,6 +1,5 @@
 use crate::{Error, Result};
 use azoth_core::cfg_ir::{Block, BlockBody, CfgIrBundle, EdgeType};
-use azoth_core::strip::CleanReport;
 use petgraph::{
     algo::dominators::simple_fast,
     graph::NodeIndex,
@@ -18,7 +17,7 @@ use std::hash::Hash;
 /// states and guide transform selection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metrics {
-    /// Size of the cleaned runtime bytecode in bytes.
+    /// Encoded size of the current runtime instructions and appended transform data, in bytes.
     pub byte_len: usize,
     /// Number of basic blocks in the CFG (excluding Entry/Exit).
     pub block_cnt: usize,
@@ -32,20 +31,42 @@ pub struct Metrics {
     pub potency: f64,
 }
 
-/// Collects metrics from the cleaned runtime bytecode and CFG.
+/// Return the encoded size of the current runtime CFG and its appended data section.
+///
+/// This mirrors the obfuscator encoder's input: every body instruction is emitted once, followed
+/// by arithmetic-chain data when present. Unlike `CleanReport::clean_len`, this value changes as
+/// transforms add, remove, or widen instructions.
+pub fn current_byte_len(ir: &CfgIrBundle) -> usize {
+    let instruction_bytes: usize = ir
+        .cfg
+        .node_indices()
+        .filter_map(|node| match &ir.cfg[node] {
+            Block::Body(body) => Some(
+                body.instructions
+                    .iter()
+                    .map(|instruction| instruction.byte_size())
+                    .sum::<usize>(),
+            ),
+            _ => None,
+        })
+        .sum();
+    instruction_bytes + ir.arithmetic_chain_data.as_ref().map_or(0, Vec::len)
+}
+
+/// Collects metrics from the current runtime bytecode CFG.
 ///
 /// Computes bytecode size, block and edge counts, maximum stack height, dominator overlap, and
-/// potency score. Uses the `CleanReport` for size and `CfgIrBundle` for control flow and stack
-/// data. The potency score balances complexity (nodes, edges) against overlap to estimate analyst
-/// effort, with adjustments for gas efficiency.
+/// potency score. Byte size is derived from the current instructions and appended data, so a
+/// post-transform call measures the transformed representation. The potency score balances
+/// complexity (nodes, edges) against overlap to estimate analyst effort, with adjustments for gas
+/// efficiency.
 ///
 /// # Arguments
 /// * `ir` - The CFG and IR bundle from `cfg_ir::build_cfg_ir`.
-/// * `report` - The stripping report from `strip::strip_bytecode`.
 ///
 /// # Returns
 /// A `Metrics` struct with computed metrics, or an error if the CFG is invalid.
-pub fn collect_metrics(ir: &CfgIrBundle, report: &CleanReport) -> Result<Metrics> {
+pub fn collect_metrics(ir: &CfgIrBundle) -> Result<Metrics> {
     if ir.cfg.node_count() < 2 {
         return Err(Error::EmptyCfg);
     }
@@ -65,7 +86,7 @@ pub fn collect_metrics(ir: &CfgIrBundle, report: &CleanReport) -> Result<Metrics
     let max_stack_peak = max_stack_per_block(ir).values().max().copied().unwrap_or(0);
 
     Ok(Metrics {
-        byte_len: report.clean_len,
+        byte_len: current_byte_len(ir),
         block_cnt,
         edge_cnt: ir.cfg.edge_count(),
         max_stack_peak,
@@ -106,8 +127,8 @@ type DominatorMap<Ix> = HashMap<NodeIndex<Ix>, NodeIndex<Ix>>;
 /// Computes dominator and post-dominator pairs for the CFG.
 ///
 /// Uses `petgraph`’s `simple_fast` algorithm to compute immediate dominators and post-dominators,
-/// mapping nodes to their immediate dominator/post-dominator. The entry node (index 0) and exit
-/// node (last index) are used as roots for the respective analyses.
+/// mapping nodes to their immediate dominator/post-dominator. Roots are located by their
+/// `Block::Entry` and `Block::Exit` variants; stable-graph node indices are not layout contracts.
 ///
 /// # Arguments
 /// * `g` - The CFG graph from `CfgIrBundle`.
@@ -121,22 +142,29 @@ pub fn dominator_pairs<Ix>(
 where
     Ix: IndexType,
 {
-    let entry = NodeIndex::<Ix>::new(0);
-    let exit = NodeIndex::<Ix>::new(g.node_count() - 1);
-
-    let dominators_tree = simple_fast(g, entry);
     let mut dom_map = HashMap::new();
-    for n in g.node_indices() {
-        if let Some(idom) = dominators_tree.immediate_dominator(n) {
-            dom_map.insert(n, idom);
+    if let Some(entry) = g
+        .node_indices()
+        .find(|node| matches!(g.node_weight(*node), Some(Block::Entry)))
+    {
+        let dominators_tree = simple_fast(g, entry);
+        for n in g.node_indices() {
+            if let Some(idom) = dominators_tree.immediate_dominator(n) {
+                dom_map.insert(n, idom);
+            }
         }
     }
 
-    let post_dominators_tree = simple_fast(Reversed(g), exit);
     let mut pdom_map = HashMap::new();
-    for n in g.node_indices() {
-        if let Some(ipdom) = post_dominators_tree.immediate_dominator(n) {
-            pdom_map.insert(n, ipdom);
+    if let Some(exit) = g
+        .node_indices()
+        .find(|node| matches!(g.node_weight(*node), Some(Block::Exit)))
+    {
+        let post_dominators_tree = simple_fast(Reversed(g), exit);
+        for n in g.node_indices() {
+            if let Some(ipdom) = post_dominators_tree.immediate_dominator(n) {
+                pdom_map.insert(n, ipdom);
+            }
         }
     }
 
@@ -202,4 +230,31 @@ fn score(overlap: f64, nodes: usize, edges: usize) -> f64 {
 /// A score representing the transform’s effectiveness (positive is better).
 pub fn compare(before: &Metrics, after: &Metrics) -> f64 {
     after.potency - before.potency - 0.25 * (after.byte_len as f64 - before.byte_len as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use azoth_core::cfg_ir::BlockControl;
+
+    #[test]
+    fn post_dominator_root_is_the_exit_variant_not_the_last_node() {
+        let mut graph = StableDiGraph::<Block, EdgeType>::new();
+        let entry = graph.add_node(Block::Entry);
+        let exit = graph.add_node(Block::Exit);
+        // Exit is intentionally index 1 and this body is the last node.
+        let body = graph.add_node(Block::Body(BlockBody {
+            start_pc: 0,
+            instructions: Vec::new(),
+            max_stack: 0,
+            control: BlockControl::Terminal,
+        }));
+        graph.add_edge(entry, body, EdgeType::Fallthrough);
+        graph.add_edge(body, exit, EdgeType::Fallthrough);
+
+        let (_, post_dominators) = dominator_pairs(&graph);
+        assert_eq!(post_dominators.get(&body), Some(&exit));
+        assert_eq!(post_dominators.get(&entry), Some(&body));
+        assert!(!post_dominators.contains_key(&exit));
+    }
 }

@@ -9,6 +9,7 @@ use hex::encode;
 use revm::primitives::{B256, Bytes};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
+use std::collections::HashSet;
 
 /// Represents a runtime section with its original offset and length.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +135,55 @@ struct PushInfo {
     value: usize,
 }
 
+fn collect_previous_pushes(bytes: &[u8], start: usize, max: usize) -> Vec<PushInfo> {
+    let mut pushes = Vec::new();
+    let mut pc = 0usize;
+    while pc < start && pc < bytes.len() {
+        let opcode = bytes[pc];
+        if (0x60..=0x7f).contains(&opcode) {
+            let width = (opcode - 0x5f) as usize;
+            let end = pc + 1 + width;
+            if end > start || end > bytes.len() {
+                break;
+            }
+            let value = bytes[pc + 1..end]
+                .iter()
+                .fold(0usize, |acc, &byte| (acc << 8) | byte as usize);
+            pushes.push(PushInfo {
+                pos: pc,
+                width,
+                value,
+            });
+            pc = end;
+        } else {
+            pc += 1;
+        }
+    }
+    pushes.into_iter().rev().take(max).collect()
+}
+
+fn immutable_placeholder_offsets(runtime: &[u8]) -> HashSet<usize> {
+    let mut offsets = HashSet::new();
+    let mut pc = 0usize;
+    while pc < runtime.len() {
+        let opcode = runtime[pc];
+        if (0x60..=0x7f).contains(&opcode) {
+            let width = (opcode - 0x5f) as usize;
+            let end = pc + 1 + width;
+            if end > runtime.len() {
+                break;
+            }
+            if width == 32 && runtime[pc + 1..end].iter().all(|byte| *byte == 0) {
+                offsets.insert(pc + 1);
+            }
+            pc = end;
+        } else {
+            pc += 1;
+        }
+    }
+    offsets
+}
+
 fn opcode_positions(bytes: &[u8], target: u8) -> Vec<usize> {
     let mut positions = Vec::new();
     let mut pc = 0usize;
@@ -149,6 +199,236 @@ fn opcode_positions(bytes: &[u8], target: u8) -> Vec<usize> {
         };
     }
     positions
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InitSymbol {
+    Unknown(usize),
+    Constant {
+        value: usize,
+        origin: usize,
+    },
+    RuntimeBase,
+    RuntimeAddress {
+        offset: usize,
+        push_pos: usize,
+        width: usize,
+        add_pos: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct ProvenImmutableWrite {
+    push_pos: usize,
+    width: usize,
+    offset: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ImmutablePatchRegion {
+    codecopy: usize,
+    return_position: usize,
+    writes: Vec<ProvenImmutableWrite>,
+}
+
+fn pop_init_symbol(stack: &mut Vec<InitSymbol>, pc: usize) -> Result<InitSymbol, String> {
+    stack
+        .pop()
+        .ok_or_else(|| format!("init stack underflow at 0x{pc:x} during immutable proof"))
+}
+
+fn init_constant(value: &InitSymbol) -> Option<usize> {
+    match value {
+        InitSymbol::Constant { value, .. } => Some(*value),
+        _ => None,
+    }
+}
+
+/// Symbolically proves the straight-line solc 0.8.30 runtime-copy/immutable-write region.
+///
+/// The proof is deliberately provenance-sensitive. Equal numeric constants are not aliases:
+/// only the exact value copied (via DUP/SWAP) into CODECOPY's destination becomes
+/// `RuntimeBase`. This prevents unrelated `PUSH base; PUSH offset; ADD; MSTORE` arithmetic from
+/// being mistaken for a runtime-placeholder write.
+fn prove_immutable_patch_region(
+    init: &[u8],
+    target_codecopy: usize,
+    runtime_start: usize,
+    runtime_len: usize,
+) -> Result<Option<ImmutablePatchRegion>, String> {
+    let block_start = opcode_positions(init, 0x5b)
+        .into_iter()
+        .filter(|position| *position < target_codecopy)
+        .max()
+        .map_or(0, |position| position + 1);
+    let mut stack = Vec::<InitSymbol>::new();
+    let mut writes = Vec::new();
+    let mut matched_copy = false;
+    let mut pc = block_start;
+
+    while pc < init.len() {
+        let opcode = init[pc];
+        match opcode {
+            0x5f => {
+                stack.push(InitSymbol::Constant {
+                    value: 0,
+                    origin: pc,
+                });
+                pc += 1;
+            }
+            0x60..=0x7f => {
+                let width = (opcode - 0x5f) as usize;
+                let end = pc + 1 + width;
+                let Some(immediate) = init.get(pc + 1..end) else {
+                    return Ok(None);
+                };
+                let value = immediate.iter().try_fold(0usize, |value, byte| {
+                    value.checked_mul(256)?.checked_add(*byte as usize)
+                });
+                let Some(value) = value else {
+                    // A value wider than usize cannot be a runtime offset or length.
+                    stack.push(InitSymbol::Unknown(pc));
+                    pc = end;
+                    continue;
+                };
+                stack.push(InitSymbol::Constant { value, origin: pc });
+                pc = end;
+            }
+            0x80..=0x8f => {
+                let depth = (opcode - 0x7f) as usize;
+                if depth > stack.len() {
+                    return Ok(None);
+                }
+                stack.push(stack[stack.len() - depth].clone());
+                pc += 1;
+            }
+            0x90..=0x9f => {
+                let depth = (opcode - 0x8f) as usize;
+                if depth >= stack.len() {
+                    return Ok(None);
+                }
+                let top = stack.len() - 1;
+                stack.swap(top, top - depth);
+                pc += 1;
+            }
+            0x50 => {
+                pop_init_symbol(&mut stack, pc)?;
+                pc += 1;
+            }
+            0x51 => {
+                pop_init_symbol(&mut stack, pc)?;
+                stack.push(InitSymbol::Unknown(pc));
+                pc += 1;
+            }
+            0x01 => {
+                let first = pop_init_symbol(&mut stack, pc)?;
+                let second = pop_init_symbol(&mut stack, pc)?;
+                let address = match (&first, &second) {
+                    (
+                        InitSymbol::RuntimeBase,
+                        InitSymbol::Constant {
+                            value,
+                            origin: push_pos,
+                        },
+                    )
+                    | (
+                        InitSymbol::Constant {
+                            value,
+                            origin: push_pos,
+                        },
+                        InitSymbol::RuntimeBase,
+                    ) => {
+                        let width = (init[*push_pos] - 0x5f) as usize;
+                        InitSymbol::RuntimeAddress {
+                            offset: *value,
+                            push_pos: *push_pos,
+                            width,
+                            add_pos: pc,
+                        }
+                    }
+                    _ => InitSymbol::Unknown(pc),
+                };
+                stack.push(address);
+                pc += 1;
+            }
+            0x52 => {
+                let address = pop_init_symbol(&mut stack, pc)?;
+                pop_init_symbol(&mut stack, pc)?;
+                if let InitSymbol::RuntimeAddress {
+                    offset,
+                    push_pos,
+                    width,
+                    add_pos,
+                } = address
+                {
+                    if add_pos + 1 != pc {
+                        return Err(format!(
+                            "runtime-relative immutable address at 0x{add_pos:x} is not consumed by the immediately following MSTORE"
+                        ));
+                    }
+                    writes.push(ProvenImmutableWrite {
+                        push_pos,
+                        width,
+                        offset,
+                    });
+                }
+                pc += 1;
+            }
+            0x39 => {
+                let destination = pop_init_symbol(&mut stack, pc)?;
+                let source = pop_init_symbol(&mut stack, pc)?;
+                let size = pop_init_symbol(&mut stack, pc)?;
+                if pc == target_codecopy {
+                    if init_constant(&source) != Some(runtime_start)
+                        || init_constant(&size) != Some(runtime_len)
+                    {
+                        return Ok(None);
+                    }
+                    matched_copy = true;
+                    for value in &mut stack {
+                        if *value == destination {
+                            *value = InitSymbol::RuntimeBase;
+                        }
+                    }
+                }
+                pc += 1;
+            }
+            0xf3 => {
+                if !matched_copy {
+                    return Ok(None);
+                }
+                let offset = pop_init_symbol(&mut stack, pc)?;
+                let size = pop_init_symbol(&mut stack, pc)?;
+                if !matches!(offset, InitSymbol::RuntimeBase)
+                    || init_constant(&size) != Some(runtime_len)
+                {
+                    return Err(format!(
+                        "runtime RETURN at 0x{pc:x} does not reuse the proven CODECOPY base and length"
+                    ));
+                }
+                return Ok(Some(ImmutablePatchRegion {
+                    codecopy: target_codecopy,
+                    return_position: pc,
+                    writes,
+                }));
+            }
+            0x5b => pc += 1,
+            _ => {
+                if matched_copy {
+                    return Err(format!(
+                        "unsupported opcode 0x{opcode:02x} at 0x{pc:x} in Solidity immutable patch region"
+                    ));
+                }
+                return Ok(None);
+            }
+        }
+    }
+
+    if matched_copy {
+        Err("proven runtime CODECOPY has no following RETURN".to_string())
+    } else {
+        Ok(None)
+    }
 }
 
 fn patch_constructor_arg_base(
@@ -274,36 +554,6 @@ impl CleanReport {
                 "Init code structure: offsets 16-24: {:02x?}",
                 &init_bytes[16..=24]
             );
-        }
-
-        fn collect_previous_pushes(bytes: &[u8], start: usize, max: usize) -> Vec<PushInfo> {
-            let mut pushes = Vec::new();
-            let mut idx = start;
-            while idx > 0 && pushes.len() < max {
-                idx -= 1;
-                let opcode = bytes[idx];
-                if !(0x60..=0x7f).contains(&opcode) {
-                    continue;
-                }
-                let width = (opcode - 0x60 + 1) as usize;
-                if idx + 1 + width > bytes.len() || idx + 1 + width > start {
-                    continue;
-                }
-                let mut value = 0usize;
-                for &byte in &bytes[idx + 1..idx + 1 + width] {
-                    value = (value << 8) | byte as usize;
-                }
-                pushes.push(PushInfo {
-                    pos: idx,
-                    width,
-                    value,
-                });
-                if idx < width + 1 {
-                    break;
-                }
-                idx = idx.saturating_sub(width);
-            }
-            pushes
         }
 
         fn write_push_value(
@@ -443,19 +693,20 @@ impl CleanReport {
         Ok(())
     }
 
-    /// Patch immutable reference offsets in the init code.
+    /// Patch proven Solidity immutable-reference offsets in init code.
     ///
-    /// The Solidity compiler's init code writes immutable variable values into the
-    /// runtime bytecode at hardcoded byte offsets. When obfuscation transforms change
-    /// the runtime layout (e.g., PushSplit growing blocks), these offsets become stale.
-    /// This method detects the pattern `PUSH2 <offset>; ... ADD` in the init code and
-    /// updates each offset using the supplied byte-offset remapping closure.
-    ///
-    /// The `remap` closure takes an old byte offset within the runtime and returns the
-    /// new byte offset, or `None` if no mapping is available.
+    /// Solidity 0.8.30 copies the runtime into memory, then writes constructor
+    /// values into zero-filled `PUSH32` immediate placeholders with the exact
+    /// sequence `PUSH <runtime offset>; ADD; MSTORE`. Numeric equality with a
+    /// relocated runtime PC is not evidence: constructor arithmetic can contain
+    /// the same literal. We therefore require all of the compiler-shaped evidence:
+    /// a zero `PUSH32` placeholder, an exact ADD/MSTORE address sequence, and a
+    /// site between the matching runtime CODECOPY and its RETURN. Anything that
+    /// looks like an immutable write but cannot be relocated exactly fails closed.
     pub fn patch_init_immutable_refs(
         &mut self,
         remap: &dyn Fn(usize) -> Option<usize>,
+        original_runtime: &[u8],
     ) -> Result<(), String> {
         let runtime_start = self
             .runtime_layout
@@ -463,7 +714,34 @@ impl CleanReport {
             .map(|span| span.offset)
             .min()
             .ok_or("No runtime layout found")?;
-        let runtime_end = runtime_start + self.clean_len;
+        let deployed_suffix_len: usize = self
+            .removed
+            .iter()
+            .filter(|removed| {
+                removed.offset >= runtime_start
+                    && !matches!(removed.kind, SectionKind::ConstructorArgs)
+            })
+            .map(|removed| removed.data.len())
+            .sum();
+        let original_deployed_runtime_len = self.clean_len + deployed_suffix_len;
+        let allowed_offsets = immutable_placeholder_offsets(original_runtime);
+        if allowed_offsets.is_empty() {
+            return Ok(());
+        }
+        let mut required_offsets = HashSet::new();
+        for offset in &allowed_offsets {
+            let relocated = remap(*offset).ok_or_else(|| {
+                format!(
+                    "zero PUSH32 placeholder at runtime offset 0x{offset:x} has no proven relocation"
+                )
+            })?;
+            if relocated != *offset {
+                required_offsets.insert(*offset);
+            }
+        }
+        if required_offsets.is_empty() {
+            return Ok(());
+        }
 
         let init_section = self
             .removed
@@ -472,73 +750,93 @@ impl CleanReport {
             .ok_or("No Init section found")?;
 
         let mut init_bytes = init_section.data.to_vec();
-        let mut patched = 0usize;
-        let mut idx = 0usize;
-
-        while idx < init_bytes.len() {
-            let opcode = init_bytes[idx];
-            if !(0x60..=0x7f).contains(&opcode) {
-                idx += 1;
-                continue;
+        let mut regions = Vec::new();
+        for codecopy in opcode_positions(&init_bytes, 0x39) {
+            if let Some(region) = prove_immutable_patch_region(
+                &init_bytes,
+                codecopy,
+                runtime_start,
+                original_deployed_runtime_len,
+            )? {
+                regions.push(region);
             }
+        }
+        if regions.len() != 1 {
+            return Err(format!(
+                "immutable references require exactly one proven Solidity runtime CODECOPY/RETURN region; found {}",
+                regions.len()
+            ));
+        }
+        let region = regions.pop().expect("region count checked");
 
-            let width = (opcode - 0x60 + 1) as usize;
-            if idx + 1 + width > init_bytes.len() {
-                idx += 1;
-                continue;
-            }
-
-            let mut value = 0usize;
-            for &byte in &init_bytes[idx + 1..idx + 1 + width] {
-                value = (value << 8) | byte as usize;
-            }
-
-            // Check if the next non-stack-manipulation opcode is ADD (0x01).
-            // The pattern is: PUSH2 <offset>; (DUP/SWAP ops); ADD
-            let after = idx + 1 + width;
-            let is_add_target = if after < init_bytes.len() {
-                init_bytes[after] == 0x01 // ADD immediately follows
-            } else {
-                false
-            };
-
-            // Only remap values that look like runtime offsets followed by ADD
-            if is_add_target
-                && value >= 1
-                && value < runtime_end.saturating_sub(runtime_start)
-                && let Some(new_value) = remap(value)
-                && new_value != value
+        // A base-relative constructor write to any other moved runtime byte is
+        // another relocation obligation that this compiler-specific lowering
+        // does not understand. Reject it instead of silently moving only the
+        // zero-PUSH32 subset.
+        for write in &region.writes {
+            if !allowed_offsets.contains(&write.offset)
+                && remap(write.offset).is_some_and(|new| new != write.offset)
             {
-                // Check that new value fits in the same width
-                let max = if width >= std::mem::size_of::<usize>() {
-                    usize::MAX
-                } else {
-                    (1usize << (width * 8)) - 1
-                };
-                if new_value > max {
-                    tracing::warn!(
-                        "Immutable ref at init offset 0x{:x}: new value 0x{:x} exceeds \
-                         PUSH{} capacity",
-                        idx,
-                        new_value,
-                        width
-                    );
-                } else {
-                    for j in 0..width {
-                        let shift = (width - 1 - j) * 8;
-                        init_bytes[idx + 1 + j] = ((new_value >> shift) & 0xff) as u8;
-                    }
-                    tracing::debug!(
-                        "Patched immutable ref at init offset 0x{:x}: 0x{:x} -> 0x{:x}",
-                        idx,
-                        value,
-                        new_value
-                    );
-                    patched += 1;
-                }
+                return Err(format!(
+                    "unrecognized runtime-relative constructor write at offset 0x{:x}",
+                    write.offset
+                ));
             }
+        }
 
-            idx += 1 + width;
+        let mut candidates = Vec::<(usize, usize, usize)>::new();
+        for offset in &required_offsets {
+            let matching: Vec<_> = region
+                .writes
+                .iter()
+                .filter(|write| write.offset == *offset)
+                .collect();
+            if matching.len() != 1 {
+                return Err(format!(
+                    "relocated zero PUSH32 placeholder 0x{offset:x} requires exactly one proven Solidity immutable write; found {}",
+                    matching.len()
+                ));
+            }
+            let write = matching[0];
+            candidates.push((write.push_pos, write.width, write.offset));
+        }
+
+        let mut patched = 0usize;
+        for (position, width, value) in candidates {
+            if position <= region.codecopy || position >= region.return_position {
+                return Err(format!(
+                    "immutable-like reference at init offset 0x{position:x} is outside the proven runtime patch region"
+                ));
+            }
+            let new_value = remap(value).ok_or_else(|| {
+                format!(
+                    "immutable reference at init offset 0x{position:x} has no proven relocation for runtime offset 0x{value:x}"
+                )
+            })?;
+            let max = if width >= std::mem::size_of::<usize>() {
+                usize::MAX
+            } else {
+                (1usize << (width * 8)) - 1
+            };
+            if new_value > max {
+                return Err(format!(
+                    "immutable reference at init offset 0x{position:x}: relocated value 0x{new_value:x} exceeds PUSH{width} capacity"
+                ));
+            }
+            if new_value == value {
+                continue;
+            }
+            for byte_index in 0..width {
+                let shift = (width - 1 - byte_index) * 8;
+                init_bytes[position + 1 + byte_index] = ((new_value >> shift) & 0xff) as u8;
+            }
+            tracing::debug!(
+                "Patched proven immutable ref at init offset 0x{:x}: 0x{:x} -> 0x{:x}",
+                position,
+                value,
+                new_value
+            );
+            patched += 1;
         }
 
         if patched > 0 {

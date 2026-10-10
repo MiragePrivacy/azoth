@@ -16,12 +16,12 @@ async fn test_shuffle_reorders_blocks() {
         .await
         .unwrap();
 
-    let before = collect_metrics(&cfg_ir, &cfg_ir.clean_report).unwrap();
+    let before = collect_metrics(&cfg_ir).unwrap();
     let seed = Seed::generate();
     let mut rng = seed.create_deterministic_rng();
     let transform = Shuffle;
     let changed = transform.apply(&mut cfg_ir, &mut rng).unwrap();
-    let after = collect_metrics(&cfg_ir, &cfg_ir.clean_report).unwrap();
+    let after = collect_metrics(&cfg_ir).unwrap();
     assert!(changed, "Shuffle should reorder blocks");
     assert_eq!(
         before.byte_len, after.byte_len,

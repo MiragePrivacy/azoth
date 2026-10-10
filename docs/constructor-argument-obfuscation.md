@@ -30,7 +30,9 @@ The fix has four cooperating parts:
 
 The transform is automatically applied when an argument suffix exists. Callers may pass a full creation payload to `-D`, or pass compiler creation bytecode plus `--constructor-args <HEX>`. Result metadata exposes `constructor_args_obfuscated`, `constructor_argument_bytes`, and `constructor_decoder_bytes` so release tooling can enforce that expected sensitive inputs were actually handled.
 
-### Soundness and adversarial verification
+### Validation performed for this change
+
+The following results are a historical validation snapshot for constructor masking, not a formal equivalence proof or a guarantee for arbitrary contracts and pass combinations.
 
 | Check | Scope | Result |
 |---|---:|---:|
@@ -45,7 +47,7 @@ The transform is automatically applied when an argument suffix exists. Callers m
 
 The built-in campaign randomly varied seeds, constructor recipients and amounts, and transform selections. Its existing REVM oracle required every transformed payload whose original deployed successfully to deploy successfully as well. The focused differential test supplied the stronger byte-for-byte deployed-runtime comparison. Unsupported and ambiguous copy layouts have explicit rejection tests.
 
-The full workspace build reaches the external Z3-backed verification crate but cannot compile it in the current environment because the system `z3.h` header is not installed. This is an environment prerequisite, not a failure in the changed core/transform/CLI crates; those crates compile and test cleanly.
+The verification crate is now optional and builds without Z3 by default. Its contract-equivalence API returns `Unsupported`; enabling the prototype `z3` feature does not turn these constructor tests into a mathematical equivalence proof.
 
 ### Benchmark
 
@@ -65,4 +67,4 @@ Across 100 seeds, decoder size averaged 569.7 bytes (433 minimum, 711 maximum), 
 
 This mitigation closes the report's direct plaintext-suffix extraction path. It does not encrypt transaction calldata, hide values after the EVM decodes them, suppress storage/log/call/proof disclosures, remove Solidity CBOR metadata, or prevent dynamic/symbolic recovery. Teams requiring confidentiality from validators, archive nodes, or skilled reverse engineers need a cryptographic protocol change, which was explicitly outside this work.
 
-For rollout, require `constructor_args_obfuscated: true` whenever an expected deployment has constructor inputs, retain differential deployment testing for each production compiler/version, and treat a fail-closed unsupported-layout error as a release blocker. Re-run the benchmark on the exact production constructor payload because decoder overhead is argument-length dependent.
+For rollout experiments, require `constructor_args_obfuscated: true` whenever an expected deployment has constructor inputs, retain differential deployment and behavior testing for each contract/compiler/pass set, and treat a fail-closed unsupported-layout error as a release blocker. Re-run the benchmark on the exact payload because decoder overhead is argument-length dependent.

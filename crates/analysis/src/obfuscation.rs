@@ -1,7 +1,15 @@
+use crate::similarity::{
+    DistributionSummary, aligned_byte_difference_ratio, conservative_lcs_retention,
+    longest_common_contiguous_slice, pairwise_aligned_byte_differences, pairwise_ngram_jaccard,
+    summarize_distribution,
+};
 use azoth_core::seed::Seed;
 use azoth_transform::{
     Transform,
+    cluster_shuffle::ClusterShuffle,
     jump_address_transformer::JumpAddressTransformer,
+    jump_trampoline::JumpTrampoline,
+    literal_synthesis::LiteralSynthesis,
     obfuscator::{ObfuscationConfig, obfuscate_bytecode},
     opaque_predicate::OpaquePredicate,
     shuffle::Shuffle,
@@ -18,10 +26,9 @@ use thiserror::Error as ThisError;
 
 /// Default passes applied to each obfuscation run.
 ///
-/// Leaving this empty means the analysis reuses the obfuscator's native defaults
-/// (dispatcher when detected plus any user-specified transforms) instead of
-/// forcing deprecated transforms such as Shuffle.
-pub const DEFAULT_PASSES: &str = "";
+/// This mirrors the production CLI defaults so analysis experiments exercise the same transform
+/// portfolio users receive. The dispatcher remains automatic when detected.
+pub const DEFAULT_PASSES: &str = "jump_trampoline, cluster_shuffle";
 
 /// Configuration for running an obfuscation analysis experiment.
 #[derive(Debug, Clone)]
@@ -81,6 +88,32 @@ pub struct SequenceFrequency {
     pub sequence_hex: String,
 }
 
+/// Byte-similarity distributions reported as ratios in the range `0.0..=1.0`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SimilaritySummary {
+    /// Ordered original-byte retention for each output. Lower means more conservative change.
+    pub conservative_lcs_retention: DistributionSummary,
+    /// Position-aligned difference between the original and each output. Higher means more change.
+    pub aligned_original_difference: DistributionSummary,
+    /// Position-aligned difference for every unordered pair of generated outputs.
+    pub pairwise_aligned_difference: DistributionSummary,
+}
+
+/// Deployment-bytecode size and growth distribution across generated variants.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SizeSummary {
+    pub count: usize,
+    pub mean_bytes: f64,
+    pub median_bytes: f64,
+    pub percentile_95_bytes: f64,
+    pub min_bytes: usize,
+    pub max_bytes: usize,
+    pub mean_ratio: f64,
+    pub median_ratio: f64,
+    pub percentile_95_ratio: f64,
+    pub max_ratio: f64,
+}
+
 /// Final report produced by the analysis.
 #[derive(Debug, Clone, Serialize)]
 pub struct AnalysisReport {
@@ -91,10 +124,14 @@ pub struct AnalysisReport {
     pub seeds: Vec<String>,
     pub unique_seed_count: usize,
     pub sequence_lengths: Vec<usize>,
+    pub output_lengths: Vec<usize>,
     pub top_sequences: Vec<SequenceFrequency>,
     pub summary: SummaryStats,
+    pub similarity: SimilaritySummary,
+    pub size: SizeSummary,
     pub histogram: Vec<HistogramBucket>,
-    pub ngram_diversity: BTreeMap<usize, f64>,
+    /// Pairwise set Jaccard by n-gram width. Lower similarity means more seed-to-seed diversity.
+    pub pairwise_ngram_jaccard: BTreeMap<usize, DistributionSummary>,
     pub markdown_path: PathBuf,
 }
 
@@ -115,6 +152,25 @@ impl AnalysisReport {
             out,
             "**Transforms Observed:** {}  ",
             summarize_transforms(&self.transform_counts, self.iterations)
+        )?;
+        writeln!(out)?;
+        writeln!(out, "## Output Size Metrics")?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "- **Deployment bytes (mean / median / P95 / max):** {:.1} / {:.1} / {:.1} / {}",
+            self.size.mean_bytes,
+            self.size.median_bytes,
+            self.size.percentile_95_bytes,
+            self.size.max_bytes
+        )?;
+        writeln!(
+            out,
+            "- **Size ratio (mean / median / P95 / max):** {:.3}x / {:.3}x / {:.3}x / {:.3}x",
+            self.size.mean_ratio,
+            self.size.median_ratio,
+            self.size.percentile_95_ratio,
+            self.size.max_ratio
         )?;
         writeln!(out)?;
         writeln!(out, "## Summary Statistics")?;
@@ -168,6 +224,43 @@ impl AnalysisReport {
             out,
             "- **95th Percentile:** {:.2} bytes",
             self.summary.percentile_95
+        )?;
+        writeln!(out)?;
+        writeln!(out, "### Byte Similarity Metrics")?;
+        writeln!(out)?;
+        writeln!(
+            out,
+            "- **Conservative LCS retention (mean / median):** {:.2}% / {:.2}%",
+            self.similarity.conservative_lcs_retention.mean * 100.0,
+            self.similarity.conservative_lcs_retention.median * 100.0
+        )?;
+        writeln!(
+            out,
+            "- **Conservative changed-order lower bound (1 - mean retention):** {:.2}%",
+            (1.0 - self.similarity.conservative_lcs_retention.mean) * 100.0
+        )?;
+        writeln!(
+            out,
+            "- **Worst-sample changed-order lower bound (1 - maximum retention):** {:.2}%",
+            (1.0 - self.similarity.conservative_lcs_retention.max) * 100.0
+        )?;
+        writeln!(
+            out,
+            "- **Aligned original-to-output difference (mean / median):** {:.2}% / {:.2}%",
+            self.similarity.aligned_original_difference.mean * 100.0,
+            self.similarity.aligned_original_difference.median * 100.0
+        )?;
+        writeln!(
+            out,
+            "- **Pairwise seed-to-seed aligned difference (mean / median, {} pair{}):** {:.2}% / {:.2}%",
+            self.similarity.pairwise_aligned_difference.count,
+            if self.similarity.pairwise_aligned_difference.count == 1 {
+                ""
+            } else {
+                "s"
+            },
+            self.similarity.pairwise_aligned_difference.mean * 100.0,
+            self.similarity.pairwise_aligned_difference.median * 100.0
         )?;
         writeln!(out)?;
         writeln!(out, "## Top 10 Most Repeated Sequences")?;
@@ -228,15 +321,23 @@ impl AnalysisReport {
             }
         }
         writeln!(out)?;
-        writeln!(out, "## N-gram Diversity Analysis")?;
+        writeln!(out, "## Pairwise N-gram Similarity")?;
         writeln!(out)?;
         writeln!(
             out,
-            "Percentage of unique n-byte sequences across all obfuscated outputs."
+            "Set Jaccard similarity for every unordered output pair. Lower values indicate greater seed-to-seed local-pattern diversity and do not mechanically shrink when more iterations are added."
         )?;
         writeln!(out)?;
-        for (n, value) in &self.ngram_diversity {
-            writeln!(out, "- **{}-byte sequences:** {:.2}% unique", n, value)?;
+        for (n, summary) in &self.pairwise_ngram_jaccard {
+            writeln!(
+                out,
+                "- **{}-byte sequences ({} pair{}):** {:.2}% mean / {:.2}% median similarity",
+                n,
+                summary.count,
+                if summary.count == 1 { "" } else { "s" },
+                summary.mean * 100.0,
+                summary.median * 100.0
+            )?;
         }
         writeln!(out)?;
         writeln!(out, "## Distribution Histogram")?;
@@ -273,41 +374,55 @@ impl AnalysisReport {
         writeln!(out)?;
         writeln!(
             out,
-            "Average longest common sequence covers **{:.2}%** of the original bytecode.",
+            "Average longest common contiguous run covers **{:.2}%** of the original bytecode.",
             self.summary.preservation_ratio
         )?;
-        if self.summary.preservation_ratio < 10.0 {
+        writeln!(
+            out,
+            "Conservative ordered-byte retention averages **{:.2}%**; this is the safer byte-change baseline because insertions do not make surviving original order appear changed.",
+            self.similarity.conservative_lcs_retention.mean * 100.0
+        )?;
+        if self.similarity.conservative_lcs_retention.mean > 0.75 {
             writeln!(
                 out,
-                "This suggests strong obfuscation with minimal contiguous preservation."
+                "Most original byte order remains recoverable as a subsequence, even if contiguous runs are shorter."
             )?;
-        } else if self.summary.preservation_ratio < 25.0 {
+        } else if self.similarity.conservative_lcs_retention.mean > 0.5 {
             writeln!(
                 out,
-                "This suggests moderate obfuscation with noticeable contiguous preservation."
+                "A majority of original byte order remains recoverable as a subsequence."
             )?;
         } else {
             writeln!(
                 out,
-                "This suggests weaker obfuscation: significant contiguous blocks remain."
+                "Less than half of original byte order remains in the average output."
             )?;
         }
         writeln!(out)?;
-        let diversity = self.ngram_diversity.get(&8).copied().unwrap_or(0.0);
-        if diversity > 90.0 {
+        let ngram_similarity = self
+            .pairwise_ngram_jaccard
+            .get(&8)
+            .copied()
+            .unwrap_or_default();
+        if ngram_similarity.count == 0 {
             writeln!(
                 out,
-                "High 8-byte diversity indicates obfuscation yields highly varied byte patterns."
+                "At least two generated outputs are required for pairwise seed-diversity metrics."
             )?;
-        } else if diversity > 70.0 {
+        } else if ngram_similarity.median < 0.1 {
             writeln!(
                 out,
-                "Moderate 8-byte diversity indicates reasonable variation across seeds."
+                "Low median 8-byte Jaccard similarity indicates strongly varied local patterns across seeds."
+            )?;
+        } else if ngram_similarity.median < 0.3 {
+            writeln!(
+                out,
+                "Median 8-byte Jaccard similarity indicates moderate local-pattern overlap across seeds."
             )?;
         } else {
             writeln!(
                 out,
-                "Low 8-byte diversity indicates many recurring patterns across outputs."
+                "High median 8-byte Jaccard similarity indicates substantial recurring local patterns across seeds."
             )?;
         }
         writeln!(out)?;
@@ -362,6 +477,9 @@ pub async fn analyze_obfuscation(
     let mut sequence_lengths = Vec::with_capacity(config.iterations);
     let mut sequence_counter: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut obfuscated_bytecodes: Vec<Vec<u8>> = Vec::with_capacity(config.iterations);
+    let mut output_lengths = Vec::with_capacity(config.iterations);
+    let mut conservative_retentions = Vec::with_capacity(config.iterations);
+    let mut aligned_original_differences = Vec::with_capacity(config.iterations);
     let mut seeds = Vec::with_capacity(config.iterations);
     let mut transform_counts: BTreeMap<String, usize> = BTreeMap::new();
     transform_counts.insert("FunctionDispatcher".to_string(), 0);
@@ -386,7 +504,8 @@ pub async fn analyze_obfuscation(
                 Ok(result) => {
                     let transforms_applied = result.metadata.transforms_applied.clone();
                     let obfuscated_bytes = hex_to_bytes(&result.obfuscated_bytecode)?;
-                    let sequence = longest_common_substring(&original_bytes, &obfuscated_bytes);
+                    let sequence =
+                        longest_common_contiguous_slice(&original_bytes, &obfuscated_bytes);
                     if !sequence.is_empty() {
                         let entry = sequence_counter.entry(sequence.to_vec()).or_insert(0);
                         *entry += 1;
@@ -395,6 +514,15 @@ pub async fn analyze_obfuscation(
                         *transform_counts.entry(name).or_insert(0) += 1;
                     }
                     sequence_lengths.push(sequence.len());
+                    conservative_retentions.push(conservative_lcs_retention(
+                        &original_bytes,
+                        &obfuscated_bytes,
+                    ));
+                    aligned_original_differences.push(aligned_byte_difference_ratio(
+                        &original_bytes,
+                        &obfuscated_bytes,
+                    ));
+                    output_lengths.push(obfuscated_bytes.len());
                     obfuscated_bytecodes.push(obfuscated_bytes);
                     seeds.push(seed_hex);
                     break;
@@ -411,9 +539,23 @@ pub async fn analyze_obfuscation(
     }
 
     let summary = compute_summary_stats(&sequence_lengths, original_bytes.len());
+    let size = compute_size_summary(&output_lengths, original_bytes.len());
     let histogram = build_histogram(&sequence_lengths);
     let top_sequences = compute_top_sequences(sequence_counter);
-    let ngram_diversity = compute_ngram_diversity(&obfuscated_bytecodes, &[2, 4, 8]);
+    let similarity = SimilaritySummary {
+        conservative_lcs_retention: summarize_distribution(&conservative_retentions),
+        aligned_original_difference: summarize_distribution(&aligned_original_differences),
+        pairwise_aligned_difference: summarize_distribution(&pairwise_aligned_byte_differences(
+            &obfuscated_bytecodes,
+        )),
+    };
+    let pairwise_ngram_jaccard = [2, 4, 8]
+        .into_iter()
+        .map(|n| {
+            let values = pairwise_ngram_jaccard(&obfuscated_bytecodes, n);
+            (n, summarize_distribution(&values))
+        })
+        .collect();
 
     let unique_seed_count = seeds.iter().collect::<HashSet<_>>().len();
 
@@ -425,10 +567,13 @@ pub async fn analyze_obfuscation(
         seeds,
         unique_seed_count,
         sequence_lengths,
+        output_lengths,
         top_sequences,
         summary,
+        similarity,
+        size,
         histogram,
-        ngram_diversity,
+        pairwise_ngram_jaccard,
         markdown_path: config.report_path.clone(),
     };
 
@@ -436,6 +581,49 @@ pub async fn analyze_obfuscation(
     write_report(&config.report_path, &markdown)?;
 
     Ok(report)
+}
+
+fn compute_size_summary(lengths: &[usize], original_len: usize) -> SizeSummary {
+    if lengths.is_empty() {
+        return SizeSummary {
+            count: 0,
+            mean_bytes: 0.0,
+            median_bytes: 0.0,
+            percentile_95_bytes: 0.0,
+            min_bytes: 0,
+            max_bytes: 0,
+            mean_ratio: 0.0,
+            median_ratio: 0.0,
+            percentile_95_ratio: 0.0,
+            max_ratio: 0.0,
+        };
+    }
+
+    let mut sorted = lengths.to_vec();
+    sorted.sort_unstable();
+    let mean_bytes = lengths.iter().sum::<usize>() as f64 / lengths.len() as f64;
+    let median_bytes = percentile(&sorted, 50.0);
+    let percentile_95_bytes = percentile(&sorted, 95.0);
+    let ratio = |bytes: f64| {
+        if original_len == 0 {
+            0.0
+        } else {
+            bytes / original_len as f64
+        }
+    };
+
+    SizeSummary {
+        count: lengths.len(),
+        mean_bytes,
+        median_bytes,
+        percentile_95_bytes,
+        min_bytes: sorted[0],
+        max_bytes: *sorted.last().expect("non-empty lengths"),
+        mean_ratio: ratio(mean_bytes),
+        median_ratio: ratio(median_bytes),
+        percentile_95_ratio: ratio(percentile_95_bytes),
+        max_ratio: ratio(*sorted.last().expect("non-empty lengths") as f64),
+    }
 }
 
 fn write_report(path: &Path, contents: &str) -> Result<(), AnalysisError> {
@@ -452,48 +640,6 @@ fn hex_to_bytes(input: &str) -> Result<Vec<u8>, FromHexError> {
     let trimmed = input.trim();
     let without_prefix = trimmed.strip_prefix("0x").unwrap_or(trimmed);
     hex::decode(without_prefix)
-}
-
-fn longest_common_substring<'a>(a: &'a [u8], b: &'a [u8]) -> &'a [u8] {
-    let mut low = 0usize;
-    let mut high = a.len().min(b.len());
-    let mut best: &[u8] = &[];
-
-    while low <= high {
-        let mid = (low + high) / 2;
-        if let Some(candidate) = has_common_of_length(a, b, mid) {
-            if candidate.len() > best.len() {
-                best = candidate;
-            }
-            low = mid + 1;
-        } else {
-            if mid == 0 {
-                break;
-            }
-            high = mid - 1;
-        }
-    }
-
-    best
-}
-
-fn has_common_of_length<'a>(a: &'a [u8], b: &[u8], len: usize) -> Option<&'a [u8]> {
-    if len == 0 {
-        return Some(&[]);
-    }
-    if len > a.len() || len > b.len() {
-        return None;
-    }
-    let mut set: HashSet<&[u8]> = HashSet::with_capacity(a.len().saturating_sub(len) + 1);
-    for window in a.windows(len) {
-        set.insert(window);
-    }
-    for window in b.windows(len) {
-        if let Some(&candidate) = set.get(window) {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 fn compute_summary_stats(lengths: &[usize], original_len: usize) -> SummaryStats {
@@ -612,34 +758,6 @@ fn compute_top_sequences(counter: HashMap<Vec<u8>, usize>) -> Vec<SequenceFreque
     frequencies
 }
 
-fn compute_ngram_diversity(bytecodes: &[Vec<u8>], ns: &[usize]) -> BTreeMap<usize, f64> {
-    let mut map = BTreeMap::new();
-    for &n in ns {
-        if n == 0 {
-            map.insert(n, 0.0);
-            continue;
-        }
-        let mut total = 0usize;
-        let mut unique: HashSet<Vec<u8>> = HashSet::new();
-        for code in bytecodes {
-            if code.len() < n {
-                continue;
-            }
-            total += code.len() - n + 1;
-            for window in code.windows(n) {
-                unique.insert(window.to_vec());
-            }
-        }
-        let diversity = if total == 0 {
-            0.0
-        } else {
-            unique.len() as f64 / total as f64 * 100.0
-        };
-        map.insert(n, diversity);
-    }
-    map
-}
-
 fn sorted_transform_entries(counts: &BTreeMap<String, usize>) -> Vec<(String, usize)> {
     let mut entries: Vec<(String, usize)> = counts
         .iter()
@@ -690,6 +808,9 @@ fn parse_passes(passes: &str) -> Result<Vec<TransformSpec>, AnalysisError> {
             "shuffle" => TransformSpec::Shuffle,
             "opaque_pred" | "opaque_predicate" => TransformSpec::OpaquePredicate,
             "jump_transform" | "jump_addr" => TransformSpec::JumpTransform,
+            "jump_trampoline" | "trampoline" => TransformSpec::JumpTrampoline,
+            "literal_synthesis" | "literal_synth" => TransformSpec::LiteralSynthesis,
+            "cluster_shuffle" => TransformSpec::ClusterShuffle,
             other => return Err(AnalysisError::InvalidPass(other.to_string())),
         };
         specs.push(spec);
@@ -701,6 +822,9 @@ enum TransformSpec {
     Shuffle,
     OpaquePredicate,
     JumpTransform,
+    JumpTrampoline,
+    LiteralSynthesis,
+    ClusterShuffle,
 }
 
 impl TransformSpec {
@@ -709,6 +833,9 @@ impl TransformSpec {
             TransformSpec::Shuffle => Box::new(Shuffle),
             TransformSpec::OpaquePredicate => Box::new(OpaquePredicate::new()),
             TransformSpec::JumpTransform => Box::new(JumpAddressTransformer::new()),
+            TransformSpec::JumpTrampoline => Box::new(JumpTrampoline::new()),
+            TransformSpec::LiteralSynthesis => Box::new(LiteralSynthesis::new()),
+            TransformSpec::ClusterShuffle => Box::new(ClusterShuffle::new()),
         }
     }
 }
@@ -718,10 +845,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn longest_common_substring_finds_match() {
+    fn longest_common_contiguous_slice_finds_match() {
         let a = b"abcdefg";
         let b = b"xyzabcuvw";
-        let result = longest_common_substring(a, b);
+        let result = longest_common_contiguous_slice(a, b);
         assert_eq!(result, b"abc");
     }
 
@@ -730,5 +857,25 @@ mod tests {
         let values = vec![10, 20, 30, 40];
         assert_eq!(percentile(&values, 25.0), 17.5);
         assert_eq!(percentile(&values, 75.0), 32.5);
+    }
+
+    #[test]
+    fn analysis_defaults_match_the_production_transform_portfolio() {
+        let names: Vec<_> = parse_passes(DEFAULT_PASSES)
+            .expect("default passes parse")
+            .iter()
+            .map(|pass| pass.build().name())
+            .collect();
+        assert_eq!(names, ["JumpTrampoline", "ClusterShuffle"]);
+    }
+
+    #[test]
+    fn size_summary_reports_growth_distribution() {
+        let summary = compute_size_summary(&[100, 110, 120, 200], 100);
+        assert_eq!(summary.count, 4);
+        assert_eq!(summary.median_bytes, 115.0);
+        assert_eq!(summary.max_bytes, 200);
+        assert_eq!(summary.median_ratio, 1.15);
+        assert_eq!(summary.max_ratio, 2.0);
     }
 }

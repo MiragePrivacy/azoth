@@ -1,10 +1,9 @@
-use crate::arithmetic_chain::ArithmeticChain;
+use crate::cluster_shuffle::ClusterShuffle;
 use crate::constructor_args::obfuscate_constructor_args;
 use crate::function_dispatcher::FunctionDispatcher;
-use crate::push_split::PushSplit;
-use crate::slot_shuffle::SlotShuffle;
-use crate::string_obfuscate::StringObfuscate;
-use crate::Transform;
+use crate::jump_trampoline::JumpTrampoline;
+use crate::metadata::diversify_metadata;
+use crate::{has_gas_observation, has_self_code_layout_semantics, Transform};
 use azoth_core::seed::Seed;
 use azoth_core::{
     cfg_ir::{self, snapshot_bundle_with_runtime, Block, CfgIrDiff, OperationKind, TraceEvent},
@@ -58,7 +57,7 @@ impl ObfuscationConfig {
     pub fn with_seed(seed: Seed) -> Self {
         Self {
             seed,
-            transforms: Vec::new(),
+            transforms: production_transforms(),
             preserve_unknown_opcodes: true,
         }
     }
@@ -68,15 +67,17 @@ impl Default for ObfuscationConfig {
     fn default() -> Self {
         Self {
             seed: Seed::generate(),
-            transforms: vec![
-                Box::new(ArithmeticChain::new()),
-                Box::new(PushSplit::new()),
-                Box::new(SlotShuffle::new()),
-                Box::new(StringObfuscate::new()),
-            ],
+            transforms: production_transforms(),
             preserve_unknown_opcodes: true,
         }
     }
+}
+
+fn production_transforms() -> Vec<Box<dyn Transform>> {
+    vec![
+        Box::new(JumpTrampoline::new()),
+        Box::new(ClusterShuffle::new()),
+    ]
 }
 
 impl std::fmt::Debug for ObfuscationConfig {
@@ -102,6 +103,12 @@ pub struct ObfuscationResult {
     pub original_size: usize,
     /// Obfuscated bytecode size in bytes  
     pub obfuscated_size: usize,
+    /// Original deployed runtime size, including compiler auxdata and padding.
+    #[serde(default)]
+    pub original_runtime_size: usize,
+    /// Obfuscated deployed runtime size, including compiler auxdata and padding.
+    #[serde(default)]
+    pub obfuscated_runtime_size: usize,
     /// Size increase as percentage
     pub size_increase_percentage: f64,
     /// Number of unknown opcodes preserved
@@ -125,8 +132,17 @@ pub struct ObfuscationResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObfuscationMetadata {
+    /// Exact generation seed required to reproduce this variant.
+    #[serde(default)]
+    pub generation_seed: String,
     /// Names of transforms that were applied
     pub transforms_applied: Vec<String>,
+    /// Every pass that was attempted, including passes which safely made no change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transforms_attempted: Vec<String>,
+    /// Transactional outcome and committed structural delta for each attempted pass.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transform_outcomes: Vec<TransformOutcome>,
     /// Whether the size limit was exceeded
     pub size_limit_exceeded: bool,
     /// Whether unknown opcodes were preserved
@@ -140,6 +156,22 @@ pub struct ObfuscationMetadata {
     /// Number of seed-varied decoder bytes inserted into init code.
     #[serde(default)]
     pub constructor_decoder_bytes: usize,
+    /// Number of compiler metadata content digests diversified for this seed.
+    #[serde(default)]
+    pub metadata_digests_diversified: usize,
+}
+
+/// Truthful result of one transactionally executed transform.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransformOutcome {
+    /// Transform name.
+    pub name: String,
+    /// `applied` or `no_change`.
+    pub status: String,
+    /// Committed body-block count delta.
+    pub blocks_delta: i32,
+    /// Committed instruction count delta.
+    pub instructions_delta: i32,
 }
 
 /// Main obfuscation pipeline
@@ -164,9 +196,32 @@ pub async fn obfuscate_bytecode(
     tracing::debug!("  Input size: {} bytes", original_size);
 
     // Step 2: Analyze instructions for unknown opcodes
-    let (total_instructions, unknown_count, unknown_types) = analyze_instructions(&instructions);
+    let executable_instructions: Vec<_> = instructions
+        .iter()
+        .filter(|instruction| {
+            sections.iter().any(|section| {
+                matches!(
+                    section.kind,
+                    detection::SectionKind::Init | detection::SectionKind::Runtime
+                ) && instruction.pc >= section.offset
+                    && instruction.pc < section.offset + section.len
+            })
+        })
+        .cloned()
+        .collect();
+    let (total_instructions, unknown_count, unknown_types) =
+        analyze_instructions(&executable_instructions, &bytes);
     tracing::debug!("  Total instructions: {}", total_instructions);
     tracing::debug!("  Unknown opcodes: {}", unknown_count);
+    if unknown_count > 0 && !config.preserve_unknown_opcodes {
+        return Err(ObfuscationError::from_err(
+            format!(
+                "input contains {unknown_count} decoder-unknown opcode(s) ({}) but preserve_unknown_opcodes is disabled",
+                unknown_types.join(", ")
+            ),
+            &cfg_ir.trace,
+        ));
+    }
 
     // Log section info
     tracing::debug!(
@@ -181,6 +236,18 @@ pub async fn obfuscate_bytecode(
         "  Bytes saved by stripping: {}",
         cfg_ir.clean_report.bytes_saved
     );
+    let original_runtime_size: usize = sections
+        .iter()
+        .filter(|section| {
+            matches!(
+                section.kind,
+                detection::SectionKind::Runtime
+                    | detection::SectionKind::Auxdata
+                    | detection::SectionKind::Padding
+            )
+        })
+        .map(|section| section.len)
+        .sum();
 
     // Track initial metrics
     let original_block_count = cfg_ir.cfg.node_count();
@@ -219,8 +286,6 @@ pub async fn obfuscate_bytecode(
         detection::detect_function_dispatcher(&instructions)
     };
 
-    let has_dispatcher = dispatcher_info.is_some();
-
     // Store dispatcher info in bundle for snapshot/TUI visualization
     cfg_ir.dispatcher_info = dispatcher_info.clone();
 
@@ -239,34 +304,51 @@ pub async fn obfuscate_bytecode(
         );
     }
 
-    let user_transform_names: Vec<String> = config
-        .transforms
-        .iter()
-        .map(|t| t.name().to_string())
-        .collect();
-
     // Add user-specified transforms (this moves config.transforms)
     all_transforms.extend(config.transforms);
 
-    // Track which transforms were applied (including the mandatory ones if dispatcher exists)
-    let mut transforms_applied: Vec<String> = Vec::new();
-    if has_dispatcher {
-        transforms_applied.push("FunctionDispatcher".to_string());
+    // Runtime code-layout introspection needs typed data/code relocation and alias
+    // analysis which this IR cannot yet prove. EXTCODE* is conservatively included
+    // because its target may be self.
+    let self_code_sensitive = has_self_code_layout_semantics(&cfg_ir);
+    if self_code_sensitive && !all_transforms.is_empty() {
+        return Err(ObfuscationError::from_err(
+            "runtime uses PC/CODESIZE/CODECOPY/EXTCODESIZE/EXTCODECOPY/EXTCODEHASH; typed relocation or self-address alias analysis is not supported",
+            &cfg_ir.trace,
+        ));
     }
-    transforms_applied.extend(user_transform_names);
+    if let Some(transform) = has_gas_observation(&cfg_ir)
+        .then(|| {
+            all_transforms
+                .iter()
+                .find(|transform| !transform.supports_gas_observation())
+        })
+        .flatten()
+    {
+        return Err(ObfuscationError::from_err(
+            format!(
+                "transform {} may add executed gas before a GAS observation; only gas-neutral selector replacement/layout shuffling and the self-skipping JumpTrampoline are supported",
+                transform.name()
+            ),
+            &cfg_ir.trace,
+        ));
+    }
+
+    // Track only transforms whose changes were transactionally committed.
+    let mut transforms_applied: Vec<String> = Vec::new();
+    let mut transforms_attempted: Vec<String> = Vec::new();
+    let mut transform_outcomes: Vec<TransformOutcome> = Vec::new();
 
     // Track individual transform effects
     let mut transform_change_log = Vec::new();
     let mut any_transform_changed = false;
 
     if !all_transforms.is_empty() {
-        // Create deterministic RNG from cryptographic seed
-        let mut shared_rng = config.seed.create_deterministic_rng();
-
         tracing::debug!("Applying {} transforms", all_transforms.len(),);
 
         for (i, transform) in all_transforms.iter().enumerate() {
             let transform_name = transform.name();
+            transforms_attempted.push(transform_name.to_string());
             let pre_instruction_count = count_instructions_in_cfg(&cfg_ir);
             let pre_block_count = cfg_ir.cfg.node_count();
 
@@ -278,28 +360,46 @@ pub async fn obfuscate_bytecode(
                 pre_instruction_count
             );
 
-            // Record transform start for trace grouping
-            cfg_ir.record_transform_start(transform_name);
+            // Execute against a clone. Errors abort the whole pipeline and a
+            // false/no-change result cannot leak partial mutations.
+            let mut candidate = cfg_ir.clone();
+            candidate.record_transform_start(transform_name);
+            let domain = format!("{transform_name}:{i}");
+            let mut transform_rng = config.seed.create_domain_rng(domain.as_bytes());
+            let transform_changed = transform
+                .apply(&mut candidate, &mut transform_rng)
+                .map_err(|error| {
+                    ObfuscationError::from_err(
+                        format!("transform {transform_name} failed: {error}"),
+                        &candidate.trace,
+                    )
+                })?;
+            candidate.record_transform_end(transform_name);
 
-            // Apply transform with deterministic RNG
-            let transform_changed = match transform.apply(&mut cfg_ir, &mut shared_rng) {
-                Ok(changed) => {
-                    tracing::debug!("    Result: changed={}", changed);
-                    changed
-                }
-                Err(e) => {
-                    tracing::error!("    Transform {} failed: {}", transform_name, e);
-                    false
-                }
+            let (post_instruction_count, post_block_count) = if transform_changed {
+                let counts = (
+                    count_instructions_in_cfg(&candidate),
+                    candidate.cfg.node_count(),
+                );
+                cfg_ir = candidate;
+                transforms_applied.push(transform_name.to_string());
+                counts
+            } else {
+                (pre_instruction_count, pre_block_count)
             };
-
-            // Record transform end for trace grouping
-            cfg_ir.record_transform_end(transform_name);
-
-            let post_instruction_count = count_instructions_in_cfg(&cfg_ir);
-            let post_block_count = cfg_ir.cfg.node_count();
             let instructions_delta = post_instruction_count as i32 - pre_instruction_count as i32;
             let blocks_delta = post_block_count as i32 - pre_block_count as i32;
+
+            transform_outcomes.push(TransformOutcome {
+                name: transform_name.to_string(),
+                status: if transform_changed {
+                    "applied".to_string()
+                } else {
+                    "no_change".to_string()
+                },
+                blocks_delta,
+                instructions_delta,
+            });
 
             transform_change_log.push(format!(
                 "{transform_name}: changed={transform_changed}, blocks_delta={blocks_delta:+}, instructions_delta={instructions_delta:+}",
@@ -342,6 +442,14 @@ pub async fn obfuscate_bytecode(
         tracing::debug!("  {}", log_entry);
     }
 
+    // Build typed relocation evidence while instruction PCs still refer to the
+    // original layout. This follows stack-carried Solidity return addresses
+    // across CFG edges and rejects unresolved dynamic jumps or mixed data/address
+    // uses instead of guessing from numeric equality with a JUMPDEST.
+    let proven_jump_pushes = cfg_ir
+        .prove_jump_address_pushes()
+        .map_err(|error| ObfuscationError::from_err(error, &cfg_ir.trace))?;
+
     // Capture old instruction layout before reindexing (needed for immutable ref patching).
     // For each runtime instruction, record (old_pc, byte_size) so we can build a byte-level
     // displacement map after reindex_pcs remaps instruction PCs.
@@ -373,16 +481,35 @@ pub async fn obfuscate_bytecode(
         .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
     tracing::debug!("  PC reindexing complete: {} mappings", pc_mapping.len());
 
+    // PUSH0 can encode only runtime-relative target zero. It is safe only
+    // while the original runtime entry remains the transformed runtime entry;
+    // unlike PUSH1 0x00, there is no immediate to rewrite.
+    if proven_jump_pushes.uses_push0_target {
+        let old_runtime_start = old_runtime_bounds.map(|(start, _)| start).unwrap_or(0);
+        let new_runtime_start = cfg_ir.runtime_bounds.map(|(start, _)| start).unwrap_or(0);
+        let relocated_entry = pc_mapping.get(&old_runtime_start).copied().ok_or_else(|| {
+            ObfuscationError::from_err(
+                "PUSH0 jump target has no runtime-entry relocation",
+                &cfg_ir.trace,
+            )
+        })?;
+        if relocated_entry != new_runtime_start {
+            return Err(ObfuscationError::from_err(
+                "PUSH0 jump target cannot be relocated away from runtime-relative PC zero",
+                &cfg_ir.trace,
+            ));
+        }
+    }
+
     // Patch jump immediates using the PC mapping
     cfg_ir
         .patch_jump_immediates(&pc_mapping, old_runtime_bounds)
         .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
     tracing::debug!("  Patched jump immediates after PC reindexing");
 
-    // Remap orphan jump-address PUSHes (e.g. return addresses for internal function calls)
-    // that are not part of any recognized jump pattern.
+    // Remap only PUSHes proven to flow exclusively into JUMP/JUMPI targets.
     cfg_ir
-        .remap_orphan_jump_pushes(&pc_mapping, old_runtime_bounds)
+        .remap_proven_jump_pushes(&proven_jump_pushes.pushes, &pc_mapping, old_runtime_bounds)
         .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
 
     // Re-apply dispatcher jump target patches with OLD controller PCs (before updating)
@@ -633,11 +760,29 @@ pub async fn obfuscate_bytecode(
         );
     }
 
-    // Step 7b: Patch immutable reference offsets in init code.
-    // When transforms grow the runtime (e.g., PushSplit), the init code's hardcoded byte
-    // offsets for writing immutable variables become stale. Build a byte-level displacement
-    // map from the old instruction layout and pc_mapping, then patch the init code.
+    // Step 7b: Patch compiler-proven immutable reference offsets in init code.
+    // Build a byte-level displacement map, but only apply it to exact Solidity
+    // PUSH32-placeholder/ADD/MSTORE sites in the runtime CODECOPY/RETURN region.
     {
+        let mut original_clean_runtime = Vec::with_capacity(cfg_ir.clean_report.clean_len);
+        for span in &cfg_ir.clean_report.runtime_layout {
+            let end = span.offset.checked_add(span.len).ok_or_else(|| {
+                ObfuscationError::from_err("original runtime span overflowed", &cfg_ir.trace)
+            })?;
+            let source = bytes.get(span.offset..end).ok_or_else(|| {
+                ObfuscationError::from_err(
+                    "original runtime span is outside deployment bytecode",
+                    &cfg_ir.trace,
+                )
+            })?;
+            original_clean_runtime.extend_from_slice(source);
+        }
+        if original_clean_runtime.len() != cfg_ir.clean_report.clean_len {
+            return Err(ObfuscationError::from_err(
+                "original clean-runtime length disagrees with strip report",
+                &cfg_ir.trace,
+            ));
+        }
         let new_runtime_start = cfg_ir.runtime_bounds.map(|(s, _)| s).unwrap_or(0);
         // Build byte-level remap: for each byte in the old runtime, compute where it lands
         // in the new runtime. We build a sorted list of (old_rel_offset, new_rel_offset) for
@@ -674,14 +819,16 @@ pub async fn obfuscate_bytecode(
             }
         };
 
-        if let Err(e) = cfg_ir.clean_report.patch_init_immutable_refs(&remap) {
-            tracing::warn!("Failed to patch init immutable refs: {}", e);
-        }
+        cfg_ir
+            .clean_report
+            .patch_init_immutable_refs(&remap, &original_clean_runtime)
+            .map_err(|error| ObfuscationError::from_err(error, &cfg_ir.trace))?;
     }
 
     // Step 7c: Mask an exact constructor-argument suffix and inject a seed-varied decoder.
     // This runs after init immutable patching so its insertion can remap all existing init jumps
     // once. It fails closed when arguments exist but their copy site is unsupported.
+    transforms_attempted.push("ConstructorArgs".to_string());
     let constructor_args =
         obfuscate_constructor_args(&mut cfg_ir.clean_report, config.seed.as_bytes())
             .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
@@ -693,6 +840,39 @@ pub async fn obfuscate_bytecode(
             constructor_args.decoder_bytes
         );
     }
+    transform_outcomes.push(TransformOutcome {
+        name: "ConstructorArgs".to_string(),
+        status: if constructor_args.applied {
+            "applied".to_string()
+        } else {
+            "no_change".to_string()
+        },
+        blocks_delta: 0,
+        instructions_delta: 0,
+    });
+
+    // Preserve the ordinary Solidity CBOR envelope and compiler marker while
+    // removing the source-linked digest shared by every seed. Self-code-aware
+    // runtimes were rejected above, so this cannot affect runtime CODECOPY data.
+    transforms_attempted.push("MetadataDigest".to_string());
+    let metadata_digests_diversified = if self_code_sensitive {
+        0
+    } else {
+        diversify_metadata(&mut cfg_ir.clean_report, config.seed.as_bytes())
+    };
+    if metadata_digests_diversified > 0 {
+        transforms_applied.push("MetadataDigest".to_string());
+    }
+    transform_outcomes.push(TransformOutcome {
+        name: "MetadataDigest".to_string(),
+        status: if metadata_digests_diversified > 0 {
+            "applied".to_string()
+        } else {
+            "no_change".to_string()
+        },
+        blocks_delta: 0,
+        instructions_delta: 0,
+    });
 
     // Step 8: Reassemble final bytecode (init + runtime with data section + auxdata)
     let final_bytecode = cfg_ir
@@ -716,13 +896,15 @@ pub async fn obfuscate_bytecode(
         tracing::warn!("  Transform change flags: {:?}", transform_change_log);
     }
 
-    // Step 9: Detailed gas analysis
+    // Step 9: Account only for the byte-dependent portion of transaction calldata.
+    // This is not a deployment-gas estimate: the transaction base charge, create
+    // charge, init execution, code deposit, and EIP-3860 are separate.
     let original_zero_bytes = bytes.iter().filter(|&&b| b == 0).count();
     let original_nonzero_bytes = bytes.len() - original_zero_bytes;
     let obfuscated_zero_bytes = final_bytecode.iter().filter(|&&b| b == 0).count();
     let obfuscated_nonzero_bytes = final_bytecode.len() - obfuscated_zero_bytes;
 
-    tracing::debug!("Gas analysis breakdown:");
+    tracing::debug!("Creation-input calldata byte-gas breakdown:");
     tracing::debug!(
         "  Original: {} zeros, {} non-zeros",
         original_zero_bytes,
@@ -734,15 +916,25 @@ pub async fn obfuscate_bytecode(
         obfuscated_nonzero_bytes
     );
 
-    let original_gas =
-        21_000 + (original_zero_bytes as u64 * 4) + (original_nonzero_bytes as u64 * 16);
-    let obfuscated_gas =
-        21_000 + (obfuscated_zero_bytes as u64 * 4) + (obfuscated_nonzero_bytes as u64 * 16);
-    let gas_delta = obfuscated_gas as i64 - original_gas as i64;
+    let original_calldata_byte_gas =
+        (original_zero_bytes as u64 * 4) + (original_nonzero_bytes as u64 * 16);
+    let obfuscated_calldata_byte_gas =
+        (obfuscated_zero_bytes as u64 * 4) + (obfuscated_nonzero_bytes as u64 * 16);
+    let calldata_byte_gas_delta =
+        obfuscated_calldata_byte_gas as i64 - original_calldata_byte_gas as i64;
 
-    tracing::debug!("  Original gas: {}", original_gas);
-    tracing::debug!("  Obfuscated gas: {}", obfuscated_gas);
-    tracing::debug!("  Gas delta: {:+}", gas_delta);
+    tracing::debug!(
+        "  Original creation-input calldata byte gas: {}",
+        original_calldata_byte_gas
+    );
+    tracing::debug!(
+        "  Obfuscated creation-input calldata byte gas: {}",
+        obfuscated_calldata_byte_gas
+    );
+    tracing::debug!(
+        "  Creation-input calldata byte-gas delta: {:+}",
+        calldata_byte_gas_delta
+    );
 
     // Step 10: Enforce protocol size limits. Constructor arguments are part of the creation
     // transaction's initcode for EIP-3860 accounting, while compiler auxdata is part of the
@@ -802,6 +994,8 @@ pub async fn obfuscate_bytecode(
         obfuscated_runtime: format!("0x{}", hex::encode(&obfuscated_bytes)),
         original_size,
         obfuscated_size,
+        original_runtime_size,
+        obfuscated_runtime_size: deployed_runtime_size,
         size_increase_percentage,
         unknown_opcodes_count: unknown_count,
         unknown_opcode_types: unknown_types,
@@ -809,12 +1003,16 @@ pub async fn obfuscate_bytecode(
         instructions_added,
         total_instructions,
         metadata: ObfuscationMetadata {
+            generation_seed: config.seed.to_hex(),
             transforms_applied,
+            transforms_attempted,
+            transform_outcomes,
             size_limit_exceeded,
             unknown_opcodes_preserved: config.preserve_unknown_opcodes,
             constructor_args_obfuscated: constructor_args.applied,
             constructor_argument_bytes: constructor_args.argument_bytes,
             constructor_decoder_bytes: constructor_args.decoder_bytes,
+            metadata_digests_diversified,
         },
         selector_mapping: cfg_ir.selector_mapping,
         trace,
@@ -822,23 +1020,31 @@ pub async fn obfuscate_bytecode(
 }
 
 /// Analyzes instructions to count unknown opcodes and provide feedback.
-fn analyze_instructions(instructions: &[decoder::Instruction]) -> (usize, usize, Vec<String>) {
+fn analyze_instructions(
+    instructions: &[decoder::Instruction],
+    original_bytes: &[u8],
+) -> (usize, usize, Vec<String>) {
     let total_count = instructions.len();
     let mut unknown_count = 0;
     let mut unknown_types = HashSet::new();
 
     for instruction in instructions {
-        if matches!(instruction.op, Opcode::INVALID | Opcode::UNKNOWN(_)) {
+        // INVALID (0xfe) is a real Solidity opcode used for unreachable data and
+        // must not be reported as an unknown instruction. The decoder also uses
+        // INVALID as a placeholder for unrecognized disassembler output; compare
+        // the source byte to distinguish that marker from genuine 0xfe.
+        let is_unknown = matches!(instruction.op, Opcode::UNKNOWN(_))
+            || (matches!(instruction.op, Opcode::INVALID)
+                && original_bytes.get(instruction.pc).copied() != Some(0xfe));
+        if is_unknown {
             unknown_count += 1;
             unknown_types.insert(format!("{}", instruction.op));
         }
     }
 
-    (
-        total_count,
-        unknown_count,
-        unknown_types.into_iter().collect(),
-    )
+    let mut unknown_types: Vec<_> = unknown_types.into_iter().collect();
+    unknown_types.sort();
+    (total_count, unknown_count, unknown_types)
 }
 
 /// Count instructions in CFG
@@ -951,15 +1157,17 @@ pub fn print_obfuscation_analysis(result: &ObfuscationResult) {
 
 /// Creates a gas report from obfuscation results
 pub fn create_gas_report(result: &ObfuscationResult) -> serde_json::Value {
-    let gas = |bytes| 32_000 + 200 * bytes as u64;
+    let code_deposit_gas = |bytes| 200 * bytes as u64;
 
     json!({
         "original_bytes": result.original_size,
         "obfuscated_bytes": result.obfuscated_size,
         "size_delta_bytes": (result.obfuscated_size as i64 - result.original_size as i64),
-        "original_deploy_gas": gas(result.original_size),
-        "obfuscated_deploy_gas": gas(result.obfuscated_size),
-        "gas_delta": (gas(result.obfuscated_size) as i64 - gas(result.original_size) as i64),
+        "original_runtime_bytes": result.original_runtime_size,
+        "obfuscated_runtime_bytes": result.obfuscated_runtime_size,
+        "original_code_deposit_gas": code_deposit_gas(result.original_runtime_size),
+        "obfuscated_code_deposit_gas": code_deposit_gas(result.obfuscated_runtime_size),
+        "code_deposit_gas_delta": (code_deposit_gas(result.obfuscated_runtime_size) as i64 - code_deposit_gas(result.original_runtime_size) as i64),
         "percent_size": result.size_increase_percentage,
         "unknown_opcodes_preserved": result.unknown_opcodes_count,
         "blocks_created": result.blocks_created,
@@ -968,10 +1176,174 @@ pub fn create_gas_report(result: &ObfuscationResult) -> serde_json::Value {
         "constructor_args_obfuscated": result.metadata.constructor_args_obfuscated,
         "constructor_argument_bytes": result.metadata.constructor_argument_bytes,
         "constructor_decoder_bytes": result.metadata.constructor_decoder_bytes,
-        "notes": if result.unknown_opcodes_count > 0 {
-            "Unknown opcodes were preserved as raw bytes to maintain functionality"
-        } else {
-            "All opcodes were standard and successfully obfuscated"
-        }
+        "notes": "Code-deposit gas is exact for deployed bytes. Creation transaction calldata, EIP-3860 word cost, and init/runtime execution gas require an EVM measurement and are intentionally not fabricated here."
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Error, Result};
+    use rand::rngs::StdRng;
+
+    const COUNTER_DEPLOYMENT: &str =
+        include_str!("../../../tests/bytecode/counter/counter_deployment.hex");
+    const COUNTER_RUNTIME: &str =
+        include_str!("../../../tests/bytecode/counter/counter_runtime.hex");
+
+    struct MutateThenFalse;
+
+    impl Transform for MutateThenFalse {
+        fn name(&self) -> &'static str {
+            "MutateThenFalse"
+        }
+
+        fn apply(&self, ir: &mut cfg_ir::CfgIrBundle, _rng: &mut StdRng) -> Result<bool> {
+            for node in ir.cfg.node_indices().collect::<Vec<_>>() {
+                if let Block::Body(body) = &mut ir.cfg[node] {
+                    if let Some(instruction) = body.instructions.first_mut() {
+                        instruction.op = Opcode::INVALID;
+                        break;
+                    }
+                }
+            }
+            Ok(false)
+        }
+    }
+
+    struct MutateThenError;
+
+    impl Transform for MutateThenError {
+        fn name(&self) -> &'static str {
+            "MutateThenError"
+        }
+
+        fn apply(&self, ir: &mut cfg_ir::CfgIrBundle, _rng: &mut StdRng) -> Result<bool> {
+            for node in ir.cfg.node_indices().collect::<Vec<_>>() {
+                if let Block::Body(body) = &mut ir.cfg[node] {
+                    if let Some(instruction) = body.instructions.first_mut() {
+                        instruction.op = Opcode::INVALID;
+                        break;
+                    }
+                }
+            }
+            Err(Error::Generic("intentional failure".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn no_change_transform_cannot_leak_partial_mutation() {
+        let seed = Seed::from_bytes([0x42; 32]);
+        let mut baseline_config = ObfuscationConfig::with_seed(seed.clone());
+        baseline_config.transforms.clear();
+        let baseline = obfuscate_bytecode(COUNTER_DEPLOYMENT, COUNTER_RUNTIME, baseline_config)
+            .await
+            .unwrap();
+
+        let mut candidate_config = ObfuscationConfig::with_seed(seed);
+        candidate_config.transforms = vec![Box::new(MutateThenFalse)];
+        let candidate = obfuscate_bytecode(COUNTER_DEPLOYMENT, COUNTER_RUNTIME, candidate_config)
+            .await
+            .unwrap();
+
+        assert_eq!(candidate.obfuscated_bytecode, baseline.obfuscated_bytecode);
+        assert!(!candidate
+            .metadata
+            .transforms_applied
+            .contains(&"MutateThenFalse".to_string()));
+        assert!(candidate
+            .metadata
+            .transform_outcomes
+            .iter()
+            .any(|outcome| { outcome.name == "MutateThenFalse" && outcome.status == "no_change" }));
+    }
+
+    #[tokio::test]
+    async fn transform_error_aborts_the_pipeline() {
+        let mut config = ObfuscationConfig::with_seed(Seed::from_bytes([0x24; 32]));
+        config.transforms = vec![Box::new(MutateThenError)];
+        let error = obfuscate_bytecode(COUNTER_DEPLOYMENT, COUNTER_RUNTIME, config)
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("MutateThenError"));
+        assert!(error.message.contains("intentional failure"));
+    }
+
+    #[tokio::test]
+    async fn default_pipeline_rejects_external_code_introspection_that_may_target_self() {
+        // The runtime jumps to ADDRESS; EXTCODESIZE and returns the observed size.
+        // A layout-changing transform would change that result, so the production
+        // pipeline must reject the input before applying any transform.
+        let fixtures = [
+            (
+                "EXTCODESIZE",
+                "0x6011600a5f3960115ff361000856000000005b303b5f5260205ff3",
+                "0x61000856000000005b303b5f5260205ff3",
+            ),
+            (
+                "EXTCODECOPY",
+                "0x6011600a5f3960115ff361000856000000005b303c5f5260205ff3",
+                "0x61000856000000005b303c5f5260205ff3",
+            ),
+            (
+                "EXTCODEHASH",
+                "0x6011600a5f3960115ff361000856000000005b303f5f5260205ff3",
+                "0x61000856000000005b303f5f5260205ff3",
+            ),
+        ];
+
+        for (opcode, deployment, runtime) in fixtures {
+            let config = ObfuscationConfig::with_seed(Seed::from_bytes([0x73; 32]));
+            let error = obfuscate_bytecode(deployment, runtime, config)
+                .await
+                .expect_err("external-code introspection must fail closed");
+
+            assert!(error.message.contains(opcode), "{}", error.message);
+            assert!(error.message.contains("not supported"), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn genuine_invalid_is_not_reported_as_an_unknown_opcode() {
+        let instructions = vec![
+            decoder::Instruction {
+                pc: 0,
+                op: Opcode::INVALID,
+                imm: None,
+            },
+            decoder::Instruction {
+                pc: 1,
+                op: Opcode::INVALID,
+                imm: None,
+            },
+            decoder::Instruction {
+                pc: 2,
+                op: Opcode::UNKNOWN(0xaa),
+                imm: None,
+            },
+        ];
+        let (total, unknown, kinds) = analyze_instructions(&instructions, &[0xfe, 0xaa, 0xaa]);
+
+        assert_eq!(total, 3);
+        assert_eq!(unknown, 2);
+        assert!(!kinds.is_empty());
+    }
+
+    #[tokio::test]
+    async fn preserve_unknown_opcodes_false_rejects_decoder_unknown_input() {
+        // Twelve-byte init wrapper returning the single raw runtime byte 0xaa.
+        let deployment = "0x6001600c60003960016000f3aa";
+        let runtime = "0xaa";
+        let mut config = ObfuscationConfig::with_seed(Seed::from_bytes([0x9a; 32]));
+        config.transforms.clear();
+        config.preserve_unknown_opcodes = false;
+
+        let error = obfuscate_bytecode(deployment, runtime, config)
+            .await
+            .expect_err("disabled unknown-opcode preservation must fail closed");
+        assert!(error.message.contains("decoder-unknown opcode"));
+        assert!(error
+            .message
+            .contains("preserve_unknown_opcodes is disabled"));
+    }
 }

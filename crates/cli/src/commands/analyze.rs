@@ -91,9 +91,46 @@ impl super::Command for AnalyzeArgs {
             report.unique_seed_count
         );
         println!("Transforms observed:       {}", report.transform_summary());
+        println!(
+            "Deployment size ratio:      {:>6.3}x mean / {:>6.3}x P95 / {:>6.3}x max",
+            report.size.mean_ratio, report.size.percentile_95_ratio, report.size.max_ratio
+        );
+        println!(
+            "Conservative LCS retention: {:>6.2}% mean / {:>6.2}% median",
+            report.similarity.conservative_lcs_retention.mean * 100.0,
+            report.similarity.conservative_lcs_retention.median * 100.0
+        );
+        println!(
+            "Conservative change bound:  {:>6.2}% mean / {:>6.2}% worst sample",
+            (1.0 - report.similarity.conservative_lcs_retention.mean) * 100.0,
+            (1.0 - report.similarity.conservative_lcs_retention.max) * 100.0
+        );
+        println!(
+            "Aligned original difference: {:>6.2}% mean / {:>6.2}% median",
+            report.similarity.aligned_original_difference.mean * 100.0,
+            report.similarity.aligned_original_difference.median * 100.0
+        );
+        println!(
+            "Pairwise seed difference:    {:>6.2}% mean / {:>6.2}% median ({} pair{})",
+            report.similarity.pairwise_aligned_difference.mean * 100.0,
+            report.similarity.pairwise_aligned_difference.median * 100.0,
+            report.similarity.pairwise_aligned_difference.count,
+            if report.similarity.pairwise_aligned_difference.count == 1 {
+                ""
+            } else {
+                "s"
+            }
+        );
         println!();
-        for (n, value) in &report.ngram_diversity {
-            println!("{:>2}-byte n-gram diversity: {:>6.2}%", n, value);
+        for (n, summary) in &report.pairwise_ngram_jaccard {
+            println!(
+                "{:>2}-byte pairwise Jaccard: {:>6.2}% mean / {:>6.2}% median ({} pair{})",
+                n,
+                summary.mean * 100.0,
+                summary.median * 100.0,
+                summary.count,
+                if summary.count == 1 { "" } else { "s" }
+            );
         }
         println!("============================================================");
         println!(

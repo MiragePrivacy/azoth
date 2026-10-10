@@ -71,9 +71,8 @@ fn encode_invalid_opcode_without_original_data() {
         op: Opcode::INVALID,
         imm: None,
     };
-    // PC 42 is beyond original bytecode, so it gets skipped
+    // PC 42 is beyond original bytecode, so exact preservation is impossible.
     let original = vec![0x60, 0x01]; // Only 2 bytes, PC 42 doesn't exist
     let result = encode(&[ins], &original);
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), Vec::<u8>::new()); // Empty - skipped!
+    assert!(result.is_err(), "unrecoverable raw bytes must fail closed");
 }

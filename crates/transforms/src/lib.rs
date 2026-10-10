@@ -3,6 +3,9 @@ pub mod cluster_shuffle;
 pub mod constructor_args;
 pub mod function_dispatcher;
 pub mod jump_address_transformer;
+pub mod jump_trampoline;
+pub mod literal_synthesis;
+pub mod metadata;
 pub mod obfuscator;
 pub mod opaque_predicate;
 pub mod push_split;
@@ -50,8 +53,65 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub trait Transform: Send + Sync {
     /// Returns the transform's name for logging and identification.
     fn name(&self) -> &'static str;
+    /// Whether applying this pass to a runtime containing `GAS` is sound.
+    ///
+    /// The default is fail-closed. A pass may return true when it is exactly
+    /// runtime-gas neutral or when it detects `GAS` and commits no mutation.
+    fn supports_gas_observation(&self) -> bool {
+        false
+    }
     /// Applies the transform to the CFG IR, returning whether changes were made.
     fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool>;
+}
+
+/// Whether the runtime may observe its physical code layout.
+///
+/// Azoth does not yet have typed relocation records for embedded runtime data.
+/// Layout-changing transforms must therefore fail closed on these opcodes rather
+/// than guessing which numeric literals are code/data offsets. External-code
+/// introspection is also rejected conservatively: an `EXTCODE*` target may be
+/// `ADDRESS`, an alias of the current contract, or otherwise resolve to it through
+/// stack computation.
+pub fn has_self_code_layout_semantics(ir: &CfgIrBundle) -> bool {
+    let bounds = ir.runtime_bounds;
+    ir.cfg.node_indices().any(|node| match &ir.cfg[node] {
+        azoth_core::cfg_ir::Block::Body(body)
+            if bounds.is_none_or(|(start, end)| body.start_pc >= start && body.start_pc < end) =>
+        {
+            body.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.op,
+                    Opcode::PC
+                        | Opcode::CODESIZE
+                        | Opcode::CODECOPY
+                        | Opcode::EXTCODESIZE
+                        | Opcode::EXTCODECOPY
+                        | Opcode::EXTCODEHASH
+                )
+            })
+        }
+        _ => false,
+    })
+}
+
+/// Whether the runtime reads remaining gas.
+///
+/// Even the compiler-standard `GAS; CALL` sequence is observable: adding a
+/// trampoline before it changes the amount forwarded after EIP-150 rounding and
+/// can change callee behavior. Passes that add executed instructions must skip
+/// such runtimes unless they can prove an exact gas relation.
+pub fn has_gas_observation(ir: &CfgIrBundle) -> bool {
+    let bounds = ir.runtime_bounds;
+    ir.cfg.node_indices().any(|node| match &ir.cfg[node] {
+        azoth_core::cfg_ir::Block::Body(body)
+            if bounds.is_none_or(|(start, end)| body.start_pc >= start && body.start_pc < end) =>
+        {
+            body.instructions
+                .iter()
+                .any(|instruction| matches!(instruction.op, Opcode::GAS))
+        }
+        _ => false,
+    })
 }
 
 /// Parses a PUSH opcode string and returns the corresponding Opcode enum and immediate size.

@@ -1,3 +1,5 @@
+use azoth_analysis::similarity::conservative_lcs_retention;
+use azoth_core::seed::Seed;
 use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
@@ -19,6 +21,9 @@ const COUNTER_RUNTIME_BYTECODE: &str = include_str!("../../bytecode/counter/coun
 const SELECTOR_SET_NUMBER: u32 = 0x3fb5c1cb;
 const SELECTOR_NUMBER: u32 = 0x8381f58a;
 const SELECTOR_INCREMENT: u32 = 0xd09de08a;
+// This seed previously exposed stale runtime bounds when a size-growing pass ran before
+// ClusterShuffle. Keep it pinned as a relocation regression for the production pipeline.
+const FIXED_SEED: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 fn selector_token(mapping: &HashMap<u32, Vec<u8>>, selector: u32) -> Result<Bytes> {
     let token = mapping
@@ -56,10 +61,12 @@ async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
         .without_time()
         .try_init();
 
+    let seed = Seed::from_hex(FIXED_SEED)
+        .map_err(|error| eyre!("Invalid fixed Counter regression seed: {error}"))?;
     let obfuscation_result = obfuscate_bytecode(
         COUNTER_DEPLOYMENT_BYTECODE,
         COUNTER_RUNTIME_BYTECODE,
-        ObfuscationConfig::default(),
+        ObfuscationConfig::with_seed(seed),
     )
     .await
     .map_err(|e| eyre!("Bytecode transformation failed: {}", e))?;
@@ -114,6 +121,18 @@ async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
             .trim_start_matches("0x"),
     )
     .map_err(|e| eyre!("Failed to decode obfuscated bytecode: {}", e))?;
+    let original_bytes = hex::decode(COUNTER_DEPLOYMENT_BYTECODE.trim())
+        .map_err(|e| eyre!("Failed to decode original Counter bytecode: {e}"))?;
+    let conservative_change = 1.0 - conservative_lcs_retention(&original_bytes, &obfuscated_bytes);
+    println!(
+        "Conservative changed-byte lower bound: {:.2}%",
+        conservative_change * 100.0
+    );
+    assert!(
+        conservative_change >= 0.50,
+        "fixed production seed must conservatively change at least 50% of Counter bytecode; got {:.2}%",
+        conservative_change * 100.0
+    );
 
     println!(
         "Deploying {} bytes, init code (first 28 bytes, hex): {}",

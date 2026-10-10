@@ -412,3 +412,9 @@ mod test_original;
 
 #[cfg(test)]
 mod test_counter;
+
+#[cfg(test)]
+mod counter_differential;
+
+#[cfg(test)]
+mod layout_safety;

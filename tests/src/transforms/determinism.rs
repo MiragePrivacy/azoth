@@ -114,19 +114,22 @@ async fn slot_shuffle_is_deterministic_for_same_seed() {
 }
 
 #[tokio::test]
-async fn string_obfuscate_is_deterministic_for_same_seed() {
-    assert_transform_deterministic_for_bytecode(
-        "escrow runtime",
+async fn string_obfuscate_fails_closed_without_mutation() {
+    let seed = Seed::from_hex(FIXED_SEED).unwrap();
+    let (mut cfg, _, _, _) = process_bytecode_to_cfg(
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
-        "StringObfuscate",
-        || Box::new(StringObfuscate::new()),
+        false,
+        ESCROW_CONTRACT_RUNTIME_BYTECODE,
+        false,
     )
-    .await;
-    assert_transform_deterministic_for_bytecode(
-        "escrow deployment",
-        ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
-        "StringObfuscate",
-        || Box::new(StringObfuscate::new()),
-    )
-    .await;
+    .await
+    .unwrap();
+    let before = cfg_instruction_snapshot(&cfg);
+    let mut rng = seed.create_deterministic_rng();
+    let error = StringObfuscate::new()
+        .apply(&mut cfg, &mut rng)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("StringObfuscate is disabled"));
+    assert_eq!(cfg_instruction_snapshot(&cfg), before);
 }

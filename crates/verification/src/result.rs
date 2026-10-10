@@ -5,6 +5,8 @@ use thiserror::Error;
 /// Main error type for verification operations
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("Unsupported verification operation: {0}")]
+    Unsupported(String),
     #[error("SMT solver error: {0}")]
     SmtSolver(String),
     #[error("Verification timeout after {seconds} seconds")]

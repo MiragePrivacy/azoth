@@ -195,10 +195,11 @@ async fn test_storage_cfg_trace_progression() {
 // -----------------------------------------------------------------------
 // push_reaches_jump unit tests
 //
-// `push_reaches_jump` gates `remap_orphan_jump_pushes`'s extended scan so
-// only PUSH literals whose value is *plausibly* a branch target get
-// remapped after a PC-shifting transform. The critical invariants these
-// tests pin down are:
+// `push_reaches_jump` is retained as a conservative, local diagnostic for
+// callers inspecting whether one literal could reach a branch. Production
+// relocation uses `CfgIrBundle::prove_jump_address_pushes`, whose whole-CFG,
+// path-sensitive provenance proof also rejects mixed code/data use. The local
+// helper's critical invariants are:
 //
 //   * direct JUMP/JUMPI targets -> true
 //   * values consumed by non-jump ops (arithmetic, MSTORE/SSTORE,
@@ -209,9 +210,8 @@ async fn test_storage_cfg_trace_progression() {
 //     where the return address sits beneath the JUMP's target) ->
 //     true, which is the reason the entire extended scan exists
 //
-// Together these ensure the post-reindex remap cannot silently corrupt
-// a PUSH2 whose 16-bit literal numerically coincides with a JUMPDEST
-// PC but semantically is not a branch target.
+// Together these keep the diagnostic conservative; they are not the production
+// relocation safety argument.
 // -----------------------------------------------------------------------
 
 fn prj_instr(pc: usize, op: Opcode, imm: Option<&str>) -> Instruction {

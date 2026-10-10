@@ -5,11 +5,11 @@ use azoth_transform::Transform;
 
 #[tokio::test]
 async fn test_jump_address_transformer() {
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .with_ansi(false)
         .without_time()
-        .init();
+        .try_init();
 
     // Simple bytecode with a conditional jump
     let bytecode = "0x60085760015b00"; // PUSH1 0x08, JUMPI, PUSH1 0x01, JUMPDEST, STOP

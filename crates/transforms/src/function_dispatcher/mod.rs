@@ -12,20 +12,38 @@ use azoth_core::seed::Seed;
 use azoth_core::Opcode;
 use petgraph::graph::NodeIndex;
 use rand::rngs::StdRng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::debug;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum DispatcherStyle {
+    /// Replace selector literals without adding new control-flow or storage dependencies.
+    #[default]
+    SelectorOnly,
+    /// Retain the legacy multi-tier controller layout for explicit experimentation only.
+    ExperimentalMultiTier,
+}
 
 #[derive(Default)]
 pub struct FunctionDispatcher {
     cached_dispatcher: Option<DispatcherInfo>,
     seed: Option<Seed>,
+    style: DispatcherStyle,
 }
 
 impl FunctionDispatcher {
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Constructs the legacy multi-tier dispatcher transform.
+    ///
+    /// This mode adds controller, decoy, and storage-dependent blocks and is intentionally
+    /// excluded from the default path. It is retained only for explicit experimentation.
+    pub fn experimental_multi_tier() -> Self {
         Self {
-            cached_dispatcher: None,
-            seed: None,
+            style: DispatcherStyle::ExperimentalMultiTier,
+            ..Self::default()
         }
     }
 
@@ -33,6 +51,22 @@ impl FunctionDispatcher {
         Self {
             cached_dispatcher: Some(dispatcher_info),
             seed: Some(seed),
+            ..Self::default()
+        }
+    }
+
+    /// Constructs the legacy multi-tier dispatcher transform with precomputed detection data.
+    ///
+    /// Unlike [`Self::with_dispatcher_info_and_seed`], this opts into controller, decoy, and
+    /// storage-dependent blocks and should be used only for experiments.
+    pub fn experimental_multi_tier_with_dispatcher_info_and_seed(
+        dispatcher_info: DispatcherInfo,
+        seed: Seed,
+    ) -> Self {
+        Self {
+            cached_dispatcher: Some(dispatcher_info),
+            seed: Some(seed),
+            style: DispatcherStyle::ExperimentalMultiTier,
         }
     }
 
@@ -75,6 +109,45 @@ impl FunctionDispatcher {
         } else {
             detect_function_dispatcher(runtime)
         }
+    }
+
+    fn reject_ambiguous_selector_uses(
+        &self,
+        runtime: &[Instruction],
+        info: &DispatcherInfo,
+    ) -> Result<()> {
+        let dispatcher_pcs: HashSet<_> = info
+            .selectors
+            .iter()
+            .filter_map(|selector| runtime.get(selector.instruction_index))
+            .map(|instruction| instruction.pc)
+            .collect();
+        let selectors: HashSet<_> = info
+            .selectors
+            .iter()
+            .map(|selector| selector.selector)
+            .collect();
+
+        for instruction in runtime {
+            if dispatcher_pcs.contains(&instruction.pc)
+                || !matches!(instruction.op, Opcode::PUSH(4))
+            {
+                continue;
+            }
+            let Some(immediate) = instruction.imm.as_deref() else {
+                continue;
+            };
+            let Ok(value) = u32::from_str_radix(immediate, 16) else {
+                continue;
+            };
+            if selectors.contains(&value) {
+                return Err(Error::Generic(format!(
+                    "dispatcher: selector 0x{value:08x} is also used outside the dispatcher at pc 0x{:x}; self-call/interface dataflow is ambiguous",
+                    instruction.pc
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn apply_instruction_replacements(
@@ -342,7 +415,7 @@ impl FunctionDispatcher {
                     return Err(Error::Generic(format!(
                         "dispatcher: instruction at pc {} not found in CFG",
                         instruction.pc
-                    )))
+                    )));
                 }
             };
 
@@ -378,6 +451,12 @@ impl Transform for FunctionDispatcher {
         "FunctionDispatcher"
     }
 
+    fn supports_gas_observation(&self) -> bool {
+        // SelectorOnly replaces PUSH4 immediates in place and leaves the exact
+        // executed opcode sequence unchanged. Multi-tier adds executed blocks.
+        self.style == DispatcherStyle::SelectorOnly
+    }
+
     fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
         let (runtime_instructions, index_by_pc) = self.collect_runtime_instructions(ir);
         if runtime_instructions.is_empty() {
@@ -398,23 +477,12 @@ impl Transform for FunctionDispatcher {
             return Ok(false);
         }
 
-        let runtime_len = if let Some((start, end)) = ir.runtime_bounds {
-            end.saturating_sub(start)
-        } else {
-            runtime_instructions
-                .last()
-                .map(|instr| instr.pc + instr.byte_size())
-                .unwrap_or(0)
-        };
-        let selector_count = dispatcher_info.selectors.len();
-        let lightweight_dispatcher = selector_count <= 2 || runtime_len <= 96;
-
-        if lightweight_dispatcher {
+        if self.style == DispatcherStyle::SelectorOnly {
             debug!(
-                runtime_len,
-                selectors = selector_count,
-                "Using lightweight dispatcher obfuscation path"
+                selectors = dispatcher_info.selectors.len(),
+                "Using selector-only dispatcher obfuscation path"
             );
+            self.reject_ambiguous_selector_uses(&runtime_instructions, &dispatcher_info)?;
             let preserve_bytes = HashMap::new();
             let seed = self.seed.as_ref().ok_or_else(|| {
                 Error::Generic("dispatcher: seed required for token mapping".into())
@@ -479,5 +547,85 @@ impl Transform for FunctionDispatcher {
             debug!("Dispatcher mapping produced no changes");
             Ok(false)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use azoth_core::process_bytecode_to_cfg;
+
+    const COUNTER_DEPLOYMENT: &str =
+        include_str!("../../../../tests/bytecode/counter/counter_deployment.hex");
+    const COUNTER_RUNTIME: &str =
+        include_str!("../../../../tests/bytecode/counter/counter_runtime.hex");
+    const FIXED_SEED: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn dispatcher_styles_require_explicit_multi_tier_opt_in() {
+        assert_eq!(
+            FunctionDispatcher::new().style,
+            DispatcherStyle::SelectorOnly
+        );
+        assert_eq!(
+            FunctionDispatcher::experimental_multi_tier().style,
+            DispatcherStyle::ExperimentalMultiTier
+        );
+
+        let info = DispatcherInfo {
+            start_offset: 0,
+            end_offset: 0,
+            selectors: Vec::new(),
+            extraction_pattern: azoth_core::detection::ExtractionPattern::Standard,
+        };
+        let seed = Seed::from_hex(FIXED_SEED).expect("valid fixed seed");
+        assert_eq!(
+            FunctionDispatcher::with_dispatcher_info_and_seed(info.clone(), seed.clone()).style,
+            DispatcherStyle::SelectorOnly
+        );
+        assert_eq!(
+            FunctionDispatcher::experimental_multi_tier_with_dispatcher_info_and_seed(info, seed)
+                .style,
+            DispatcherStyle::ExperimentalMultiTier
+        );
+    }
+
+    #[tokio::test]
+    async fn default_dispatcher_only_replaces_selectors_on_large_dispatcher() {
+        let deployment = COUNTER_DEPLOYMENT.trim();
+        let runtime = COUNTER_RUNTIME.trim();
+        let (mut ir, _, _, _) = process_bytecode_to_cfg(deployment, false, runtime, false)
+            .await
+            .expect("counter bytecode should produce a CFG");
+
+        let detector = FunctionDispatcher::new();
+        let (runtime_instructions, _) = detector.collect_runtime_instructions(&ir);
+        let info = detect_function_dispatcher(&runtime_instructions)
+            .expect("counter runtime should contain a dispatcher");
+        assert!(
+            info.selectors.len() > 2,
+            "fixture must exercise the former multi-tier heuristic"
+        );
+
+        let original_node_count = ir.cfg.node_count();
+        let original_runtime_bounds = ir.runtime_bounds;
+        let seed = Seed::from_hex(FIXED_SEED).expect("valid fixed seed");
+        let mut rng = seed.create_deterministic_rng();
+        let dispatcher = FunctionDispatcher::with_dispatcher_info_and_seed(info.clone(), seed);
+
+        assert!(dispatcher
+            .apply(&mut ir, &mut rng)
+            .expect("selector-only dispatcher transform should succeed"));
+        assert_eq!(ir.cfg.node_count(), original_node_count);
+        assert_eq!(ir.runtime_bounds, original_runtime_bounds);
+        assert!(ir.dispatcher_controller_pcs.is_none());
+        assert!(ir.dispatcher_patches.is_none());
+        assert!(ir.stub_patches.is_none());
+        assert!(ir.decoy_patches.is_none());
+        assert!(ir.controller_patches.is_none());
+        assert_eq!(
+            ir.selector_mapping.as_ref().map(HashMap::len),
+            Some(info.selectors.len())
+        );
     }
 }

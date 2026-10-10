@@ -3,6 +3,10 @@ name = "azoth-verification"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+z3 = ["dep:z3"]
+
 [dependencies]
 azoth-core.workspace = true
 serde.workspace = true
@@ -13,7 +17,7 @@ tokio.workspace = true
 tracing.workspace = true
 hex.workspace = true
 sha3.workspace = true
-z3.workspace = true
+z3 = { workspace = true, optional = true }
 num-bigint.workspace = true
 indexmap.workspace = true
 petgraph.workspace = true

@@ -172,6 +172,9 @@ pub(crate) fn build_passes(list: &str) -> Result<Vec<Box<dyn Transform>>, Box<dy
             "jump_transform" | "jump_addr" => Ok(Box::new(
                 azoth_transform::jump_address_transformer::JumpAddressTransformer::new(),
             ) as Box<dyn Transform>),
+            "jump_trampoline" | "trampoline" => Ok(Box::new(
+                azoth_transform::jump_trampoline::JumpTrampoline::new(),
+            ) as Box<dyn Transform>),
             "arithmetic_chain" => Ok(Box::new(
                 azoth_transform::arithmetic_chain::ArithmeticChain::new(),
             ) as Box<dyn Transform>),
@@ -192,6 +195,9 @@ pub(crate) fn build_passes(list: &str) -> Result<Vec<Box<dyn Transform>>, Box<dy
                 Box::new(azoth_transform::cluster_shuffle::ClusterShuffle::new())
                     as Box<dyn Transform>,
             ),
+            "literal_synthesis" | "literal_synth" => Ok(Box::new(
+                azoth_transform::literal_synthesis::LiteralSynthesis::new(),
+            ) as Box<dyn Transform>),
             "splice" => Ok(Box::new(azoth_transform::splice::Splice::new()) as Box<dyn Transform>),
             _ => Err(ObfuscateError::InvalidPass(name.to_string()).into()),
         })

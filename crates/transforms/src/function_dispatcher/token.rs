@@ -30,7 +30,11 @@ pub fn generate_selector_token_mapping(
     let secret: [u8; 32] = hasher.finalize().into();
 
     let mut mapping = HashMap::with_capacity(selectors.len());
-    let mut used_tokens = HashSet::with_capacity(selectors.len());
+    // Reserve the entire original selector set before deriving any token. Otherwise a token for
+    // one function can equal another function's original selector and make legacy calldata route
+    // to the wrong implementation.
+    let mut used_tokens: HashSet<u32> =
+        selectors.iter().map(|selector| selector.selector).collect();
 
     // First validate all byte indices
     for (selector_val, &byte_index) in preserve_bytes.iter() {
@@ -237,7 +241,9 @@ mod tests {
         let unique_tokens: HashSet<_> = token_values.iter().collect();
         assert_eq!(unique_tokens.len(), token_values.len());
 
-        // Check no token matches its original selector
+        // Check no token matches any original selector
+        let original_selectors: HashSet<_> =
+            selectors.iter().map(|selector| selector.selector).collect();
         for (selector, token_bytes) in &mapping {
             let token = u32::from_be_bytes([
                 token_bytes[0],
@@ -245,8 +251,67 @@ mod tests {
                 token_bytes[2],
                 token_bytes[3],
             ]);
-            assert_ne!(token, *selector);
+            assert!(
+                !original_selectors.contains(&token),
+                "Token 0x{token:08x} for selector 0x{selector:08x} collides with an original selector"
+            );
         }
+    }
+
+    #[test]
+    fn test_tokens_reserve_all_original_selectors() {
+        let seed = Seed::from_bytes([0x42; 32]);
+        let first_selector = FunctionSelector {
+            selector: 0xa9059cbb,
+            instruction_index: 0,
+            target_address: 0x100,
+        };
+        let preserve_bytes = HashMap::new();
+
+        // Discover the first selector's otherwise-valid token, then include that value as a
+        // second original selector. Generation must retry rather than reuse the reserved value.
+        let initial = generate_selector_token_mapping(
+            std::slice::from_ref(&first_selector),
+            &seed,
+            &preserve_bytes,
+        )
+        .expect("initial token generation should succeed");
+        let initial_token = initial[&first_selector.selector].as_slice();
+        let colliding_selector = u32::from_be_bytes(
+            initial_token
+                .try_into()
+                .expect("selector tokens are exactly four bytes"),
+        );
+        let selectors = vec![
+            first_selector,
+            FunctionSelector {
+                selector: colliding_selector,
+                instruction_index: 10,
+                target_address: 0x200,
+            },
+        ];
+
+        let mapping = generate_selector_token_mapping(&selectors, &seed, &preserve_bytes)
+            .expect("generation should retry reserved-selector collisions");
+        let originals: HashSet<_> = selectors.iter().map(|selector| selector.selector).collect();
+
+        for token in mapping.values() {
+            let value = u32::from_be_bytes(
+                token
+                    .as_slice()
+                    .try_into()
+                    .expect("selector tokens are exactly four bytes"),
+            );
+            assert!(
+                !originals.contains(&value),
+                "generated token 0x{value:08x} must not equal any original selector"
+            );
+        }
+        assert_ne!(
+            mapping[&selectors[0].selector],
+            colliding_selector.to_be_bytes(),
+            "the first candidate was deliberately reserved by the second selector"
+        );
     }
 
     #[test]

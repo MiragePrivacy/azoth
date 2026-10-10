@@ -56,6 +56,21 @@ impl Seed {
         StdRng::seed_from_u64(rng_seed)
     }
 
+    /// Create a deterministic RNG isolated to one named pipeline domain.
+    ///
+    /// Unlike the legacy helper, this consumes all 256 derived bits.  Giving each
+    /// transform its own domain also means inserting a no-op pass cannot perturb
+    /// the random stream of every later pass.
+    pub fn create_domain_rng(&self, domain: &[u8]) -> StdRng {
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"AZOTH_BYTECODE_OBFUSCATION_DOMAIN_V1");
+        hasher.update((domain.len() as u64).to_be_bytes());
+        hasher.update(domain);
+        hasher.update(self.inner);
+        let seed: [u8; 32] = hasher.finalize().into();
+        StdRng::from_seed(seed)
+    }
+
     /// Get a hash of this seed for integrity/identification purposes
     pub fn hash(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
@@ -125,5 +140,16 @@ mod tests {
         for _ in 0..4 {
             assert_eq!(rng.next_u64(), manual_rng.next_u64());
         }
+    }
+
+    #[test]
+    fn domain_rng_is_deterministic_and_isolated() {
+        let seed = Seed::from_hex(SAMPLE_HEX).expect("valid sample seed");
+        let mut first = seed.create_domain_rng(b"LiteralSynthesis:0");
+        let mut repeated = seed.create_domain_rng(b"LiteralSynthesis:0");
+        let mut other = seed.create_domain_rng(b"ClusterShuffle:0");
+
+        assert_eq!(first.next_u64(), repeated.next_u64());
+        assert_ne!(first.next_u64(), other.next_u64());
     }
 }

@@ -39,45 +39,36 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
             ins.imm
         );
 
-        // Handle INVALID opcodes by attempting to preserve the original byte.
+        // Handle INVALID opcodes by preserving the exact original byte.
         //
         // Note: INVALID here is often a placeholder from the decoder, not the actual 0xFE opcode.
         // When heimdall outputs "unknown" without a hex byte, the decoder uses INVALID as a marker.
-        // We recover the actual byte value from the original bytecode using PC, or skip if unavailable.
+        // We recover the actual byte value from the original bytecode using PC and
+        // fail closed if recovery is impossible.
         if matches!(ins.op, Opcode::INVALID) {
-            unknown_count += 1;
-            tracing::warn!("Encoding INVALID opcode at pc={}", ins.pc);
-
-            // First try immediate data (might contain the original byte value)
-            if let Some(immediate) = &ins.imm
-                && let Ok(byte_val) = u8::from_str_radix(immediate, 16)
-            {
-                bytes.push(byte_val);
-                tracing::debug!(
-                    "Preserved INVALID opcode from immediate as byte 0x{:02x}",
-                    byte_val
+            let recovered = ins
+                .imm
+                .as_deref()
+                .and_then(|immediate| u8::from_str_radix(immediate, 16).ok())
+                .or_else(|| bytecode.get(ins.pc).copied())
+                .ok_or_else(|| {
+                    Error::UnsupportedOpcode(format!(
+                        "cannot recover INVALID/raw byte at pc 0x{:x}",
+                        ins.pc
+                    ))
+                })?;
+            bytes.push(recovered);
+            if recovered == Opcode::INVALID.to_byte() {
+                tracing::debug!(pc = ins.pc, "Encoded explicit EVM INVALID (0xfe)");
+            } else {
+                unknown_count += 1;
+                tracing::warn!(
+                    pc = ins.pc,
+                    byte = recovered,
+                    "Preserved decoder-unknown opcode as its exact raw byte"
                 );
-                continue;
             }
-
-            // Then try bytecode lookup
-            if ins.pc < bytecode.len() {
-                let byte_val = bytecode[ins.pc];
-                bytes.push(byte_val);
-                tracing::debug!(
-                    "Preserved INVALID opcode from bytecode as byte 0x{:02x} at pc={}",
-                    byte_val,
-                    ins.pc
-                );
-                continue;
-            }
-
-            // Last resort: SKIP the instruction (cannot determine byte value)
-            tracing::error!(
-                "Cannot determine byte value for INVALID opcode at pc={}, skipping (this may break functionality)",
-                ins.pc
-            );
-            continue; // Skip this instruction instead of encoding 0xFE
+            continue;
         }
 
         let opcode = ins.op;
@@ -138,7 +129,7 @@ pub fn encode(instructions: &[Instruction], bytecode: &[u8]) -> Result<Vec<u8>, 
 
     if unknown_count > 0 {
         tracing::warn!(
-            "Encoded {} unknown opcodes as raw bytes. The resulting bytecode preserves the original bytes but these may represent invalid EVM instructions.",
+            "Encoded {} decoder-unknown opcode(s) as exact raw bytes.",
             unknown_count
         );
     }
@@ -220,6 +211,21 @@ mod tests {
 
         let bytes = encode(&instructions, &reference).expect("encodes invalid from bytecode");
         assert_eq!(bytes, vec![reference[2]]);
+    }
+
+    #[test]
+    fn errors_when_invalid_raw_byte_cannot_be_recovered() {
+        let instructions = vec![Instruction {
+            pc: 7,
+            op: Opcode::INVALID,
+            imm: None,
+        }];
+
+        let err = encode(&instructions, &[]).unwrap_err();
+        assert!(
+            matches!(err, Error::UnsupportedOpcode(_)),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]

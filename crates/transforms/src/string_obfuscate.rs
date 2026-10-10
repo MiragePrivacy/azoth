@@ -1,4 +1,4 @@
-//! Obfuscate Error(string) revert literals by rewriting string data PUSH immediates.
+//! Legacy Error(string) detector.
 //!
 //! This pass uses structural detection for ABI-encoded Error(string).
 //! It handles two selector patterns:
@@ -9,16 +9,19 @@
 //! 1. Absolute: `PUSH value ; PUSH offset ; MSTORE`
 //! 2. Relative: `PUSH value ; PUSH offset ; DUP3 ; ADD ; MSTORE` (base pointer on stack)
 
-use crate::{collect_protected_pcs, Error, Result, Transform};
-use azoth_core::cfg_ir::{Block, CfgIrBundle};
+use crate::{Error, Result, Transform};
+use azoth_core::cfg_ir::CfgIrBundle;
+#[cfg(test)]
 use azoth_core::decoder::Instruction;
+#[cfg(test)]
 use azoth_core::Opcode;
 use rand::rngs::StdRng;
-use rand::RngCore;
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use tracing::debug;
 
-/// Obfuscate Error(string) literals by scrambling the encoded string data.
+/// Disabled legacy pass retained so old configurations fail explicitly.
 #[derive(Default)]
 pub struct StringObfuscate;
 
@@ -33,65 +36,15 @@ impl Transform for StringObfuscate {
         "StringObfuscate"
     }
 
-    fn apply(&self, ir: &mut CfgIrBundle, rng: &mut StdRng) -> Result<bool> {
-        debug!("StringObfuscate: scanning for Error(string) literals");
-
-        let protected_pcs = collect_protected_pcs(ir);
-        let nodes: Vec<_> = ir.cfg.node_indices().collect();
-        let mut changed = false;
-
-        for node in nodes {
-            let Some(Block::Body(body)) = ir.cfg.node_weight(node) else {
-                continue;
-            };
-
-            let mut rewritten = body.instructions.clone();
-            let mut block_changed = false;
-
-            let data_push_indices = collect_error_string_data_pushes(&rewritten);
-            if data_push_indices.is_empty() {
-                continue;
-            }
-
-            for idx in data_push_indices {
-                let instr = &rewritten[idx];
-                if protected_pcs.contains(&instr.pc) {
-                    continue;
-                }
-                let (width, mut bytes) = match parse_push_immediate(instr) {
-                    Some(value) => value,
-                    None => continue,
-                };
-                if width == 0 {
-                    continue;
-                }
-
-                // Scramble the literal bytes in-place with a random mask.
-                for byte in &mut bytes {
-                    *byte ^= (rng.next_u32() & 0xff) as u8;
-                }
-                rewritten[idx].imm = Some(hex::encode(&bytes));
-                block_changed = true;
-            }
-
-            if block_changed {
-                let mut new_body = body.clone();
-                new_body.instructions = rewritten;
-                ir.overwrite_block(node, new_body)
-                    .map_err(|e| Error::CoreError(e.to_string()))?;
-                changed = true;
-            }
-        }
-
-        if changed {
-            debug!("StringObfuscate: obfuscated Error(string) literals");
-        } else {
-            debug!("StringObfuscate: no eligible Error(string) literals found");
-        }
-        Ok(changed)
+    fn apply(&self, _ir: &mut CfgIrBundle, _rng: &mut StdRng) -> Result<bool> {
+        Err(Error::Generic(
+            "StringObfuscate is disabled because scrambling Error(string) bytes changes revert semantics; use LiteralSynthesis"
+                .into(),
+        ))
     }
 }
 
+#[cfg(test)]
 fn collect_error_string_data_pushes(instructions: &[Instruction]) -> Vec<usize> {
     // Try structural detection first
     if let Some(indices) = try_structural_detection(instructions) {
@@ -117,6 +70,7 @@ fn collect_error_string_data_pushes(instructions: &[Instruction]) -> Vec<usize> 
 }
 
 /// Structural detection: look for full Error(string) ABI pattern in block.
+#[cfg(test)]
 fn try_structural_detection(instructions: &[Instruction]) -> Option<Vec<usize>> {
     // Find if this block has an Error(string) selector pattern.
     let _selector_idx = find_error_selector_index(instructions)?;
@@ -172,6 +126,7 @@ fn try_structural_detection(instructions: &[Instruction]) -> Option<Vec<usize>> 
 
 /// Heuristic detection: find PUSH instructions with high ASCII content.
 /// Used as fallback when structural detection fails (e.g., after block splitting).
+#[cfg(test)]
 fn collect_ascii_string_pushes(instructions: &[Instruction]) -> Vec<usize> {
     let mut indices = Vec::new();
 
@@ -203,6 +158,7 @@ fn collect_ascii_string_pushes(instructions: &[Instruction]) -> Vec<usize> {
 
 /// Check if bytes look like ASCII string data.
 /// Returns true if the majority of non-null bytes are printable ASCII.
+#[cfg(test)]
 fn is_likely_ascii_string(bytes: &[u8]) -> bool {
     // Find where content ends (before null padding)
     let content_end = bytes
@@ -230,6 +186,7 @@ fn is_likely_ascii_string(bytes: &[u8]) -> bool {
 
 /// Find the index of an Error(string) selector in the instruction stream.
 /// Returns Some(idx) if found, None otherwise.
+#[cfg(test)]
 fn find_error_selector_index(instructions: &[Instruction]) -> Option<usize> {
     for (idx, instr) in instructions.iter().enumerate() {
         // Pattern 1: Direct PUSH4 0x08c379a0
@@ -270,6 +227,7 @@ fn find_error_selector_index(instructions: &[Instruction]) -> Option<usize> {
 
 /// Collect MSTORE writes, handling both absolute and relative addressing.
 /// Returns a map of relative_offset -> (value_push_index, value_bytes).
+#[cfg(test)]
 fn collect_mstore_writes(instructions: &[Instruction]) -> HashMap<usize, (usize, Vec<u8>)> {
     let mut writes: HashMap<usize, (usize, Vec<u8>)> = HashMap::new();
 
@@ -290,6 +248,7 @@ fn collect_mstore_writes(instructions: &[Instruction]) -> HashMap<usize, (usize,
 
 /// Try to parse an MSTORE pattern at the given index.
 /// Returns Some((relative_offset, value_push_index, value_bytes)) if successful.
+#[cfg(test)]
 fn try_parse_mstore_pattern(
     instructions: &[Instruction],
     mstore_idx: usize,
@@ -362,6 +321,7 @@ fn try_parse_mstore_pattern(
     None
 }
 
+#[cfg(test)]
 fn parse_push_immediate(instr: &Instruction) -> Option<(usize, Vec<u8>)> {
     match instr.op {
         Opcode::PUSH(width) => {
@@ -374,6 +334,7 @@ fn parse_push_immediate(instr: &Instruction) -> Option<(usize, Vec<u8>)> {
     }
 }
 
+#[cfg(test)]
 fn normalize_immediate(imm: &str, width: usize) -> Option<Vec<u8>> {
     let mut hex = imm.to_ascii_lowercase();
     if !hex.len().is_multiple_of(2) {
@@ -391,6 +352,7 @@ fn normalize_immediate(imm: &str, width: usize) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+#[cfg(test)]
 fn parse_usize_be(bytes: &[u8]) -> Option<usize> {
     if bytes.is_empty() {
         return None;
@@ -411,6 +373,7 @@ fn parse_usize_be(bytes: &[u8]) -> Option<usize> {
     Some(value)
 }
 
+#[cfg(test)]
 fn is_error_selector(bytes: &[u8]) -> bool {
     const SELECTOR: [u8; 4] = [0x08, 0xc3, 0x79, 0xa0];
     if bytes.len() < 4 {
