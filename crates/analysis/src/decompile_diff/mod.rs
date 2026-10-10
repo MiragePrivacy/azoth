@@ -399,6 +399,7 @@ pub async fn decompile(target: Bytes) -> Result<String, DecompileDiffError> {
         .target(target.to_string())
         .output("print".into())
         .include_solidity(true)
+        .annotate_pc(true)
         .build()
         .unwrap();
     let result = heimdall_decompiler::decompile(args).await?;

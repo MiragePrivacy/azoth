@@ -2790,7 +2790,6 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "heimdall-cache"
 version = "0.9.0"
-source = "git+https://github.com/Jon-Becker/heimdall-rs?tag=0.9.0#173cfc90c1b9b9b01809627148a83dcdbf35b00f"
 dependencies = [
  "bincode",
  "clap",
@@ -2803,7 +2802,6 @@ dependencies = [
 [[package]]
 name = "heimdall-common"
 version = "0.9.0"
-source = "git+https://github.com/Jon-Becker/heimdall-rs?tag=0.9.0#173cfc90c1b9b9b01809627148a83dcdbf35b00f"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
@@ -2838,7 +2836,6 @@ dependencies = [
 [[package]]
 name = "heimdall-config"
 version = "0.9.0"
-source = "git+https://github.com/Jon-Becker/heimdall-rs?tag=0.9.0#173cfc90c1b9b9b01809627148a83dcdbf35b00f"
 dependencies = [
  "clap",
  "heimdall-common",
@@ -2853,7 +2850,6 @@ dependencies = [
 [[package]]
 name = "heimdall-decoder"
 version = "0.9.0"
-source = "git+https://github.com/Jon-Becker/heimdall-rs?tag=0.9.0#173cfc90c1b9b9b01809627148a83dcdbf35b00f"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
@@ -2875,7 +2871,6 @@ dependencies = [
 [[package]]
 name = "heimdall-decompiler"
 version = "0.9.0"
-source = "git+https://github.com/Jon-Becker/heimdall-rs?tag=0.9.0#173cfc90c1b9b9b01809627148a83dcdbf35b00f"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
@@ -2903,7 +2898,6 @@ dependencies = [
 [[package]]
 name = "heimdall-disassembler"
 version = "0.9.0"
-source = "git+https://github.com/Jon-Becker/heimdall-rs?tag=0.9.0#173cfc90c1b9b9b01809627148a83dcdbf35b00f"
 dependencies = [
  "clap",
  "eyre",
@@ -2918,7 +2912,6 @@ dependencies = [
 [[package]]
 name = "heimdall-vm"
 version = "0.9.0"
-source = "git+https://github.com/Jon-Becker/heimdall-rs?tag=0.9.0#173cfc90c1b9b9b01809627148a83dcdbf35b00f"
 dependencies = [
  "alloy",
  "async-openai",
