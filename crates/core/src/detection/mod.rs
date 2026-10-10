@@ -6,7 +6,7 @@ pub mod sections;
 
 pub use dispatcher::{
     DispatcherInfo, ExtractionPattern, FunctionSelector, detect_function_dispatcher,
-    find_extraction_pattern,
+    detect_function_dispatcher_with_context, find_extraction_pattern,
 };
 
 pub use sections::{

@@ -1,4 +1,6 @@
+pub mod asm_ir;
 pub mod cfg_ir;
+pub mod compiler;
 pub mod decoder;
 pub mod detection;
 pub mod encoder;

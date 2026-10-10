@@ -1,6 +1,7 @@
 //! Detects Solidity function dispatcher patterns to extract selectors and target addresses.
 
 use crate::Opcode;
+use crate::compiler::CompilerContext;
 use crate::decoder::Instruction;
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +51,42 @@ enum StackValue {
     Const { addr: usize, def_pc: usize },
     /// Unknown or runtime-dependent value
     Unknown,
+}
+
+/// Same as [`detect_function_dispatcher`], but additionally validates detected
+/// selectors against the compiler-emitted `methodIdentifiers` table when one
+/// is available.
+///
+/// The pattern-matching detector can return spurious selectors when an
+/// unrelated `PUSH4` happens to land next to an `EQ`/`JUMPI`. With a
+/// `CompilerContext` in hand, we know the canonical set of public selectors
+/// from the artifact, so we can drop anything that isn't in that set without
+/// changing detection logic for selectors that are.
+///
+/// When `context` is `None`, this behaves identically to
+/// [`detect_function_dispatcher`].
+pub fn detect_function_dispatcher_with_context(
+    instructions: &[Instruction],
+    context: Option<&CompilerContext>,
+) -> Option<DispatcherInfo> {
+    let mut info = detect_function_dispatcher(instructions)?;
+
+    if let Some(ctx) = context {
+        let canonical = ctx.selector_set();
+        let before = info.selectors.len();
+        info.selectors
+            .retain(|s| canonical.contains(&s.selector));
+        let dropped = before - info.selectors.len();
+        if dropped > 0 {
+            tracing::debug!(
+                "compiler context filtered {dropped} false-positive selector(s) \
+                 (kept {} of {before})",
+                info.selectors.len()
+            );
+        }
+    }
+
+    Some(info)
 }
 
 /// Detects Solidity function dispatcher pattern and extracts selector-to-address mappings
@@ -429,5 +466,104 @@ mod tests {
         let selector = &dispatcher.selectors[0];
         assert_eq!(selector.selector, 0x12345678);
         assert_eq!(selector.target_address, 0x20);
+    }
+
+    /// Build a dispatcher containing two selectors: one fake (`0x12345678`) and one
+    /// real (`0xa65e2cfd`, the `fund(uint256,uint256)` selector for EscrowERC20).
+    /// Used by the context-filtering tests below.
+    fn dispatcher_with_two_selectors() -> Vec<Instruction> {
+        let mut seq = Vec::new();
+        seq.extend_from_slice(&[
+            (0x00, Opcode::PUSH(1), Some("80")),
+            (0x02, Opcode::PUSH(1), Some("40")),
+            (0x04, Opcode::MSTORE, None),
+            (0x05, Opcode::CALLVALUE, None),
+            (0x06, Opcode::DUP(1), None),
+            (0x07, Opcode::ISZERO, None),
+            (0x08, Opcode::PUSH(2), Some("0012")),
+            (0x0b, Opcode::JUMPI, None),
+            // Newer extraction pattern.
+            (0x0c, Opcode::CALLDATALOAD, None),
+            (0x0d, Opcode::PUSH(1), Some("e0")),
+            (0x0f, Opcode::SHR, None),
+            // First selector: 0x12345678 (NOT a real escrow selector — the
+            // pattern matcher will pick it up; the canonical method_identifiers
+            // table does not contain it).
+            (0x10, Opcode::DUP(1), None),
+            (0x11, Opcode::PUSH(4), Some("12345678")),
+            (0x16, Opcode::EQ, None),
+            (0x17, Opcode::PUSH(2), Some("0040")),
+            (0x1a, Opcode::JUMPI, None),
+            // Second selector: 0xa65e2cfd (a real EscrowERC20 selector for
+            // fund(uint256,uint256)).
+            (0x1b, Opcode::DUP(1), None),
+            (0x1c, Opcode::PUSH(4), Some("a65e2cfd")),
+            (0x21, Opcode::EQ, None),
+            (0x22, Opcode::PUSH(2), Some("0050")),
+            (0x25, Opcode::JUMPI, None),
+            (0x26, Opcode::PUSH(1), Some("00")),
+            (0x28, Opcode::POP, None),
+            (0x29, Opcode::JUMPDEST, None),
+            (0x2a, Opcode::STOP, None),
+        ]);
+        build(&seq)
+    }
+
+    #[test]
+    fn without_context_keeps_all_detected_selectors() {
+        use super::detect_function_dispatcher_with_context;
+        let instructions = dispatcher_with_two_selectors();
+        let info = detect_function_dispatcher_with_context(&instructions, None)
+            .expect("dispatcher present");
+        // Heuristic detection finds both — the fake AND the real one.
+        let selectors: Vec<u32> = info.selectors.iter().map(|s| s.selector).collect();
+        assert!(selectors.contains(&0x12345678), "fake selector should be present without context");
+        assert!(selectors.contains(&0xa65e2cfd), "real selector should be present without context");
+    }
+
+    #[test]
+    fn with_context_filters_out_unknown_selectors() {
+        use super::detect_function_dispatcher_with_context;
+        use crate::compiler::CompilerContext;
+
+        let ctx = CompilerContext::load_foundry_artifact(
+            "../../examples/escrow-bytecode/out/EscrowERC20.sol/EscrowERC20.json",
+        )
+        .expect("load EscrowERC20 artifact");
+
+        let instructions = dispatcher_with_two_selectors();
+        let info = detect_function_dispatcher_with_context(&instructions, Some(&ctx))
+            .expect("dispatcher present");
+
+        let selectors: Vec<u32> = info.selectors.iter().map(|s| s.selector).collect();
+        // Fake selector is dropped because it isn't in methodIdentifiers.
+        assert!(
+            !selectors.contains(&0x12345678),
+            "fake selector should be filtered out when context provided",
+        );
+        // Real selector survives because it IS in methodIdentifiers.
+        assert!(
+            selectors.contains(&0xa65e2cfd),
+            "real selector should be kept when context provided",
+        );
+    }
+
+    #[test]
+    fn with_context_preserves_all_real_selectors() {
+        use super::detect_function_dispatcher_with_context;
+        use crate::compiler::CompilerContext;
+
+        // Use the original single-selector test fixture (selector 0x12345678 is fake).
+        let ctx = CompilerContext::load_foundry_artifact(
+            "../../examples/escrow-bytecode/out/EscrowERC20.sol/EscrowERC20.json",
+        )
+        .expect("load EscrowERC20 artifact");
+
+        let instructions = sample_dispatcher_instructions(false);
+        let info = detect_function_dispatcher_with_context(&instructions, Some(&ctx))
+            .expect("dispatcher present");
+
+        // The single fake selector should be filtered out, leaving zero.
+        assert!(info.selectors.is_empty(), "fake selectors should be filtered");
     }
 }
