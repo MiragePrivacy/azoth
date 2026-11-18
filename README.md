@@ -3,9 +3,9 @@
 
 ## What is Azoth?
 
-Azoth gives EVM contracts a light layer of bytecode camouflage. It changes the shape of compiled code while aiming to preserve what the contract does. With the same input, settings, and seed, you can reproduce the same bytecode and compare it with a deployment.
+Azoth is an open-source bytecode camouflage tool for Ethereum smart contracts. It changes recognizable features of compiled code, such as how the contract routes function calls, while aiming to preserve its behavior. With the same input, settings, and seed, you can reproduce the output and check it against a deployment.
 
-Mirage uses Azoth to make repeated deployments of the same escrow template less obvious. Public bytecode can still be studied, and observers may recognize common patterns or behavior. Mirage’s [zero-knowledge settlement proofs](https://docs.mirageprivacy.com/developers/technical-model#settlement-proofs) protect the payment evidence even when someone recognizes the escrow.
+Mirage uses Azoth so that its one-time escrows don’t all publish the same bytecode. Without that variation, an exact match against one known deployment could flag other escrows using the template. Camouflage addresses that signal while keeping the deployment reproducible. Observers can still examine shared patterns and onchain behavior. Mirage’s [zero-knowledge settlement proofs](https://docs.mirageprivacy.com/developers/technical-model#settlement-proofs) keep payment evidence private even when an escrow is recognized.
 
 ## How does it work?
 
