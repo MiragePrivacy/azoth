@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Azoth is a research-grade toolchain for Ethereum smart-contract camouflage. The project follows a three-stage pipeline:
 
-**Repository**: https://github.com/MiragePrivacy/camouflage tool
+**Repository**: https://github.com/MiragePrivacy/azoth
 
 1. **Pre-processing/Analysis**: Isolate runtime bytecode and measure structure
 2. **Camouflage Passes**: Apply reversible transforms to raise analyst effort
@@ -18,8 +18,8 @@ This is a Rust workspace with six main crates:
 
 - **`crates/core/`**: Core functionality including bytecode decoder, encoder, section detector, bytecode stripper, and CFG-IR generation. The detection module includes section isolation (`detection/sections.rs`) and dispatcher pattern detection (`detection/dispatcher.rs`)
 - **`crates/analysis/`**: Analysis utilities for measuring bytecode complexity and camouflage quality through comprehensive metrics
-- **`crates/transforms/`**: Camouflage passes including opaque predicates, control flow shuffling, function dispatcher camouflage, and jump address transformation. The `camouflage tool.rs` module orchestrates all transforms
-- **`crates/verification/`**: Formal verification engine providing mathematical proofs of semantic equivalence using Z3 SMT solver, plus practical testing with REVM. Supports multiple verification levels and generates cryptographic certificates
+- **`crates/transforms/`**: Camouflage passes including opaque predicates, control flow shuffling, function dispatcher camouflage, and jump address transformation. The `camouflage.rs` module orchestrates all transforms
+- **`crates/verification/`**: Experimental SMT verification and practical behavior checks with REVM. The SMT model does not yet establish semantic equivalence.
 - **`crates/utils/`**: Shared utilities including deterministic seed generation and error types
 - **`crates/cli/`**: Command-line interface (`azoth` binary) with subcommands for decode, strip, cfg, and camouflage
 

@@ -322,14 +322,14 @@ fn generate_workflow_report(
                 "formal_verification_status": "pending_implementation"
             },
             "security_properties": {
-                "statistical_indistinguishability": camouflage_applied,
+                "recognizability": "not measured",
                 "transforms_applied": camouflage_result.metadata.transforms_applied,
                 "verification_completeness": "basic_structural_validation"
             },
             "mirage_protocol": {
                 "sender_workflow": if camouflage_applied { "Contract successfully camouflaged with seed K2" } else { "ERROR: No camouflage applied" },
                 "executor_workflow": if deterministic_verified { "Bytecode determinism verified with K2" } else { "ERROR: Non-deterministic compilation" },
-                "anonymity_set": if camouflage_applied { "Blends with unverified contract deployments" } else { "WARNING: Unchanged bytecode may be recognizable" },
+                "bytecode_camouflage": if camouflage_applied { "Bytecode differs from the original" } else { "Bytecode is unchanged" },
                 "production_readiness": "requires_formal_verification"
             },
             "camouflage_details": {
