@@ -1,14 +1,14 @@
-# Constructor-argument obfuscation report
+# Constructor-argument camouflage report
 
 ## Executive report
 
 Azoth now removes the report's literal constructor-tail disclosure without changing the input Solidity, source bytecode, ABI, or deployed contract behavior. The deployment runtime supplied to Azoth defines the boundary exactly; all bytes after that complete runtime are masked, and seed-varied init code restores them in memory before the original constructor continues. The returned creation payload therefore no longer contains the original ABI suffix verbatim.
 
-This is the strongest honest Azoth-only response to `mirage-adversarial-privacy-report.md`. Constructor code and transaction input are public, so bytecode-only obfuscation cannot provide cryptographic confidentiality: a capable analyst can execute the init code or reverse its data flow, and any constructor value later written to public runtime code, storage, logs, calls, or proofs remains observable there. The change specifically raises the report's zero-effort static ABI-tail recovery into a program-analysis problem. It does not claim to solve the report's public-state or proof-disclosure findings, and it does not alter the report's CBOR metadata fingerprint finding.
+This is the strongest honest Azoth-only response to `mirage-adversarial-privacy-report.md`. Constructor code and transaction input are public, so bytecode-only camouflage cannot provide cryptographic confidentiality: a capable analyst can execute the init code or reverse its data flow, and any constructor value later written to public runtime code, storage, logs, calls, or proofs remains observable there. The change specifically raises the report's zero-effort static ABI-tail recovery into a program-analysis problem. It does not claim to solve the report's public-state or proof-disclosure findings, and it does not alter the report's CBOR metadata fingerprint finding.
 
 The implementation introduces no ABI-shaped heuristic and emits no Azoth marker, version header, fixed key, or fixed decoder byte string. The full runtime is already a required Azoth input and is used as an authoritative boundary. Decoder chunk order, arithmetic constants, instruction chains, and trampoline form are seed-derived. As with any public program transformation, a semantic classifier may still recognize self-decoding behavior; no non-ZK construction can honestly guarantee otherwise.
 
-Safety is fail-closed. If the supplied runtime is absent or ambiguous, if the constructor has no single supported argument-copy site, if the trampoline cannot preserve existing init-code program counters, or if the result exceeds EIP-170/EIP-3860 limits, obfuscation returns an error instead of exposing plaintext arguments or emitting known-undeployable output.
+Safety is fail-closed. If the supplied runtime is absent or ambiguous, if the constructor has no single supported argument-copy site, if the trampoline cannot preserve existing init-code program counters, or if the result exceeds EIP-170/EIP-3860 limits, camouflage returns an error instead of exposing plaintext arguments or emitting known-undeployable output.
 
 ## Technical report
 

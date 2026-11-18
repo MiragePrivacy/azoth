@@ -118,7 +118,7 @@ pub(super) fn render_diff_detail(f: &mut Frame<'_>, area: Rect, app: &mut App) {
                     Style::default().fg(Color::DarkGray),
                 )),
                 Line::from(Span::styled(
-                    "This will decompile both original and obfuscated bytecode.",
+                    "This will decompile both original and camouflaged bytecode.",
                     Style::default().fg(Color::DarkGray),
                 )),
             ]
@@ -186,19 +186,19 @@ fn format_diff_item_name(item: &StructuredDiffItem) -> (&'static str, String) {
         StructureKind::Function {
             name,
             original_selector,
-            obfuscated_selector,
+            camouflaged_selector,
         } => (
             "\u{f0295} ",
-            if original_selector == obfuscated_selector {
+            if original_selector == camouflaged_selector {
                 format!("{name} (0x{original_selector:08x})")
             } else {
-                format!("{name} (0x{original_selector:08x} \u{2192} 0x{obfuscated_selector:08x})")
+                format!("{name} (0x{original_selector:08x} \u{2192} 0x{camouflaged_selector:08x})")
             },
         ),
         StructureKind::UnmatchedOriginal { name, selector } => {
             ("\u{f0156} ", format!("{name} (0x{selector:08x}) [removed]"))
         }
-        StructureKind::UnmatchedObfuscated { name, selector } => {
+        StructureKind::UnmatchedCamouflaged { name, selector } => {
             ("\u{f0415} ", format!("{name} (0x{selector:08x}) [added]"))
         }
     }

@@ -11,20 +11,20 @@ use revm::primitives::Bytes;
 pub struct BytecodeSnapshots {
     /// Original runtime bytecode (from Build event).
     pub original: Bytes,
-    /// Obfuscated runtime bytecode (from Finalize event).
-    pub obfuscated: Bytes,
+    /// Camouflaged runtime bytecode (from Finalize event).
+    pub camouflaged: Bytes,
     /// Selector mapping for structured diff (original -> token).
     pub selector_mapping: HashMap<u32, Vec<u8>>,
 }
 
 /// Extract bytecode snapshots from trace events for decompile diff.
 ///
-/// Looks for Build (original) and Finalize (obfuscated) events with FullSnapshot diffs.
+/// Looks for Build (original) and Finalize (camouflaged) events with FullSnapshot diffs.
 /// For the original, extracts the runtime portion using runtime_bounds.
-/// For the obfuscated, uses the encoded_runtime field which contains the final encoded bytecode.
+/// For the camouflaged, uses the encoded_runtime field which contains the final encoded bytecode.
 pub fn extract_bytecode_snapshots(trace: &[TraceEvent]) -> Option<BytecodeSnapshots> {
     let mut original: Option<Bytes> = None;
-    let mut obfuscated: Option<Bytes> = None;
+    let mut camouflaged: Option<Bytes> = None;
     let mut selector_mapping: HashMap<u32, Vec<u8>> = HashMap::new();
 
     for event in trace {
@@ -37,8 +37,8 @@ pub fn extract_bytecode_snapshots(trace: &[TraceEvent]) -> Option<BytecodeSnapsh
                 }
             }
             (OperationKind::Finalize, CfgIrDiff::FullSnapshot(snapshot)) => {
-                // Use the encoded_runtime which is the actual obfuscated bytecode
-                obfuscated = snapshot.encoded_runtime.clone();
+                // Use the encoded_runtime which is the actual camouflaged bytecode
+                camouflaged = snapshot.encoded_runtime.clone();
                 // Prefer selector mapping from Finalize if available
                 if let Some(ref mapping) = snapshot.selector_mapping {
                     selector_mapping = mapping.clone();
@@ -48,10 +48,10 @@ pub fn extract_bytecode_snapshots(trace: &[TraceEvent]) -> Option<BytecodeSnapsh
         }
     }
 
-    match (original, obfuscated) {
+    match (original, camouflaged) {
         (Some(orig), Some(obf)) => Some(BytecodeSnapshots {
             original: orig,
-            obfuscated: obf,
+            camouflaged: obf,
             selector_mapping,
         }),
         _ => None,
@@ -84,10 +84,10 @@ fn extract_runtime_bytecode(snapshot: &azoth_core::cfg_ir::CfgIrSnapshot) -> Opt
 pub async fn compute_decompile_diff(snapshots: BytecodeSnapshots) -> Option<StructuredDiffResult> {
     // Suppress Heimdall's logging during decompilation (it outputs warnings to stderr)
     let original_source = decompile_quiet(snapshots.original).await.ok()?;
-    let obfuscated_source = decompile_quiet(snapshots.obfuscated).await.ok()?;
+    let camouflaged_source = decompile_quiet(snapshots.camouflaged).await.ok()?;
     Some(compare_sources_structured(
         &original_source,
-        &obfuscated_source,
+        &camouflaged_source,
         snapshots.selector_mapping,
     ))
 }

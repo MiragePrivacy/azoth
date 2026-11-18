@@ -1,9 +1,9 @@
 //! Blueprint construction.
 //!
 //! This module is responsible for creating the abstract configuration and planning
-//! structure for the multi-tier dispatcher obfuscation transform. It takes the original
+//! structure for the multi-tier dispatcher camouflage transform. It takes the original
 //! dispatcher information detected from bytecode and produces a comprehensive blueprint
-//! that specifies how each function selector should be obfuscated.
+//! that specifies how each function selector should be camouflaged.
 
 use azoth_core::detection::{DispatcherInfo, FunctionSelector};
 use rand::Rng;

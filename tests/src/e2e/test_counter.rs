@@ -1,4 +1,4 @@
-use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
+use azoth_transform::camouflage::{camouflage_bytecode, CamouflageConfig};
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use hex::encode as hex_encode;
@@ -49,33 +49,33 @@ fn parse_u256(data: &[u8]) -> U256 {
 }
 
 #[tokio::test]
-async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
+async fn test_camouflaged_counter_deploys_and_counts() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .with_ansi(false)
         .without_time()
         .try_init();
 
-    let obfuscation_result = obfuscate_bytecode(
+    let camouflage_result = camouflage_bytecode(
         COUNTER_DEPLOYMENT_BYTECODE,
         COUNTER_RUNTIME_BYTECODE,
-        ObfuscationConfig::default(),
+        CamouflageConfig::default(),
     )
     .await
     .map_err(|e| eyre!("Bytecode transformation failed: {}", e))?;
 
     assert!(
-        obfuscation_result
+        camouflage_result
             .metadata
             .transforms_applied
             .contains(&"FunctionDispatcher".to_string()),
         "FunctionDispatcher transform must be applied"
     );
 
-    let selector_mapping = obfuscation_result
+    let selector_mapping = camouflage_result
         .selector_mapping
         .as_ref()
-        .ok_or_else(|| eyre!("Selector mapping missing from obfuscation result"))?;
+        .ok_or_else(|| eyre!("Selector mapping missing from camouflage result"))?;
 
     let set_number_token = selector_token(selector_mapping, SELECTOR_SET_NUMBER)?;
     let number_token = selector_token(selector_mapping, SELECTOR_NUMBER)?;
@@ -109,11 +109,11 @@ async fn test_obfuscated_counter_deploys_and_counts() -> Result<()> {
     let mut evm = Context::mainnet().with_db(db).build_mainnet();
 
     let obfuscated_bytes = hex::decode(
-        obfuscation_result
+        camouflage_result
             .obfuscated_bytecode
             .trim_start_matches("0x"),
     )
-    .map_err(|e| eyre!("Failed to decode obfuscated bytecode: {}", e))?;
+    .map_err(|e| eyre!("Failed to decode camouflaged bytecode: {}", e))?;
 
     println!(
         "Deploying {} bytes, init code (first 28 bytes, hex): {}",

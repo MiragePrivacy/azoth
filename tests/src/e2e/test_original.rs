@@ -1,4 +1,4 @@
-//! Test original unobfuscated contract to verify baseline functionality
+//! Test original uncamouflaged contract to verify baseline functionality
 
 use super::{
     mock_token_bytecode, prepare_bytecode, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, MOCK_TOKEN_ADDR,
@@ -27,7 +27,7 @@ async fn test_original_is_bonded() -> Result<()> {
             .map_err(|e| eyre!("Failed to normalize bytecode: {}", e))?;
     let original_bytecode = prepare_bytecode(&original_bytecode_hex)?;
 
-    println!("Testing ORIGINAL (unobfuscated) contract...");
+    println!("Testing ORIGINAL (uncamouflaged) contract...");
 
     // setup EVM with mock token contract
     let mut db = InMemoryDB::default();
@@ -194,6 +194,6 @@ async fn test_original_is_bonded() -> Result<()> {
     println!("✓ is_bonded() returned: {}", is_bonded);
     assert!(!is_bonded, "Expected is_bonded to be false initially");
 
-    println!("\n✓ Original (unobfuscated) contract works correctly");
+    println!("\n✓ Original (uncamouflaged) contract works correctly");
     Ok(())
 }

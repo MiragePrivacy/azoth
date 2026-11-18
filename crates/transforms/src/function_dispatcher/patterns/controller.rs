@@ -1,6 +1,6 @@
-//! Controller-level obfuscation patterns for multi-tier dispatcher.
+//! Controller-level camouflage patterns for multi-tier dispatcher.
 //!
-//! This module provides various obfuscation patterns that can be applied within
+//! This module provides various camouflage patterns that can be applied within
 //! dispatcher controller blocks. Each pattern adds a layer of complexity and
 //! indirection before reaching the actual function entry point.
 

@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::Hash;
 
-/// Represents a set of analytical metrics for evaluating bytecode obfuscation.
+/// Represents a set of analytical metrics for evaluating bytecode camouflage.
 ///
 /// Metrics include bytecode size, control flow complexity (block and edge counts), stack usage,
-/// dominator overlap, and a composite potency score. Used to compare pre- and post-obfuscation
+/// dominator overlap, and a composite potency score. Used to compare pre- and post-camouflage
 /// states and guide transform selection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metrics {
@@ -147,7 +147,7 @@ where
 ///
 /// Measures overlap between dominator and post-dominator sets, indicating critical control
 /// flow points that resist simplification. A higher overlap suggests a more linear CFG, reducing
-/// obfuscation potency.
+/// camouflage potency.
 ///
 /// # Arguments
 /// * `dominators` - Map of nodes to their immediate dominators.
@@ -188,7 +188,7 @@ fn score(overlap: f64, nodes: usize, edges: usize) -> f64 {
     5.0 * (nodes as f64).log2() + edges as f64 + 30.0 * (1.0 - overlap)
 }
 
-/// Compares two sets of metrics to evaluate an obfuscation transform.
+/// Compares two sets of metrics to evaluate a camouflage transform.
 ///
 /// Computes the difference in potency scores, adjusted for byte length changes to account for gas
 /// costs. A positive result indicates the transform increases complexity without excessive size

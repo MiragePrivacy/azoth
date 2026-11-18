@@ -7,7 +7,7 @@ use clap::Args;
 
 use super::Command;
 
-/// View obfuscation debug traces in a TUI.
+/// View camouflage debug traces in a TUI.
 #[derive(Args)]
 pub struct TuiArgs {
     /// Path to the debug JSON file.

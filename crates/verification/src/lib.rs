@@ -1,6 +1,6 @@
 //! Azoth's Formal Verification Engine
 //!
-//! This crate provides formal guarantees that obfuscated contracts are functionally
+//! This crate provides formal guarantees that camouflaged contracts are functionally
 //! equivalent to their original versions through formal verification using SMT solvers.
 
 pub mod proofs;
@@ -49,7 +49,7 @@ impl FormalVerifier {
         // Parse both contracts into semantic representations
         let original_semantics =
             semantics::extract_semantics_from_bytecode(original_bytecode, original_runtime).await?;
-        let obfuscated_semantics =
+        let camouflaged_semantics =
             semantics::extract_semantics_from_bytecode(obfuscated_bytecode, obfuscated_runtime)
                 .await?;
 
@@ -60,7 +60,7 @@ impl FormalVerifier {
 
         // 1. Prove bisimulation (step-by-step equivalence)
         if let Ok(bisim_statement) = self
-            .prove_bisimulation(&original_semantics, &obfuscated_semantics)
+            .prove_bisimulation(&original_semantics, &camouflaged_semantics)
             .await
         {
             statements.push(bisim_statement);
@@ -68,7 +68,7 @@ impl FormalVerifier {
 
         // 2. Prove state equivalence
         if let Ok(state_statement) = self
-            .prove_state_equivalence(&original_semantics, &obfuscated_semantics)
+            .prove_state_equivalence(&original_semantics, &camouflaged_semantics)
             .await
         {
             statements.push(state_statement);
@@ -77,7 +77,7 @@ impl FormalVerifier {
         // 3. Prove property preservation
         for property in security_properties {
             if let Ok(prop_statement) = self
-                .prove_property_preservation(&original_semantics, &obfuscated_semantics, property)
+                .prove_property_preservation(&original_semantics, &camouflaged_semantics, property)
                 .await
             {
                 statements.push(prop_statement);
@@ -86,7 +86,7 @@ impl FormalVerifier {
 
         // 4. Prove gas bounds
         if let Ok(gas_statement) = self
-            .prove_gas_bounds(&original_semantics, &obfuscated_semantics)
+            .prove_gas_bounds(&original_semantics, &camouflaged_semantics)
             .await
         {
             statements.push(gas_statement);
@@ -119,7 +119,7 @@ impl FormalVerifier {
     async fn prove_bisimulation(
         &mut self,
         _original: &semantics::ContractSemantics,
-        _obfuscated: &semantics::ContractSemantics,
+        _camouflaged: &semantics::ContractSemantics,
     ) -> VerificationResult<ProofStatement> {
         let start_time = Instant::now();
 
@@ -128,7 +128,7 @@ impl FormalVerifier {
         // Create bisimulation assertion
         let bisim_formula = "(assert (forall ((state State) (input Input))
             (= (execute-original state input)
-               (execute-obfuscated state input))))"
+               (execute-camouflaged state input))))"
             .to_string();
 
         // TODO: Implement actual SMT verification
@@ -147,7 +147,7 @@ impl FormalVerifier {
     async fn prove_state_equivalence(
         &mut self,
         _original: &semantics::ContractSemantics,
-        _obfuscated: &semantics::ContractSemantics,
+        _camouflaged: &semantics::ContractSemantics,
     ) -> VerificationResult<ProofStatement> {
         let start_time = Instant::now();
 
@@ -155,7 +155,7 @@ impl FormalVerifier {
 
         let state_equiv_formula = "(assert (forall ((initial-state State) (transaction Tx))
             (= (final-state (execute-original initial-state transaction))
-               (final-state (execute-obfuscated initial-state transaction)))))"
+               (final-state (execute-camouflaged initial-state transaction)))))"
             .to_string();
 
         // TODO: Implement actual SMT verification
@@ -174,7 +174,7 @@ impl FormalVerifier {
     async fn prove_property_preservation(
         &mut self,
         _original: &semantics::ContractSemantics,
-        _obfuscated: &semantics::ContractSemantics,
+        _camouflaged: &semantics::ContractSemantics,
         property: &SecurityProperty,
     ) -> VerificationResult<ProofStatement> {
         let start_time = Instant::now();
@@ -198,14 +198,14 @@ impl FormalVerifier {
     async fn prove_gas_bounds(
         &mut self,
         _original: &semantics::ContractSemantics,
-        _obfuscated: &semantics::ContractSemantics,
+        _camouflaged: &semantics::ContractSemantics,
     ) -> VerificationResult<ProofStatement> {
         let start_time = Instant::now();
 
         tracing::debug!("Proving gas consumption bounds");
 
         let gas_bound_formula = "(assert (forall ((input Input))
-            (<= (gas-consumed (execute-obfuscated input))
+            (<= (gas-consumed (execute-camouflaged input))
                 (* 1.15 (gas-consumed (execute-original input))))))"
             .to_string();
 
@@ -214,7 +214,7 @@ impl FormalVerifier {
         let proof_time = start_time.elapsed();
 
         Ok(ProofStatement::new(
-            "Gas Bounds: Obfuscated contract uses at most 15% more gas".to_string(),
+            "Gas Bounds: Camouflaged contract uses at most 15% more gas".to_string(),
             gas_bound_formula,
             proven,
             proof_time,
@@ -222,7 +222,7 @@ impl FormalVerifier {
     }
 }
 
-/// Information about a transform that was applied during obfuscation
+/// Information about a transform that was applied during camouflage
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TransformInfo {
     pub name: String,

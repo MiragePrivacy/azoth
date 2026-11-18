@@ -1,15 +1,15 @@
-use crate::commands::{obfuscate::read_input, ObfuscateError};
+use crate::commands::{camouflage::read_input, CamouflageError};
 use async_trait::async_trait;
-use azoth_analysis::obfuscation::{analyze_obfuscation, AnalysisConfig, AnalysisError};
+use azoth_analysis::camouflage::{analyze_camouflage, AnalysisConfig, AnalysisError};
 use clap::Args;
 use std::{error::Error, path::PathBuf};
 const DEFAULT_DEPLOYMENT_PATH: &str = "examples/escrow-bytecode/artifacts/erc20_deployment.hex";
 const DEFAULT_RUNTIME_PATH: &str = "examples/escrow-bytecode/artifacts/erc20_runtime.hex";
 
-/// Analyze how much bytecode survives obfuscation across multiple seeds.
+/// Analyze how much bytecode survives camouflage across multiple seeds.
 #[derive(Args)]
 pub struct AnalyzeArgs {
-    /// Number of obfuscated samples to generate.
+    /// Number of camouflaged samples to generate.
     pub iterations: usize,
     /// Input deployment bytecode as hex, .hex file, or binary file.
     #[arg(short = 'D', long = "deployment", value_name = "BYTECODE", default_value = DEFAULT_DEPLOYMENT_PATH)]
@@ -17,10 +17,10 @@ pub struct AnalyzeArgs {
     /// Input runtime bytecode as hex, .hex file, or binary file.
     #[arg(short = 'R', long = "runtime", value_name = "RUNTIME", default_value = DEFAULT_RUNTIME_PATH)]
     pub runtime_bytecode: String,
-    /// Where to write the markdown report (default: ./obfuscation_analysis_report.md).
+    /// Where to write the markdown report (default: ./camouflage_analysis_report.md).
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
-    /// Maximum attempts per iteration when an obfuscation fails.
+    /// Maximum attempts per iteration when a camouflage fails.
     #[arg(long, default_value_t = 5)]
     max_attempts: usize,
 }
@@ -45,10 +45,10 @@ impl super::Command for AnalyzeArgs {
             config.report_path = path;
         }
 
-        let report = match analyze_obfuscation(config).await {
+        let report = match analyze_camouflage(config).await {
             Ok(report) => report,
             Err(AnalysisError::UnknownOpcodes { count }) => {
-                println!("Analysis aborted: obfuscation preserved {count} unknown opcode(s).\nStrip or normalize the bytecode before running analysis.");
+                println!("Analysis aborted: camouflage preserved {count} unknown opcode(s).\nStrip or normalize the bytecode before running analysis.");
                 return Ok(());
             }
             Err(err) => return Err(map_analysis_error(err)),
@@ -111,8 +111,8 @@ fn map_analysis_error(err: AnalysisError) -> Box<dyn Error> {
         AnalysisError::UnknownOpcodes { count } => Box::new(std::io::Error::other(format!(
             "analysis aborted due to {count} unknown opcode(s)"
         ))),
-        AnalysisError::InvalidPass(name) => Box::new(ObfuscateError::InvalidPass(name)),
-        AnalysisError::ObfuscationFailure { source, .. } => source,
+        AnalysisError::InvalidPass(name) => Box::new(CamouflageError::InvalidPass(name)),
+        AnalysisError::CamouflageFailure { source, .. } => source,
         AnalysisError::Io(err) => Box::new(err),
         AnalysisError::Fmt(err) => Box::new(err),
         AnalysisError::EmptyIterations => Box::new(std::io::Error::new(

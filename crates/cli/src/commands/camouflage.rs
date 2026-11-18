@@ -1,14 +1,14 @@
-//! Module for the `obfuscate` subcommand, which applies obfuscation transforms to EVM
+//! Module for the `camouflage` subcommand, which applies camouflage transforms to EVM
 //! bytecode.
 //!
-//! This module processes input bytecode and uses the unified obfuscation pipeline
-//! from `azoth-transform` to apply transforms and output obfuscated bytecode.
+//! This module processes input bytecode and uses the unified camouflage pipeline
+//! from `azoth-transform` to apply transforms and output camouflaged bytecode.
 
-use crate::commands::{ObfuscateError, DEFAULT_PASSES};
+use crate::commands::{CamouflageError, DEFAULT_PASSES};
 use async_trait::async_trait;
 use azoth_core::seed::Seed;
-use azoth_transform::obfuscator::{
-    create_gas_report, obfuscate_bytecode, print_obfuscation_analysis, ObfuscationConfig,
+use azoth_transform::camouflage::{
+    camouflage_bytecode, create_gas_report, print_camouflage_analysis, CamouflageConfig,
 };
 use azoth_transform::Transform;
 use clap::Args;
@@ -16,20 +16,20 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-/// Arguments for the `obfuscate` subcommand.
+/// Arguments for the `camouflage` subcommand.
 #[derive(Args)]
-pub struct ObfuscateArgs {
+pub struct CamouflageArgs {
     /// Input deployment bytecode as a hex string, .hex file, or binary file containing EVM bytecode.
     #[arg(short = 'D', long = "deployment")]
     pub deployment_bytecode: String,
     /// Input runtime bytecode as a hex string, .hex file, or binary file containing EVM bytecode.
     #[arg(short = 'R', long = "runtime")]
     pub runtime_bytecode: String,
-    /// ABI-encoded constructor argument suffix to append before obfuscation.
+    /// ABI-encoded constructor argument suffix to append before camouflage.
     /// May be omitted when the deployment input already contains the suffix.
     #[arg(long, value_name = "HEX")]
     constructor_args: Option<String>,
-    /// Cryptographic seed for deterministic obfuscation.
+    /// Cryptographic seed for deterministic camouflage.
     #[arg(long)]
     seed: Option<String>,
     /// Comma-separated list of transforms to apply.
@@ -42,16 +42,16 @@ pub struct ObfuscateArgs {
     /// Path to emit a detailed CFG trace debug report as JSON.
     #[arg(long, value_name = "PATH")]
     emit_debug: Option<String>,
-    /// Launch TUI to view the debug trace after obfuscation.
+    /// Launch TUI to view the debug trace after camouflage.
     #[arg(long)]
     tui: bool,
 }
 
-/// Executes the `obfuscate` subcommand using the unified obfuscation pipeline.
+/// Executes the `camouflage` subcommand using the unified camouflage pipeline.
 #[async_trait]
-impl super::Command for ObfuscateArgs {
+impl super::Command for CamouflageArgs {
     async fn execute(self) -> Result<(), Box<dyn Error>> {
-        let ObfuscateArgs {
+        let CamouflageArgs {
             deployment_bytecode,
             runtime_bytecode,
             constructor_args,
@@ -74,28 +74,28 @@ impl super::Command for ObfuscateArgs {
         // Step 2: Build transforms from CLI args
         let transforms = build_passes(&passes)?;
 
-        // Step 3: Configure obfuscation
+        // Step 3: Configure camouflage
         let mut config = if let Some(seed_hex) = seed {
             // Use provided seed
             let seed = Seed::from_hex(&seed_hex).map_err(|e| format!("Invalid seed hex: {e}"))?;
-            ObfuscationConfig::with_seed(seed)
+            CamouflageConfig::with_seed(seed)
         } else {
             // Use random seed
-            ObfuscationConfig::default()
+            CamouflageConfig::default()
         };
 
         config.transforms = transforms;
         config.preserve_unknown_opcodes = true;
 
-        // Step 4: Run obfuscation pipeline
-        let result = match obfuscate_bytecode(&input_bytecode, &runtime_bytecode_hex, config).await
+        // Step 4: Run camouflage pipeline
+        let result = match camouflage_bytecode(&input_bytecode, &runtime_bytecode_hex, config).await
         {
             Ok(result) => result,
             Err(e) => return Err(format!("{e}").into()),
         };
 
         // Step 5: Print analysis and results
-        print_obfuscation_analysis(&result);
+        print_camouflage_analysis(&result);
 
         // Step 6: Check size limits
         // Step 7: Write report if requested
@@ -152,10 +152,10 @@ pub(crate) fn read_input(input: &str) -> Result<String, Box<dyn Error>> {
 }
 
 /// Normalizes a hex string by removing prefixes and underscores.
-pub(crate) fn normalise_hex(s: &str) -> Result<String, ObfuscateError> {
+pub(crate) fn normalise_hex(s: &str) -> Result<String, CamouflageError> {
     let stripped = s.trim().trim_start_matches("0x").replace('_', "");
     if !stripped.len().is_multiple_of(2) {
-        return Err(ObfuscateError::OddLength(stripped.len()));
+        return Err(CamouflageError::OddLength(stripped.len()));
     }
     Ok(stripped)
 }
@@ -193,7 +193,7 @@ pub(crate) fn build_passes(list: &str) -> Result<Vec<Box<dyn Transform>>, Box<dy
                     as Box<dyn Transform>,
             ),
             "splice" => Ok(Box::new(azoth_transform::splice::Splice::new()) as Box<dyn Transform>),
-            _ => Err(ObfuscateError::InvalidPass(name.to_string()).into()),
+            _ => Err(CamouflageError::InvalidPass(name.to_string()).into()),
         })
         .collect()
 }

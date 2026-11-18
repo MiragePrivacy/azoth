@@ -1,17 +1,17 @@
-//! Decompile diff command for comparing decompiled bytecode before and after obfuscation.
+//! Decompile diff command for comparing decompiled bytecode before and after camouflage.
 //!
 //! This module provides a CLI interface to the decompile diff analysis functionality,
-//! which runs obfuscation on input bytecode, then uses Heimdall's decompiler to generate
+//! which runs camouflage on input bytecode, then uses Heimdall's decompiler to generate
 //! human-readable Solidity-like output and computes structured diffs between the original
-//! and obfuscated versions.
+//! and camouflaged versions.
 //!
-//! The structured diff uses the selector mapping from obfuscation to pair functions,
+//! The structured diff uses the selector mapping from camouflage to pair functions,
 //! enabling semantic comparison even when selectors are remapped. Supports running multiple
 //! iterations with different seeds to generate statistical analysis.
 
 use async_trait::async_trait;
 use azoth_analysis::decompile_diff::{self, DiffStats, StructureKind, StructuredDiffResult};
-use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
+use azoth_transform::camouflage::{camouflage_bytecode, CamouflageConfig};
 use clap::Args;
 use owo_colors::OwoColorize;
 use std::collections::HashMap;
@@ -23,12 +23,12 @@ use tokio::task::JoinSet;
 
 use crate::commands::DEFAULT_PASSES;
 
-use super::obfuscate::{build_passes, read_input};
+use super::camouflage::{build_passes, read_input};
 
 /// Arguments for the `decompile-diff` subcommand.
 ///
-/// This command obfuscates input bytecode and compares decompiled output of the
-/// original vs obfuscated versions using structured diff that pairs functions
+/// This command camouflages input bytecode and compares decompiled output of the
+/// original vs camouflaged versions using structured diff that pairs functions
 /// by their selector mapping.
 #[derive(Args)]
 pub struct DecompileDiffArgs {
@@ -146,15 +146,15 @@ impl super::Command for DecompileDiffArgs {
                 let transforms = build_passes(&passes).map_err(|e| format!("build_passes: {e}"))?;
 
                 // Each iteration uses a fresh random seed
-                let config = ObfuscationConfig {
+                let config = CamouflageConfig {
                     transforms,
                     preserve_unknown_opcodes: true,
                     ..Default::default()
                 };
 
-                let obf_result = obfuscate_bytecode(&input_bytecode, &runtime_bytecode, config)
+                let obf_result = camouflage_bytecode(&input_bytecode, &runtime_bytecode, config)
                     .await
-                    .map_err(|e| format!("obfuscate: {e}"))?;
+                    .map_err(|e| format!("camouflage: {e}"))?;
 
                 let post_bytes =
                     hex::decode(obf_result.obfuscated_runtime.trim_start_matches("0x"))
@@ -254,14 +254,14 @@ impl DecompileDiffArgs {
                 StructureKind::Storage => "Storage".to_string(),
                 StructureKind::Function {
                     original_selector,
-                    obfuscated_selector,
+                    camouflaged_selector,
                     name,
                 } => {
                     format!(
                         "Function {} ({} → {})",
                         name.bold(),
                         format!("0x{:08x}", original_selector).dimmed(),
-                        format!("0x{:08x}", obfuscated_selector).cyan()
+                        format!("0x{:08x}", camouflaged_selector).cyan()
                     )
                 }
                 StructureKind::UnmatchedOriginal { selector, name } => {
@@ -272,7 +272,7 @@ impl DecompileDiffArgs {
                         format!("0x{:08x}", selector).dimmed()
                     )
                 }
-                StructureKind::UnmatchedObfuscated { selector, name } => {
+                StructureKind::UnmatchedCamouflaged { selector, name } => {
                     format!(
                         "{} {} ({})",
                         "Added:".green(),

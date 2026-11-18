@@ -1,6 +1,6 @@
 //! End to end ethereum tests.
 //!
-//! Test variations of obfuscation options:
+//! Test variations of camouflage options:
 //!   - Function dispatch only (all options off)
 //!   - Each transformation type enabled
 //!   - Each combination of 2 transformations
@@ -197,7 +197,7 @@ macro_rules! define_contract_selectors {
                     Selector::new(hex_literal::hex!($selector));
             )*
 
-            /// Mapping of original selectors to obfuscated tokens
+            /// Mapping of original selectors to camouflaged tokens
             #[derive(Debug, Clone)]
             pub struct [<$contract Mappings>] {
                 $(
@@ -206,9 +206,9 @@ macro_rules! define_contract_selectors {
             }
 
             impl [<$contract Mappings>] {
-                /// Create mappings from obfuscator output (HashMap<u32, Vec<u8>>)
+                /// Create mappings from camouflage tool output (HashMap<u32, Vec<u8>>)
                 #[allow(dead_code)]
-                pub fn from_obfuscator_output(
+                pub fn from_camouflage_tool_output(
                     selector_mapping: &HashMap<u32, Vec<u8>>
                 ) -> Result<Self, String> {
                     let mut mappings = Self::default();
@@ -222,12 +222,12 @@ macro_rules! define_contract_selectors {
                             ));
                         }
 
-                        let obfuscated = Selector::from_slice(token);
+                        let camouflaged = Selector::from_slice(token);
 
                         match original_u32 {
                             $(
                                 _ if original_u32 == u32::from_be_bytes([<$contract:upper _ $fn_name:upper>].0) => {
-                                    mappings.$fn_name = obfuscated;
+                                    mappings.$fn_name = camouflaged;
                                 }
                             )*
                             _ => continue,
@@ -238,9 +238,9 @@ macro_rules! define_contract_selectors {
                     Ok(mappings)
                 }
 
-                /// Get obfuscated selector by original selector
+                /// Get camouflaged selector by original selector
                 #[allow(dead_code)]
-                pub fn get_obfuscated(&self, original: Selector) -> Option<Selector> {
+                pub fn get_camouflaged(&self, original: Selector) -> Option<Selector> {
                     match original {
                         $(
                             [<$contract:upper _ $fn_name:upper>] => Some(self.$fn_name),
@@ -375,7 +375,7 @@ impl EscrowMappings {
 }
 
 // Generate calldata builders for escrow functions
-impl_calldata_builders!(ObfuscatedCaller for EscrowMappings {
+impl_calldata_builders!(CamouflagedCaller for EscrowMappings {
     fn bond_call_data(amount: U256) -> bond;
     fn is_bonded_call_data() -> is_bonded;
     fn collect_call_data() -> collect;
@@ -384,7 +384,7 @@ impl_calldata_builders!(ObfuscatedCaller for EscrowMappings {
     fn funded_call_data() -> funded;
 });
 
-/// Build standard (non-obfuscated) calldata for comparison tests
+/// Build standard (non-camouflaged) calldata for comparison tests
 #[allow(dead_code)]
 pub fn build_standard_calldata(selector: Selector, args: &[u8]) -> Bytes {
     let mut data = selector.0.to_vec();

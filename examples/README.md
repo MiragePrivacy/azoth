@@ -1,15 +1,9 @@
-# Azoth Examples
-An example use of Azoth in Mirage Protocol
+# Azoth examples
 
-Quick start:
+Run the escrow example to see how Azoth transforms a Mirage deployment and compares it with the original.
 
 ```bash
-cd examples/
-chmod +x run_escrow.sh
-./run_escrow.sh
+bash examples/run_escrow.sh
 ```
 
-## Notes
-
-- The Escrow bytecode is sourced from MiragePrivacy/escrow/artifacts/bytecode.hex
-- Output reports are saved to mirage_report.json for analysis.
+The script uses the ERC-20 deployment and runtime artifacts from the escrow submodule. It initializes the pinned submodule if those files are missing. The example writes its bytecode, gas, and behavior comparison to `examples/mirage_report.json`.

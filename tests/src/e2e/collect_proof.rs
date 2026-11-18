@@ -5,18 +5,18 @@
 //! (see `testCollectWithTransferProof_EIP1559`). The baseline flow verifies
 //! that the fixture and REVM harness are valid end-to-end: constructor funding,
 //! bonding, ABI-decoding the `ReceiptProof` struct, block-header parsing, MPT
-//! receipt inclusion, and receipt-log validation. The obfuscated flow then runs
+//! receipt inclusion, and receipt-log validation. The camouflaged flow then runs
 //! the same scenario against Azoth output to characterize where transforms
 //! currently break that path.
 
 use super::{
-    build_standard_calldata, mock_token_bytecode, prepare_bytecode_with_args, EscrowMappings,
-    ObfuscatedCaller, ESCROW_BOND, ESCROW_COLLECT, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
+    build_standard_calldata, mock_token_bytecode, prepare_bytecode_with_args, CamouflagedCaller,
+    EscrowMappings, ESCROW_BOND, ESCROW_COLLECT, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
     ESCROW_CONTRACT_RUNTIME_BYTECODE,
 };
 use azoth_core::seed::Seed;
 use azoth_transform::arithmetic_chain::ArithmeticChain;
-use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
+use azoth_transform::camouflage::{camouflage_bytecode, CamouflageConfig};
 use azoth_transform::push_split::PushSplit;
 use azoth_transform::slot_shuffle::SlotShuffle;
 use azoth_transform::string_obfuscate::StringObfuscate;
@@ -288,7 +288,7 @@ fn execute_collect_proof_flow(
             ..
         } => {
             println!("✓ [{}] deployed at {} (gas: {})", label, addr, gas_used);
-            if let Ok(dir) = std::env::var("DUMP_OBFUSCATED") {
+            if let Ok(dir) = std::env::var("DUMP_CAMOUFLAGED") {
                 if let Some(account) = evm.db().cache.accounts.get(&addr) {
                     if let Some(code) = &account.info.code {
                         let bytes = match code {
@@ -417,59 +417,59 @@ fn execute_collect_proof_flow(
     }
 }
 
-async fn build_obfuscated_flow_inputs(
+async fn build_camouflaged_flow_inputs(
     label: &str,
     transforms: Vec<Box<dyn Transform>>,
 ) -> Result<(Bytes, Bytes, [u8; 4])> {
     let seed = Seed::from_hex("0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
         .expect("valid fixed seed");
-    build_obfuscated_flow_inputs_with_seed(label, transforms, seed).await
+    build_camouflaged_flow_inputs_with_seed(label, transforms, seed).await
 }
 
-async fn build_obfuscated_flow_inputs_with_seed(
+async fn build_camouflaged_flow_inputs_with_seed(
     label: &str,
     transforms: Vec<Box<dyn Transform>>,
     seed: Seed,
 ) -> Result<(Bytes, Bytes, [u8; 4])> {
-    println!("\n=== Obfuscating escrow bytecode for {} ===", label);
-    let config = ObfuscationConfig {
+    println!("\n=== Camouflaging escrow bytecode for {} ===", label);
+    let config = CamouflageConfig {
         seed,
         transforms,
         preserve_unknown_opcodes: true,
     };
-    let obfuscation_result = obfuscate_bytecode(
+    let camouflage_result = camouflage_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
         config,
     )
     .await
-    .map_err(|e| eyre!("Failed to obfuscate bytecode for {}: {:?}", label, e))?;
+    .map_err(|e| eyre!("Failed to camouflage bytecode for {}: {:?}", label, e))?;
 
-    let selector_mapping = obfuscation_result
+    let selector_mapping = camouflage_result
         .selector_mapping
         .as_ref()
-        .ok_or_else(|| eyre!("No selector mapping in obfuscation result"))?;
-    let mappings = EscrowMappings::from_obfuscator_output(selector_mapping)
+        .ok_or_else(|| eyre!("No selector mapping in camouflage result"))?;
+    let mappings = EscrowMappings::from_camouflage_tool_output(selector_mapping)
         .map_err(|e| eyre!("Failed to build EscrowMappings for {}: {}", label, e))?;
-    let caller = ObfuscatedCaller::new(mappings);
+    let caller = CamouflagedCaller::new(mappings);
     println!(
         "✓ [{}] built EscrowMappings with {} selectors",
         label,
         selector_mapping.len()
     );
 
-    // Optional: dump obfuscated bytecode hex for offline disassembly/debug.
-    if let Ok(dir) = std::env::var("DUMP_OBFUSCATED") {
+    // Optional: dump camouflaged bytecode hex for offline disassembly/debug.
+    if let Ok(dir) = std::env::var("DUMP_CAMOUFLAGED") {
         let path = format!("{dir}/{label}.hex");
-        let body = obfuscation_result
+        let body = camouflage_result
             .obfuscated_bytecode
             .trim_start_matches("0x");
         let _ = std::fs::write(&path, body);
-        println!("✓ [{}] dumped obfuscated bytecode to {}", label, path);
+        println!("✓ [{}] dumped camouflaged bytecode to {}", label, path);
     }
 
     let deployment_bytecode = prepare_bytecode_with_args(
-        &obfuscation_result.obfuscated_bytecode,
+        &camouflage_result.obfuscated_bytecode,
         PROOF_TOKEN,
         PROOF_RECIPIENT,
         U256::from(TRANSFER_AMOUNT),
@@ -570,7 +570,7 @@ async fn test_collect_with_erc20_proof_baseline_succeeds() -> Result<()> {
 async fn test_collect_with_erc20_proof_dispatcher_only_succeeds() -> Result<()> {
     let label = "dispatcher_only";
     let (deployment_bytecode, bond_calldata, collect_selector) =
-        build_obfuscated_flow_inputs(label, vec![]).await?;
+        build_camouflaged_flow_inputs(label, vec![]).await?;
     let outcome =
         execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
     assert_collect_flow_success(label, outcome)
@@ -614,7 +614,7 @@ async fn test_collect_with_erc20_proof_dispatcher_only_succeeds() -> Result<()> 
 async fn test_collect_with_erc20_proof_dispatcher_plus_arithmetic_chain_succeeds() -> Result<()> {
     let label = "dispatcher_plus_arithmetic_chain";
     let (deployment_bytecode, bond_calldata, collect_selector) =
-        build_obfuscated_flow_inputs(label, vec![Box::new(ArithmeticChain::new())]).await?;
+        build_camouflaged_flow_inputs(label, vec![Box::new(ArithmeticChain::new())]).await?;
     let outcome =
         execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
     assert_collect_flow_success(label, outcome)
@@ -648,7 +648,7 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_arithmetic_chain_succeeds
 async fn test_collect_with_erc20_proof_dispatcher_plus_push_split_succeeds() -> Result<()> {
     let label = "dispatcher_plus_push_split";
     let (deployment_bytecode, bond_calldata, collect_selector) =
-        build_obfuscated_flow_inputs(label, vec![Box::new(PushSplit::new())]).await?;
+        build_camouflaged_flow_inputs(label, vec![Box::new(PushSplit::new())]).await?;
     let outcome =
         execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
     assert_collect_flow_success(label, outcome)
@@ -684,7 +684,7 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_push_split_succeeds() -> 
 async fn test_collect_with_erc20_proof_dispatcher_plus_slot_shuffle_succeeds() -> Result<()> {
     let label = "dispatcher_plus_slot_shuffle";
     let (deployment_bytecode, bond_calldata, collect_selector) =
-        build_obfuscated_flow_inputs(label, vec![Box::new(SlotShuffle::new())]).await?;
+        build_camouflaged_flow_inputs(label, vec![Box::new(SlotShuffle::new())]).await?;
     let outcome =
         execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
     assert_collect_flow_success(label, outcome)
@@ -694,7 +694,7 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_slot_shuffle_succeeds() -
 async fn test_collect_with_erc20_proof_dispatcher_plus_string_obfuscate_succeeds() -> Result<()> {
     let label = "dispatcher_plus_string_obfuscate";
     let (deployment_bytecode, bond_calldata, collect_selector) =
-        build_obfuscated_flow_inputs(label, vec![Box::new(StringObfuscate::new())]).await?;
+        build_camouflaged_flow_inputs(label, vec![Box::new(StringObfuscate::new())]).await?;
     let outcome =
         execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
     assert_collect_flow_success(label, outcome)
@@ -703,7 +703,7 @@ async fn test_collect_with_erc20_proof_dispatcher_plus_string_obfuscate_succeeds
 #[tokio::test]
 async fn test_collect_with_erc20_proof_default_pipeline_succeeds() -> Result<()> {
     let label = "default_pipeline";
-    let (deployment_bytecode, bond_calldata, collect_selector) = build_obfuscated_flow_inputs(
+    let (deployment_bytecode, bond_calldata, collect_selector) = build_camouflaged_flow_inputs(
         label,
         vec![
             Box::new(ArithmeticChain::new()),
@@ -729,7 +729,7 @@ async fn test_collect_with_erc20_proof_failing_seed_default_pipeline() -> Result
     let label = "failing_seed_default_pipeline";
     let seed = Seed::from_hex(MAINNET_FAILING_SEED).expect("valid seed");
     let (deployment_bytecode, bond_calldata, collect_selector) =
-        build_obfuscated_flow_inputs_with_seed(
+        build_camouflaged_flow_inputs_with_seed(
             label,
             vec![
                 Box::new(ArithmeticChain::new()),
@@ -782,11 +782,11 @@ async fn bisect_failing_seed_transform_subsets() -> Result<()> {
         let seed = Seed::from_hex(MAINNET_FAILING_SEED).expect("valid seed");
         let transforms: Vec<Box<dyn Transform>> = subset.iter().map(|&i| (all[i].1)()).collect();
 
-        let built = build_obfuscated_flow_inputs_with_seed(&label, transforms, seed).await;
+        let built = build_camouflaged_flow_inputs_with_seed(&label, transforms, seed).await;
         let (deployment_bytecode, bond_calldata, collect_selector) = match built {
             Ok(v) => v,
             Err(e) => {
-                println!("  {label}: OBFUSCATION FAILED: {e}");
+                println!("  {label}: CAMOUFLAGE FAILED: {e}");
                 continue;
             }
         };
@@ -813,8 +813,12 @@ async fn test_collect_with_erc20_proof_failing_seed_arithmetic_chain_only() -> R
     let label = "failing_seed_arithmetic_chain_only";
     let seed = Seed::from_hex(MAINNET_FAILING_SEED).expect("valid seed");
     let (deployment_bytecode, bond_calldata, collect_selector) =
-        build_obfuscated_flow_inputs_with_seed(label, vec![Box::new(ArithmeticChain::new())], seed)
-            .await?;
+        build_camouflaged_flow_inputs_with_seed(
+            label,
+            vec![Box::new(ArithmeticChain::new())],
+            seed,
+        )
+        .await?;
     let outcome =
         execute_collect_proof_flow(deployment_bytecode, bond_calldata, collect_selector, label)?;
     assert_collect_flow_success(label, outcome)

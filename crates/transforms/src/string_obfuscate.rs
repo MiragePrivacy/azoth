@@ -1,4 +1,4 @@
-//! Obfuscate Error(string) revert literals by rewriting string data PUSH immediates.
+//! Camouflage Error(string) revert literals by rewriting string data PUSH immediates.
 //!
 //! This pass uses structural detection for ABI-encoded Error(string).
 //! It handles two selector patterns:
@@ -18,7 +18,7 @@ use rand::RngCore;
 use std::collections::HashMap;
 use tracing::debug;
 
-/// Obfuscate Error(string) literals by scrambling the encoded string data.
+/// Camouflage Error(string) literals by scrambling the encoded string data.
 #[derive(Default)]
 pub struct StringObfuscate;
 
@@ -84,7 +84,7 @@ impl Transform for StringObfuscate {
         }
 
         if changed {
-            debug!("StringObfuscate: obfuscated Error(string) literals");
+            debug!("StringObfuscate: camouflaged Error(string) literals");
         } else {
             debug!("StringObfuscate: no eligible Error(string) literals found");
         }

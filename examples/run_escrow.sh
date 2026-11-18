@@ -1,47 +1,19 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
-echo "🚀 Running Mirage Obfuscation Workflow for Escrow"
-echo "================================================"
-echo ""
-
-# Check if we're in the examples directory
-if [[ ! -f "Cargo.toml" ]]; then
-    echo "❌ Please run this script from the examples/ directory"
-    echo "   Current directory: $(pwd)"
-    exit 1
+artifact_dir=escrow-bytecode/artifacts
+if [[ ! -f "$artifact_dir/erc20_deployment.hex" || ! -f "$artifact_dir/erc20_runtime.hex" ]]; then
+    git submodule update --init --recursive -- escrow-bytecode
 fi
 
-# Initialize submodule if not present
-if [ ! -d "escrow-bytecode" ]; then
-    echo "📥 Initializing escrow submodule..."
-    git submodule update --init --recursive
-else
-    echo "📥 Updating escrow submodule to latest..."
-    git submodule update --remote --merge escrow-bytecode
-fi
+for artifact in erc20_deployment.hex erc20_runtime.hex; do
+    if [[ ! -f "$artifact_dir/$artifact" ]]; then
+        printf 'Escrow artifact not found: %s\n' "$artifact_dir/$artifact" >&2
+        exit 1
+    fi
+done
 
-# Validate the bytecode file exists in submodule
-if [ ! -f "escrow-bytecode/artifacts/bytecode.hex" ]; then
-    echo "❌ Error: Bytecode file not found (escrow-bytecode/artifacts/bytecode.hex)"
-    echo "   Ensure it's committed in the escrow repo and try again."
-    exit 1
-fi
-
-# Build Rust project
-echo ""
-echo "🦀 Building Rust project..."
-if ! cargo build; then
-    echo "   ❌ Rust project compilation failed."
-    exit 1
-fi
-
-# Run the obfuscation demo
-echo ""
-echo "🔨 Running obfuscation demo..."
-cargo run --bin azoth-examples
-
-echo ""
-echo "🎉 Workflow complete!"
-echo "📋 Verify the report: cat mirage_report.json"
+cargo run --locked --release --bin azoth-examples
+printf '\nReport saved to %s/mirage_report.json\n' "$PWD"

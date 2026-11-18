@@ -75,9 +75,9 @@ pub enum Error {
     #[error("caller-supplied runtime occurs {0} times in deployment bytecode")]
     AmbiguousRuntimeMatch(usize),
 
-    /// Obfuscation operation failed.
-    #[error("obfuscation failed: {0}")]
-    ObfuscationFailed(String),
+    /// Camouflage operation failed.
+    #[error("camouflage failed: {0}")]
+    CamouflageFailed(String),
 
     /// Failed to parse assembly at the specified line.
     #[error("assembly parse error at line {line}: {msg} ⇒ `{raw}`")]

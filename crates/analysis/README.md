@@ -1,6 +1,6 @@
 # Azoth Analysis
 
-The `azoth-analysis` crate provides analytical metrics for evaluating EVM bytecode obfuscation transforms. This crate implements a minimal set of metrics to assess transform potency and gas efficiency.
+The `azoth-analysis` crate provides analytical metrics for evaluating EVM bytecode camouflage transforms. This crate implements a minimal set of metrics to assess transform potency and gas efficiency.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ The analysis crate focuses on quantifying bytecode complexity through:
 2. **Stack Usage** - Maximum stack height measurements  
 3. **Dominator Analysis** - Control flow critical points using dominator/post-dominator overlap
 4. **Size Metrics** - Bytecode length tracking
-5. **Obfuscation Persistence** - Longest preserved byte sequences and n-gram diversity across randomized obfuscations
+5. **Camouflage Persistence** - Longest preserved byte sequences and n-gram diversity across randomized camouflage runs
 
 ## Key Components
 
@@ -52,16 +52,16 @@ The potency score uses the formula:
 potency = 5.0 * log₂(nodes) + edges + 30.0 * (1.0 - overlap)
 ```
 
-This balances control flow complexity against dominator overlap, with higher scores indicating greater obfuscation potential.
+This balances control flow complexity against dominator overlap, with higher scores indicating greater camouflage potential.
 
-### Obfuscation Experiment (`obfuscation.rs`)
+### Camouflage Experiment (`camouflage.rs`)
 
-Runs multiple obfuscation attempts with randomized seeds and aggregates:
+Runs multiple camouflage attempts with randomized seeds and aggregates:
 
 - Longest common preserved byte sequences per iteration  
 - Summary statistics (average, median, percentiles, range, standard deviation)  
 - Histogram distribution of preserved lengths  
 - Top ten most frequent preserved sequences  
-- N-gram diversity (n = 2, 4, 8) across obfuscated outputs
+- N-gram diversity (n = 2, 4, 8) across camouflaged outputs
 
-Use `AnalysisConfig` to configure iterations, transform passes, and output path, then call `analyze_obfuscation(config)` to produce a markdown report. The CLI subcommand `azoth analyze` builds on this module.
+Use `AnalysisConfig` to configure iterations, transform passes, and output path, then call `analyze_camouflage(config)` to produce a markdown report. The CLI subcommand `azoth analyze` builds on this module.

@@ -16,26 +16,26 @@ pub enum ViewMode {
     DecompileDiff,
 }
 
-/// Debug output format - subset of ObfuscationResult.
+/// Debug output format - subset of CamouflageResult.
 ///
 /// This is the main data structure loaded from the debug JSON file
-/// produced by the obfuscator.
+/// produced by the camouflage tool.
 #[derive(Debug, Deserialize)]
 pub struct DebugOutput {
-    /// Metadata about the obfuscation run.
+    /// Metadata about the camouflage run.
     #[allow(dead_code)]
     pub metadata: DebugMetadata,
     /// Trace events recording each operation performed.
     pub trace: Vec<TraceEvent>,
 }
 
-/// Metadata from obfuscation.
+/// Metadata from camouflage.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct DebugMetadata {
     /// Names of transforms that were applied.
     pub transforms_applied: Vec<String>,
-    /// Whether the size limit was exceeded during obfuscation.
+    /// Whether the size limit was exceeded during camouflage.
     #[serde(default)]
     pub size_limit_exceeded: bool,
     /// Whether unknown opcodes were preserved.

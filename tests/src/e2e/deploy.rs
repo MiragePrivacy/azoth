@@ -2,8 +2,8 @@ use super::{
     deploy_contract, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, ESCROW_CONTRACT_RUNTIME_BYTECODE,
 };
 use azoth_core::seed::Seed;
+use azoth_transform::camouflage::{camouflage_bytecode, CamouflageConfig};
 use azoth_transform::jump_address_transformer::JumpAddressTransformer;
-use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
 use azoth_transform::opaque_predicate::OpaquePredicate;
 use azoth_transform::shuffle::Shuffle;
 use azoth_transform::Transform;
@@ -30,8 +30,8 @@ fn deploy_and_verify_contract_revm(bytecode_hex: &str, name: &str) -> Result<(Ad
 fn create_config_with_transforms(
     transforms: Vec<Box<dyn Transform>>,
     seed: Seed,
-) -> ObfuscationConfig {
-    ObfuscationConfig {
+) -> CamouflageConfig {
+    CamouflageConfig {
         seed,
         transforms,
         preserve_unknown_opcodes: true,
@@ -45,13 +45,13 @@ async fn test_function_dispatch_only() -> Result<()> {
     println!("Testing FunctionDispatcher only (no additional transforms)");
 
     let config = create_config_with_transforms(vec![], seed);
-    let result = obfuscate_bytecode(
+    let result = camouflage_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
         config,
     )
     .await
-    .map_err(|e| eyre!("Failed to obfuscate with function dispatcher: {}", e))?;
+    .map_err(|e| eyre!("Failed to camouflage with function dispatcher: {}", e))?;
 
     assert!(result
         .metadata
@@ -78,13 +78,13 @@ async fn test_shuffle_transform() -> Result<()> {
 
     let transforms: Vec<Box<dyn Transform>> = vec![Box::new(Shuffle)];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(
+    let result = camouflage_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
         config,
     )
     .await
-    .map_err(|e| eyre!("Failed to obfuscate with shuffle: {}", e))?;
+    .map_err(|e| eyre!("Failed to camouflage with shuffle: {}", e))?;
 
     assert!(result
         .metadata
@@ -115,13 +115,13 @@ async fn test_jump_address_transform() -> Result<()> {
 
     let transforms: Vec<Box<dyn Transform>> = vec![Box::new(JumpAddressTransformer::new())];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(
+    let result = camouflage_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
         config,
     )
     .await
-    .map_err(|e| eyre!("Failed to obfuscate with jump address transformer: {}", e))?;
+    .map_err(|e| eyre!("Failed to camouflage with jump address transformer: {}", e))?;
 
     assert!(result
         .metadata
@@ -148,13 +148,13 @@ async fn test_opaque_predicate_transform() -> Result<()> {
 
     let transforms: Vec<Box<dyn Transform>> = vec![Box::new(OpaquePredicate::new())];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(
+    let result = camouflage_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
         config,
     )
     .await
-    .map_err(|e| eyre!("Failed to obfuscate with opaque predicate: {}", e))?;
+    .map_err(|e| eyre!("Failed to camouflage with opaque predicate: {}", e))?;
 
     assert!(result
         .metadata
@@ -177,13 +177,13 @@ async fn test_shuffle_and_jump_address() -> Result<()> {
     let transforms: Vec<Box<dyn Transform>> =
         vec![Box::new(Shuffle), Box::new(JumpAddressTransformer::new())];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(
+    let result = camouflage_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
         config,
     )
     .await
-    .map_err(|e| eyre!("Failed to obfuscate with shuffle + jump address: {}", e))?;
+    .map_err(|e| eyre!("Failed to camouflage with shuffle + jump address: {}", e))?;
 
     assert!(result
         .metadata
@@ -212,13 +212,18 @@ async fn test_shuffle_and_opaque_predicate() -> Result<()> {
     let transforms: Vec<Box<dyn Transform>> =
         vec![Box::new(Shuffle), Box::new(OpaquePredicate::new())];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(
+    let result = camouflage_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
         config,
     )
     .await
-    .map_err(|e| eyre!("Failed to obfuscate with shuffle + opaque predicate: {}", e))?;
+    .map_err(|e| {
+        eyre!(
+            "Failed to camouflage with shuffle + opaque predicate: {}",
+            e
+        )
+    })?;
 
     assert!(result
         .metadata
@@ -250,7 +255,7 @@ async fn test_jump_address_and_opaque_predicate() -> Result<()> {
         Box::new(OpaquePredicate::new()),
     ];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(
+    let result = camouflage_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
         config,
@@ -258,7 +263,7 @@ async fn test_jump_address_and_opaque_predicate() -> Result<()> {
     .await
     .map_err(|e| {
         eyre!(
-            "Failed to obfuscate with jump address + opaque predicate: {}",
+            "Failed to camouflage with jump address + opaque predicate: {}",
             e
         )
     })?;
@@ -296,13 +301,13 @@ async fn test_all_transforms_enabled() -> Result<()> {
         Box::new(OpaquePredicate::new()),
     ];
     let config = create_config_with_transforms(transforms, seed);
-    let result = obfuscate_bytecode(
+    let result = camouflage_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
         config,
     )
     .await
-    .map_err(|e| eyre!("Failed to obfuscate with all transforms: {}", e))?;
+    .map_err(|e| eyre!("Failed to camouflage with all transforms: {}", e))?;
 
     // Verify all transforms were applied
     assert!(result

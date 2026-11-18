@@ -3,11 +3,11 @@ use clap::Subcommand;
 use std::error::Error;
 
 pub mod analyze;
+pub mod camouflage;
 pub mod cfg;
 pub mod decode;
 pub mod decompile_diff;
 pub mod fuzz;
-pub mod obfuscate;
 pub mod strip;
 pub mod tui;
 
@@ -15,9 +15,9 @@ use thiserror::Error;
 
 pub const DEFAULT_PASSES: &str = "arithmetic_chain, push_split, slot_shuffle, string_obfuscate";
 
-/// Errors that can occur during obfuscation.
+/// Errors that can occur during camouflage.
 #[derive(Debug, Error)]
-pub enum ObfuscateError {
+pub enum CamouflageError {
     /// The hex string has an odd length, making it invalid.
     #[error("hex string has odd length: {0}")]
     OddLength(usize),
@@ -47,22 +47,23 @@ pub enum Cmd {
     Strip(strip::StripArgs),
     /// Write runtime CFG to stdout or a file.
     Cfg(cfg::CfgArgs),
-    /// Obfuscate bytecode with specified transforms.
-    Obfuscate(obfuscate::ObfuscateArgs),
-    /// Run obfuscation analysis across multiple seeds.
+    /// Camouflage bytecode with specified transforms.
+    #[command(alias = "obfuscate")]
+    Camouflage(camouflage::CamouflageArgs),
+    /// Run camouflage analysis across multiple seeds.
     Analyze(analyze::AnalyzeArgs),
-    /// Compare decompiled output before and after obfuscation.
+    /// Compare decompiled output before and after camouflage.
     DecompileDiff(decompile_diff::DecompileDiffArgs),
-    /// View obfuscation debug traces in a TUI.
+    /// View camouflage debug traces in a TUI.
     Tui(tui::TuiArgs),
-    /// Fuzz test the obfuscation pipeline.
+    /// Fuzz test the camouflage pipeline.
     Fuzz(fuzz::FuzzArgs),
 }
 
 /// Trait for executing CLI subcommands.
 ///
 /// Implementors define the logic for processing input bytecode and producing output (e.g.,
-/// assembly, stripped bytecode, CFG, or obfuscated bytecode).
+/// assembly, stripped bytecode, CFG, or camouflaged bytecode).
 #[async_trait]
 pub trait Command {
     /// Executes the subcommand.
@@ -79,7 +80,7 @@ impl Command for Cmd {
             Cmd::Decode(args) => args.execute().await,
             Cmd::Strip(args) => args.execute().await,
             Cmd::Cfg(args) => args.execute().await,
-            Cmd::Obfuscate(args) => args.execute().await,
+            Cmd::Camouflage(args) => args.execute().await,
             Cmd::Analyze(args) => args.execute().await,
             Cmd::DecompileDiff(args) => args.execute().await,
             Cmd::Tui(args) => args.execute().await,

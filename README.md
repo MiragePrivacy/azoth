@@ -3,19 +3,17 @@
 
 ## What is Azoth?
 
-Azoth is a deterministic EVM bytecode obfuscator designed to make Mirage's execution contracts indistinguishable from ordinary, unverified deployments on Ethereum. The name "[Azoth](https://www.wikiwand.com/en/articles/Azoth)" derives from medieval alchemy, where it referred to the universal solvent: a hypothetical substance capable of dissolving any material and serving as the essential agent of transformation.
+Azoth is an open-source bytecode camouflage tool for Ethereum smart contracts. It changes recognizable features of compiled code, such as how the contract routes function calls, while aiming to preserve its behavior. With the same input, settings, and seed, you can reproduce the output and check it against a deployment.
+
+Mirage uses Azoth so that its one-time escrows don’t all publish the same bytecode. Without that variation, an exact match against one known deployment could flag other escrows using the template. Camouflage addresses that signal while keeping the deployment reproducible. Observers can still examine shared patterns and onchain behavior. Mirage’s [zero-knowledge settlement proofs](https://docs.mirageprivacy.com/developers/technical-model#settlement-proofs) keep payment evidence private even when an escrow is recognized.
 
 ## How does it work?
 
-1. Dissection: decode the contract’s init/runtime layout, resolve sections, and build a control-flow graph of block bodies and jump targets.
+1. **Read the bytecode.** Azoth identifies the creation and runtime code and maps the paths the contract can take.
+2. **Apply transforms.** The seed guides changes to the bytecode, such as varying how the contract dispatches function calls.
+3. **Reassemble the deployment.** Azoth rebuilds the bytecode and checks its structure. The project also includes tools to compare behavior before and after a transformation.
 
-2. Transformation: apply deterministic transformations (e.g dispatcher transforms, block shuffling etc.) that changes the structure of the bytecode without blowing gas or size limits.
-
-3. Recovery: lower the rewritten runtime, patch init-code offsets, and mask any exact constructor-argument suffix so the final bytecode stays deployable without retaining an ABI-aligned plaintext tail.
-
-Azoth also incorporates a formal verification system that provides mathematical guarantees of functional equivalence between original and obfuscated contracts.
-
-Constructor-argument masking is an obfuscation boundary, not encryption: it defeats verbatim static suffix recovery, but public creation code can still be analyzed or executed to recover values. See the [constructor-argument security and benchmark report](docs/constructor-argument-obfuscation.md).
+Azoth can mask constructor arguments in the creation bytecode. The public code still contains enough information to recover those arguments. See the [constructor-argument report](docs/constructor-argument-camouflage.md) for details.
 
 ## Status
 
@@ -23,11 +21,11 @@ Azoth is under active development: the parsing pipeline, CFG builder, and severa
 
 ## Getting Started
 
-Azoth is available through a command-line interface. This could be used for local development, testing, and experimentation with bytecode obfuscation.
+Run `cargo run --bin azoth -- camouflage --help` to see how to supply deployment bytecode, a seed, and transform settings. The [CLI guide](crates/cli/README.md) walks through an example. Existing scripts can still use the `obfuscate` command alias.
 
 ## Fuzzing
 
-Azoth includes a built-in fuzzer for testing the obfuscation pipeline. The fuzzer generates random seeds and transform combinations, running them against test contracts to discover edge cases and potential issues.
+Azoth includes a built-in fuzzer for testing the camouflage pipeline. The fuzzer generates random seeds and transform combinations, running them against test contracts to discover edge cases and potential issues.
 
 ### Basic Usage
 
@@ -44,7 +42,7 @@ cargo run --bin azoth -- fuzz -d 60
 # Use 4 parallel workers
 cargo run --bin azoth -- fuzz -j 4
 
-# Enable deployment verification (checks obfuscated bytecode deploys correctly)
+# Enable deployment verification (checks camouflaged bytecode deploys correctly)
 cargo run --bin azoth -- fuzz --check-deploy
 ```
 
@@ -68,11 +66,11 @@ cargo run --bin azoth -- fuzz replay crashes/crash_abc123.json
 | `-i, --iterations <N>` | Maximum iterations, 0 for infinite (default: 0) |
 | `-d, --duration <SECS>` | Maximum duration in seconds, 0 for infinite (default: 0) |
 | `--crash-dir <PATH>` | Directory to save crash files (default: `crashes/`) |
-| `--check-deploy` | Verify obfuscated bytecode deploys successfully via REVM |
+| `--check-deploy` | Verify camouflaged bytecode deploys successfully via REVM |
 
 ## Contributing
 
 We welcome new transforms, analysis improvements, performance tuning, documentation, and bug fixes. See [CONTRIBUTING.md](CONTRIBUTING.md) for style and workflow guidelines.
 
 ## Acknowledgments
-Azoth builds on years of research in program analysis, obfuscation, and blockchain privacy. We are grateful to the broader community whose work makes this project possible.
+Azoth builds on years of research in program analysis, camouflage, and blockchain privacy. We are grateful to the broader community whose work makes this project possible.

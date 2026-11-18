@@ -789,7 +789,7 @@ impl SmtSolver {
     pub fn generate_equivalence_formula(
         &self,
         original: &ContractSemantics,
-        obfuscated: &ContractSemantics,
+        camouflaged: &ContractSemantics,
     ) -> VerificationResult<String> {
         let mut formula = SmtFormula::new();
 
@@ -809,10 +809,10 @@ impl SmtSolver {
 
         formula
             .declarations
-            .push("; Obfuscated contract functions".to_string());
-        for function in &obfuscated.functions {
+            .push("; Camouflaged contract functions".to_string());
+        for function in &camouflaged.functions {
             formula.declarations.push(format!(
-                "(declare-fun {}-obfuscated (State Transaction) ExecResult)",
+                "(declare-fun {}-camouflaged (State Transaction) ExecResult)",
                 function.name
             ));
         }
@@ -821,7 +821,7 @@ impl SmtSolver {
         formula.assertions.push(
             "(assert (forall ((s State) (tx Transaction))
                 (= (final-state (execute-original s tx))
-                   (final-state (execute-obfuscated s tx)))))"
+                   (final-state (execute-camouflaged s tx)))))"
                 .to_string(),
         );
 
@@ -829,15 +829,15 @@ impl SmtSolver {
         formula.assertions.push(
             "(assert (forall ((s State) (tx Transaction))
                 (= (success (execute-original s tx))
-                   (success (execute-obfuscated s tx)))))"
+                   (success (execute-camouflaged s tx)))))"
                 .to_string(),
         );
 
-        // Gas bounds (obfuscated should use at most 15% more gas)
+        // Gas bounds (camouflaged should use at most 15% more gas)
         formula.assertions.push(
             "(assert (forall ((s State) (tx Transaction))
                 (=> (success (execute-original s tx))
-                    (<= (gas-used (execute-obfuscated s tx))
+                    (<= (gas-used (execute-camouflaged s tx))
                         (* 115 (div (gas-used (execute-original s tx)) 100))))))"
                 .to_string(),
         );
@@ -849,9 +849,9 @@ impl SmtSolver {
     pub async fn prove_equivalence(
         &self,
         original: &ContractSemantics,
-        obfuscated: &ContractSemantics,
+        camouflaged: &ContractSemantics,
     ) -> VerificationResult<bool> {
-        let equivalence_formula = self.generate_equivalence_formula(original, obfuscated)?;
+        let equivalence_formula = self.generate_equivalence_formula(original, camouflaged)?;
 
         // Check satisfiability (if unsatisfiable, then equivalence holds)
         let result = self.check_satisfiability(&[equivalence_formula]).await?;

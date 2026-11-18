@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Security properties that must be preserved during obfuscation
+/// Security properties that must be preserved during camouflage
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SecurityProperty {
     /// Access control: Who can call which functions
