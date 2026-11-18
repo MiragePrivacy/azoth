@@ -23,7 +23,7 @@ use thiserror::Error as ThisError;
 /// forcing deprecated transforms such as Shuffle.
 pub const DEFAULT_PASSES: &str = "";
 
-/// Configuration for running an camouflage analysis experiment.
+/// Configuration for running a camouflage analysis experiment.
 #[derive(Debug, Clone)]
 pub struct AnalysisConfig<'a> {
     /// Number of camouflaged samples to generate.

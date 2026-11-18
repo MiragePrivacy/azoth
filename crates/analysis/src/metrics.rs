@@ -188,7 +188,7 @@ fn score(overlap: f64, nodes: usize, edges: usize) -> f64 {
     5.0 * (nodes as f64).log2() + edges as f64 + 30.0 * (1.0 - overlap)
 }
 
-/// Compares two sets of metrics to evaluate an camouflage transform.
+/// Compares two sets of metrics to evaluate a camouflage transform.
 ///
 /// Computes the difference in potency scores, adjusted for byte length changes to account for gas
 /// costs. A positive result indicates the transform increases complexity without excessive size

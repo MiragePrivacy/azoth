@@ -20,7 +20,7 @@ pub struct AnalyzeArgs {
     /// Where to write the markdown report (default: ./camouflage_analysis_report.md).
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
-    /// Maximum attempts per iteration when an camouflage fails.
+    /// Maximum attempts per iteration when a camouflage fails.
     #[arg(long, default_value_t = 5)]
     max_attempts: usize,
 }

@@ -7,8 +7,13 @@
 //! to decode the arguments remains in public creation bytecode and can be recovered by a capable
 //! symbolic or dynamic analyst.
 
+pub use self::{
+    camouflage_constructor_args as obfuscate_constructor_args,
+    ConstructorArgsCamouflage as ConstructorArgsObfuscation,
+};
 use crate::arithmetic_chain::{compile_chain_inline, generate_chain, ChainConfig, ScatterStrategy};
 use crate::{Error, Result};
+
 use azoth_core::strip::CleanReport;
 use azoth_core::{encoder, Opcode};
 use rand::rngs::StdRng;

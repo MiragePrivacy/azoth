@@ -220,10 +220,15 @@ impl FuzzInput {
 /// Error categories for crash classification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum ErrorKind {
+    #[serde(rename = "Obfuscation")]
     Camouflage,
     Validation,
     ConstructorArgsVisible,
-    DeploymentMismatch { original: usize, camouflaged: usize },
+    DeploymentMismatch {
+        original: usize,
+        #[serde(rename = "obfuscated")]
+        camouflaged: usize,
+    },
 }
 
 impl fmt::Display for ErrorKind {
