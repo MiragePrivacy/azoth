@@ -7,7 +7,7 @@ use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, Rng};
 use tracing::debug;
 
-/// Jump Address Transformer obfuscates JUMP/JUMPI targets by splitting addresses
+/// Jump Address Transformer camouflages JUMP/JUMPI targets by splitting addresses
 /// into arithmetic operations that compute the original target at runtime.
 ///
 /// Instead of: PUSH1 0x42 JUMPI

@@ -1,4 +1,4 @@
-//! Type definitions for arithmetic chain obfuscation.
+//! Type definitions for arithmetic chain camouflage.
 //!
 //! This module defines the core data structures used throughout the arithmetic chain
 //! transform, including operations, chain definitions, scatter strategies, and

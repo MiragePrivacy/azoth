@@ -1,6 +1,6 @@
 # Contributing to Azoth
 
-Thank you for your interest in improving Azoth! We're excited to have you join us in building the future of EVM bytecode obfuscation.
+Thank you for your interest in improving Azoth! We're excited to have you join us in building the future of EVM bytecode camouflage.
 
 As Azoth is in early development, there are many opportunities to contribute at any level. Whether you're new to Rust, EVM internals, or are an experienced expert, we can use your help.
 
@@ -20,7 +20,7 @@ Since Azoth is in active development, the best way to get started is to:
 
 ## Contributing in Issues
 
-If you've discovered a bug, have a feature request, or want to discuss obfuscation techniques, you can create a new issue in the [Azoth issue tracker](https://github.com/MiragePrivacy/Azoth/issues/).
+If you've discovered a bug, have a feature request, or want to discuss camouflage techniques, you can create a new issue in the [Azoth issue tracker](https://github.com/MiragePrivacy/Azoth/issues/).
 
 ### Development Setup
 

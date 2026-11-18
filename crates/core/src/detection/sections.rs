@@ -189,7 +189,7 @@ pub fn locate_sections(
             len: aux_offset,
         });
     } else {
-        // Deployment bytecode (original or obfuscated)
+        // Deployment bytecode (original or camouflaged)
         if adjusted_init_end > 0 {
             tracing::debug!("Creating Init section: offset=0, len={}", adjusted_init_end);
             sections.push(Section {

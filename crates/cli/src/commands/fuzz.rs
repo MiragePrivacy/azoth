@@ -1,6 +1,6 @@
 //! Fuzz testing subcommand for the Azoth CLI.
 //!
-//! Runs parallel fuzz testing against the obfuscation pipeline, saving
+//! Runs parallel fuzz testing against the camouflage pipeline, saving
 //! reproducible crash inputs with debug traces for TUI visualization.
 
 use std::collections::HashSet;
@@ -16,7 +16,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use azoth_core::cfg_ir::TraceEvent;
 use azoth_core::seed::Seed;
-use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
+use azoth_transform::camouflage::{camouflage_bytecode, CamouflageConfig};
 use clap::{Args, Subcommand};
 use parking_lot::Mutex;
 use rand::rngs::SmallRng;
@@ -33,7 +33,7 @@ use sha3::{Digest, Sha3_256};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 
-use super::obfuscate::build_passes;
+use super::camouflage::build_passes;
 use crate::commands::DEFAULT_PASSES;
 
 fn num_cpus() -> usize {
@@ -98,7 +98,7 @@ const COUNTER_DEPLOYMENT: &str =
 const COUNTER_RUNTIME: &str =
     include_str!("../../../../tests/bytecode/counter/counter_runtime.hex");
 
-/// Fuzz testing for the obfuscation pipeline.
+/// Fuzz testing for the camouflage pipeline.
 #[derive(Args)]
 pub struct FuzzArgs {
     #[command(subcommand)]
@@ -120,7 +120,7 @@ pub struct FuzzArgs {
     #[arg(long, default_value = "crashes")]
     crash_dir: PathBuf,
 
-    /// Check that obfuscated bytecode deploys successfully
+    /// Check that camouflaged bytecode deploys successfully
     #[arg(long, default_value = "false")]
     check_deploy: bool,
 }
@@ -220,25 +220,25 @@ impl FuzzInput {
 /// Error categories for crash classification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum ErrorKind {
-    Obfuscation,
+    Camouflage,
     Validation,
     ConstructorArgsVisible,
-    DeploymentMismatch { original: usize, obfuscated: usize },
+    DeploymentMismatch { original: usize, camouflaged: usize },
 }
 
 impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Obfuscation => write!(f, "obfuscation failed"),
+            Self::Camouflage => write!(f, "camouflage failed"),
             Self::Validation => write!(f, "validation failed"),
             Self::ConstructorArgsVisible => write!(f, "constructor arguments remain visible"),
             Self::DeploymentMismatch {
                 original,
-                obfuscated,
+                camouflaged,
             } => {
                 write!(
                     f,
-                    "deployment mismatch (orig={original}b, obf={obfuscated}b)"
+                    "deployment mismatch (orig={original}b, obf={camouflaged}b)"
                 )
             }
         }
@@ -453,7 +453,7 @@ async fn run_fuzz_input(input: &FuzzInput, check_deploy: bool) -> Result<(), Fuz
     let seed = Seed::from_bytes(input.seed_bytes());
     let original_bytes = prepare_bytecode(input.contract, deployment_hex, input.seed_bytes())
         .ok_or_else(|| FuzzFailure {
-            kind: ErrorKind::Obfuscation,
+            kind: ErrorKind::Camouflage,
             message: "failed to prepare original bytecode".into(),
             trace: Vec::new(),
             obfuscated_bytecode: None,
@@ -462,26 +462,26 @@ async fn run_fuzz_input(input: &FuzzInput, check_deploy: bool) -> Result<(), Fuz
     let full_deployment_hex = format!("0x{}", hex::encode(&original_bytes));
 
     let transforms = build_passes(&input.passes).map_err(|e| FuzzFailure {
-        kind: ErrorKind::Obfuscation,
+        kind: ErrorKind::Camouflage,
         message: format!("invalid passes: {e}"),
         trace: Vec::new(),
         obfuscated_bytecode: None,
         logs: Vec::new(),
     })?;
 
-    let config = ObfuscationConfig {
+    let config = CamouflageConfig {
         seed,
         transforms,
         preserve_unknown_opcodes: true,
     };
 
-    let result = obfuscate_bytecode(&full_deployment_hex, runtime_hex, config)
+    let result = camouflage_bytecode(&full_deployment_hex, runtime_hex, config)
         .await
         .map_err(|e| {
             let kind = if e.message.contains("validation") || e.message.contains("invalid jump") {
                 ErrorKind::Validation
             } else {
-                ErrorKind::Obfuscation
+                ErrorKind::Camouflage
             };
             FuzzFailure {
                 kind,
@@ -495,7 +495,7 @@ async fn run_fuzz_input(input: &FuzzInput, check_deploy: bool) -> Result<(), Fuz
     if input.contract == Contract::Escrow {
         let base_len = hex::decode(deployment_hex.trim().trim_start_matches("0x"))
             .map_err(|error| FuzzFailure {
-                kind: ErrorKind::Obfuscation,
+                kind: ErrorKind::Camouflage,
                 message: format!("failed to decode base deployment: {error}"),
                 trace: result.trace.clone(),
                 obfuscated_bytecode: Some(result.obfuscated_bytecode.clone()),
@@ -503,20 +503,18 @@ async fn run_fuzz_input(input: &FuzzInput, check_deploy: bool) -> Result<(), Fuz
             })?
             .len();
         let args = &original_bytes[base_len..];
-        let obfuscated =
-            hex::decode(result.obfuscated_bytecode.trim_start_matches("0x")).map_err(|error| {
-                FuzzFailure {
-                    kind: ErrorKind::Obfuscation,
-                    message: format!("failed to decode obfuscated deployment: {error}"),
-                    trace: result.trace.clone(),
-                    obfuscated_bytecode: Some(result.obfuscated_bytecode.clone()),
-                    logs: Vec::new(),
-                }
+        let camouflaged = hex::decode(result.obfuscated_bytecode.trim_start_matches("0x"))
+            .map_err(|error| FuzzFailure {
+                kind: ErrorKind::Camouflage,
+                message: format!("failed to decode camouflaged deployment: {error}"),
+                trace: result.trace.clone(),
+                obfuscated_bytecode: Some(result.obfuscated_bytecode.clone()),
+                logs: Vec::new(),
             })?;
-        if obfuscated.windows(args.len()).any(|window| window == args) {
+        if camouflaged.windows(args.len()).any(|window| window == args) {
             return Err(FuzzFailure {
                 kind: ErrorKind::ConstructorArgsVisible,
-                message: "the complete ABI constructor suffix survived obfuscation".into(),
+                message: "the complete ABI constructor suffix survived camouflage".into(),
                 trace: result.trace,
                 obfuscated_bytecode: Some(result.obfuscated_bytecode),
                 logs: Vec::new(),
@@ -524,10 +522,10 @@ async fn run_fuzz_input(input: &FuzzInput, check_deploy: bool) -> Result<(), Fuz
         }
         for word_index in [0usize, 1, 2, 4] {
             let word = &args[word_index * 32..(word_index + 1) * 32];
-            if obfuscated.windows(32).any(|window| window == word) {
+            if camouflaged.windows(32).any(|window| window == word) {
                 return Err(FuzzFailure {
                     kind: ErrorKind::ConstructorArgsVisible,
-                    message: format!("constructor ABI word {word_index} survived obfuscation"),
+                    message: format!("constructor ABI word {word_index} survived camouflage"),
                     trace: result.trace,
                     obfuscated_bytecode: Some(result.obfuscated_bytecode),
                     logs: Vec::new(),
@@ -542,27 +540,27 @@ async fn run_fuzz_input(input: &FuzzInput, check_deploy: bool) -> Result<(), Fuz
 
     let original_deployed = deploy_to_revm(&original_bytes, input.contract).is_ok();
 
-    let prepared_obfuscated = hex::decode(result.obfuscated_bytecode.trim_start_matches("0x"))
+    let prepared_camouflaged = hex::decode(result.obfuscated_bytecode.trim_start_matches("0x"))
         .map_err(|error| FuzzFailure {
-            kind: ErrorKind::Obfuscation,
-            message: format!("failed to decode obfuscated bytecode: {error}"),
+            kind: ErrorKind::Camouflage,
+            message: format!("failed to decode camouflaged bytecode: {error}"),
             trace: result.trace.clone(),
             obfuscated_bytecode: Some(result.obfuscated_bytecode.clone()),
             logs: Vec::new(),
         })?;
 
-    let obfuscated_deployed = deploy_to_revm(&prepared_obfuscated, input.contract).is_ok();
+    let camouflaged_deployed = deploy_to_revm(&prepared_camouflaged, input.contract).is_ok();
 
-    if original_deployed && !obfuscated_deployed {
+    if original_deployed && !camouflaged_deployed {
         return Err(FuzzFailure {
             kind: ErrorKind::DeploymentMismatch {
                 original: original_bytes.len(),
-                obfuscated: prepared_obfuscated.len(),
+                camouflaged: prepared_camouflaged.len(),
             },
             message: format!(
-                "original deployed but obfuscated failed ({}b vs {}b)",
+                "original deployed but camouflaged failed ({}b vs {}b)",
                 original_bytes.len(),
-                prepared_obfuscated.len()
+                prepared_camouflaged.len()
             ),
             trace: result.trace,
             obfuscated_bytecode: Some(result.obfuscated_bytecode),

@@ -4,12 +4,11 @@ use tracing_subscriber::EnvFilter;
 
 /// Azoth CLI
 ///
-/// Azoth is an EVM bytecode obfuscator that supports decoding bytecode to assembly,
-/// stripping non-runtime sections, generating control flow graphs, and applying obfuscation
-/// transforms
+/// Azoth is an EVM bytecode camouflage tool that decodes bytecode to assembly, extracts runtime bytecode,
+/// builds control flow graphs, and applies deterministic transforms.
 #[derive(Parser)]
 #[command(name = "azoth")]
-#[command(about = "Azoth: EVM bytecode obfuscator")]
+#[command(about = "Azoth: EVM bytecode camouflage tool")]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,

@@ -1,5 +1,5 @@
 use crate::arithmetic_chain::ArithmeticChain;
-use crate::constructor_args::obfuscate_constructor_args;
+use crate::constructor_args::camouflage_constructor_args;
 use crate::function_dispatcher::FunctionDispatcher;
 use crate::push_split::PushSplit;
 use crate::slot_shuffle::SlotShuffle;
@@ -17,16 +17,16 @@ use std::collections::{HashMap, HashSet};
 const MAX_INITCODE_SIZE: usize = 49_152;
 const MAX_RUNTIME_CODE_SIZE: usize = 24_576;
 
-/// Error from the obfuscation pipeline, including a partial trace for debugging.
+/// Error from the camouflage pipeline, including a partial trace for debugging.
 #[derive(Debug)]
-pub struct ObfuscationError {
+pub struct CamouflageError {
     /// The underlying error message.
     pub message: String,
     /// Partial trace captured before the error occurred.
     pub trace: Vec<TraceEvent>,
 }
 
-impl ObfuscationError {
+impl CamouflageError {
     fn from_err(e: impl std::fmt::Display, trace: &[TraceEvent]) -> Self {
         Self {
             message: e.to_string(),
@@ -35,17 +35,17 @@ impl ObfuscationError {
     }
 }
 
-impl std::fmt::Display for ObfuscationError {
+impl std::fmt::Display for CamouflageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)
     }
 }
 
-impl std::error::Error for ObfuscationError {}
+impl std::error::Error for CamouflageError {}
 
-/// Configuration for the obfuscation pipeline
-pub struct ObfuscationConfig {
-    /// Cryptographic seed for deterministic obfuscation
+/// Configuration for the camouflage pipeline
+pub struct CamouflageConfig {
+    /// Cryptographic seed for deterministic camouflage
     pub seed: Seed,
     /// List of transforms to apply
     pub transforms: Vec<Box<dyn Transform>>,
@@ -53,7 +53,7 @@ pub struct ObfuscationConfig {
     pub preserve_unknown_opcodes: bool,
 }
 
-impl ObfuscationConfig {
+impl CamouflageConfig {
     /// Create config with a specific seed
     pub fn with_seed(seed: Seed) -> Self {
         Self {
@@ -64,7 +64,7 @@ impl ObfuscationConfig {
     }
 }
 
-impl Default for ObfuscationConfig {
+impl Default for CamouflageConfig {
     fn default() -> Self {
         Self {
             seed: Seed::generate(),
@@ -79,9 +79,9 @@ impl Default for ObfuscationConfig {
     }
 }
 
-impl std::fmt::Debug for ObfuscationConfig {
+impl std::fmt::Debug for CamouflageConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ObfuscationConfig")
+        f.debug_struct("CamouflageConfig")
             .field(
                 "transforms",
                 &format!("{} transforms", self.transforms.len()),
@@ -91,16 +91,16 @@ impl std::fmt::Debug for ObfuscationConfig {
     }
 }
 
-/// Result of the obfuscation pipeline
+/// Result of the camouflage pipeline
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObfuscationResult {
-    /// The obfuscated deployment bytecode as hex string (with 0x prefix)
+pub struct CamouflageResult {
+    /// The camouflaged deployment bytecode as hex string (with 0x prefix)
     pub obfuscated_bytecode: String,
-    /// The obfuscated runtime bytecode as hex string (with 0x prefix)
+    /// The camouflaged runtime bytecode as hex string (with 0x prefix)
     pub obfuscated_runtime: String,
     /// Original bytecode size in bytes
     pub original_size: usize,
-    /// Obfuscated bytecode size in bytes  
+    /// Camouflaged bytecode size in bytes  
     pub obfuscated_size: usize,
     /// Size increase as percentage
     pub size_increase_percentage: f64,
@@ -114,17 +114,17 @@ pub struct ObfuscationResult {
     pub instructions_added: usize,
     /// Total number of instructions processed
     pub total_instructions: usize,
-    /// Metadata about the obfuscation process
-    pub metadata: ObfuscationMetadata,
+    /// Metadata about the camouflage process
+    pub metadata: CamouflageMetadata,
     /// Mapping from original selectors to tokens (if token dispatcher was applied)
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
-    /// Trace of CFG operations captured during obfuscation
+    /// Trace of CFG operations captured during camouflage
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trace: Vec<TraceEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObfuscationMetadata {
+pub struct CamouflageMetadata {
     /// Names of transforms that were applied
     pub transforms_applied: Vec<String>,
     /// Whether the size limit was exceeded
@@ -142,20 +142,20 @@ pub struct ObfuscationMetadata {
     pub constructor_decoder_bytes: usize,
 }
 
-/// Main obfuscation pipeline
-pub async fn obfuscate_bytecode(
+/// Main camouflage pipeline
+pub async fn camouflage_bytecode(
     deployment_bytecode: &str,
     runtime_bytecode: &str,
-    config: ObfuscationConfig,
-) -> Result<ObfuscationResult, ObfuscationError> {
-    tracing::debug!("Starting obfuscation pipeline:");
+    config: CamouflageConfig,
+) -> Result<CamouflageResult, CamouflageError> {
+    tracing::debug!("Starting camouflage pipeline:");
     tracing::debug!("  User transforms: {}", config.transforms.len());
 
     // Step 1: Process bytecode to CFG-IR
     let (mut cfg_ir, instructions, sections, bytes) =
         process_bytecode_to_cfg(deployment_bytecode, false, runtime_bytecode, false)
             .await
-            .map_err(|e| ObfuscationError {
+            .map_err(|e| CamouflageError {
                 message: e.to_string(),
                 trace: Vec::new(),
             })?;
@@ -370,20 +370,20 @@ pub async fn obfuscate_bytecode(
     tracing::debug!("  Reindexing PCs to normalize to 0-based addressing");
     let (pc_mapping, old_runtime_bounds) = cfg_ir
         .reindex_pcs()
-        .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
+        .map_err(|e| CamouflageError::from_err(e, &cfg_ir.trace))?;
     tracing::debug!("  PC reindexing complete: {} mappings", pc_mapping.len());
 
     // Patch jump immediates using the PC mapping
     cfg_ir
         .patch_jump_immediates(&pc_mapping, old_runtime_bounds)
-        .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
+        .map_err(|e| CamouflageError::from_err(e, &cfg_ir.trace))?;
     tracing::debug!("  Patched jump immediates after PC reindexing");
 
     // Remap orphan jump-address PUSHes (e.g. return addresses for internal function calls)
     // that are not part of any recognized jump pattern.
     cfg_ir
         .remap_orphan_jump_pushes(&pc_mapping, old_runtime_bounds)
-        .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
+        .map_err(|e| CamouflageError::from_err(e, &cfg_ir.trace))?;
 
     // Re-apply dispatcher jump target patches with OLD controller PCs (before updating)
     // NOTE: These patches update the PUSH2 instructions (jump targets), not the PUSH4 token instructions
@@ -403,7 +403,7 @@ pub async fn obfuscate_bytecode(
                 &dispatcher_patches,
                 &pc_mapping,
             )
-            .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
+            .map_err(|e| CamouflageError::from_err(e, &cfg_ir.trace))?;
         tracing::debug!("  Dispatcher jump target patches re-applied successfully");
 
         // Now update dispatcher_controller_pcs with remapped PCs
@@ -484,7 +484,7 @@ pub async fn obfuscate_bytecode(
         if !edits.is_empty() {
             dispatcher
                 .apply_instruction_replacements(&mut cfg_ir, edits)
-                .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
+                .map_err(|e| CamouflageError::from_err(e, &cfg_ir.trace))?;
         }
         // Debug: show resulting stub PUSH widths
         if let Some(stub_patches) = cfg_ir.stub_patches.clone() {
@@ -567,7 +567,7 @@ pub async fn obfuscate_bytecode(
         if !edits.is_empty() {
             dispatcher
                 .apply_instruction_replacements(&mut cfg_ir, edits)
-                .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
+                .map_err(|e| CamouflageError::from_err(e, &cfg_ir.trace))?;
         }
         tracing::debug!("  Decoy patches re-applied successfully");
     }
@@ -581,7 +581,7 @@ pub async fn obfuscate_bytecode(
         let dispatcher = FunctionDispatcher::new();
         dispatcher
             .reapply_controller_patches(&mut cfg_ir, &controller_patches, &pc_mapping)
-            .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
+            .map_err(|e| CamouflageError::from_err(e, &cfg_ir.trace))?;
         tracing::debug!("  Controller patches re-applied successfully");
     }
 
@@ -592,7 +592,7 @@ pub async fn obfuscate_bytecode(
     // the real runtime length.
     cfg_ir
         .patch_arithmetic_chain_codecopy_offsets()
-        .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
+        .map_err(|e| CamouflageError::from_err(e, &cfg_ir.trace))?;
 
     // Step 6: Extract and encode instructions
     let all_instructions = extract_instructions_from_cfg(&cfg_ir);
@@ -603,19 +603,19 @@ pub async fn obfuscate_bytecode(
 
     // Step 7: Encode back to bytecode (always with original for unknown opcode preservation)
     let mut obfuscated_bytes = encoder::encode(&all_instructions, &bytes)
-        .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
+        .map_err(|e| CamouflageError::from_err(e, &cfg_ir.trace))?;
 
     tracing::debug!("  Encoded to {} bytes", obfuscated_bytes.len());
 
     // Validate BEFORE appending data section - data section bytes would be
     // misinterpreted as code by the decoder, causing spurious validation failures
     tracing::debug!(
-        "  Validating obfuscated runtime jump targets ({} bytes)",
+        "  Validating camouflaged runtime jump targets ({} bytes)",
         obfuscated_bytes.len()
     );
     if let Err(e) = validator::validate_jump_targets(&obfuscated_bytes).await {
         tracing::warn!("Validation failed: {}", e);
-        return Err(ObfuscationError::from_err(e, &cfg_ir.trace));
+        return Err(CamouflageError::from_err(e, &cfg_ir.trace));
     }
     tracing::debug!("  Jump validation passed");
 
@@ -683,12 +683,12 @@ pub async fn obfuscate_bytecode(
     // This runs after init immutable patching so its insertion can remap all existing init jumps
     // once. It fails closed when arguments exist but their copy site is unsupported.
     let constructor_args =
-        obfuscate_constructor_args(&mut cfg_ir.clean_report, config.seed.as_bytes())
-            .map_err(|e| ObfuscationError::from_err(e, &cfg_ir.trace))?;
+        camouflage_constructor_args(&mut cfg_ir.clean_report, config.seed.as_bytes())
+            .map_err(|e| CamouflageError::from_err(e, &cfg_ir.trace))?;
     if constructor_args.applied {
         transforms_applied.push("ConstructorArgs".to_string());
         tracing::debug!(
-            "  Obfuscated {} constructor argument bytes with a {}-byte decoder",
+            "  Camouflaged {} constructor argument bytes with a {}-byte decoder",
             constructor_args.argument_bytes,
             constructor_args.decoder_bytes
         );
@@ -698,7 +698,7 @@ pub async fn obfuscate_bytecode(
     let final_bytecode = cfg_ir
         .clean_report
         .reassemble_checked(&obfuscated_bytes)
-        .map_err(|error| ObfuscationError::from_err(error, &cfg_ir.trace))?;
+        .map_err(|error| CamouflageError::from_err(error, &cfg_ir.trace))?;
     let obfuscated_size = final_bytecode.len();
 
     // CRITICAL DEBUGGING: Compare final bytecode to original
@@ -719,8 +719,8 @@ pub async fn obfuscate_bytecode(
     // Step 9: Detailed gas analysis
     let original_zero_bytes = bytes.iter().filter(|&&b| b == 0).count();
     let original_nonzero_bytes = bytes.len() - original_zero_bytes;
-    let obfuscated_zero_bytes = final_bytecode.iter().filter(|&&b| b == 0).count();
-    let obfuscated_nonzero_bytes = final_bytecode.len() - obfuscated_zero_bytes;
+    let camouflaged_zero_bytes = final_bytecode.iter().filter(|&&b| b == 0).count();
+    let camouflaged_nonzero_bytes = final_bytecode.len() - camouflaged_zero_bytes;
 
     tracing::debug!("Gas analysis breakdown:");
     tracing::debug!(
@@ -729,19 +729,19 @@ pub async fn obfuscate_bytecode(
         original_nonzero_bytes
     );
     tracing::debug!(
-        "  Obfuscated: {} zeros, {} non-zeros",
-        obfuscated_zero_bytes,
-        obfuscated_nonzero_bytes
+        "  Camouflaged: {} zeros, {} non-zeros",
+        camouflaged_zero_bytes,
+        camouflaged_nonzero_bytes
     );
 
     let original_gas =
         21_000 + (original_zero_bytes as u64 * 4) + (original_nonzero_bytes as u64 * 16);
-    let obfuscated_gas =
-        21_000 + (obfuscated_zero_bytes as u64 * 4) + (obfuscated_nonzero_bytes as u64 * 16);
-    let gas_delta = obfuscated_gas as i64 - original_gas as i64;
+    let camouflaged_gas =
+        21_000 + (camouflaged_zero_bytes as u64 * 4) + (camouflaged_nonzero_bytes as u64 * 16);
+    let gas_delta = camouflaged_gas as i64 - original_gas as i64;
 
     tracing::debug!("  Original gas: {}", original_gas);
-    tracing::debug!("  Obfuscated gas: {}", obfuscated_gas);
+    tracing::debug!("  Camouflaged gas: {}", camouflaged_gas);
     tracing::debug!("  Gas delta: {:+}", gas_delta);
 
     // Step 10: Enforce protocol size limits. Constructor arguments are part of the creation
@@ -766,16 +766,16 @@ pub async fn obfuscate_bytecode(
     let size_limit_exceeded =
         obfuscated_size > MAX_INITCODE_SIZE || deployed_runtime_size > MAX_RUNTIME_CODE_SIZE;
     if size_limit_exceeded {
-        return Err(ObfuscationError::from_err(
+        return Err(CamouflageError::from_err(
             format!(
-                "obfuscated bytecode exceeds an EVM size limit: initcode {obfuscated_size}/{MAX_INITCODE_SIZE} bytes, deployed runtime {deployed_runtime_size}/{MAX_RUNTIME_CODE_SIZE} bytes"
+                "camouflaged bytecode exceeds an EVM size limit: initcode {obfuscated_size}/{MAX_INITCODE_SIZE} bytes, deployed runtime {deployed_runtime_size}/{MAX_RUNTIME_CODE_SIZE} bytes"
             ),
             &cfg_ir.trace,
         ));
     }
 
     // Step 11: Build result
-    tracing::debug!("=== Building ObfuscationResult ===");
+    tracing::debug!("=== Building CamouflageResult ===");
     if let Some(ref mapping) = cfg_ir.selector_mapping {
         tracing::debug!("Selector mapping has {} entries:", mapping.len());
         for (selector, token) in mapping {
@@ -797,7 +797,7 @@ pub async fn obfuscate_bytecode(
     );
     let trace = cfg_ir.trace.clone();
 
-    Ok(ObfuscationResult {
+    Ok(CamouflageResult {
         obfuscated_bytecode: format!("0x{}", hex::encode(&final_bytecode)),
         obfuscated_runtime: format!("0x{}", hex::encode(&obfuscated_bytes)),
         original_size,
@@ -808,7 +808,7 @@ pub async fn obfuscate_bytecode(
         blocks_created,
         instructions_added,
         total_instructions,
-        metadata: ObfuscationMetadata {
+        metadata: CamouflageMetadata {
             transforms_applied,
             size_limit_exceeded,
             unknown_opcodes_preserved: config.preserve_unknown_opcodes,
@@ -893,8 +893,8 @@ fn extract_instructions_from_cfg(cfg_ir: &cfg_ir::CfgIrBundle) -> Vec<decoder::I
     all_instructions
 }
 
-/// Prints detailed analysis of the obfuscation process
-pub fn print_obfuscation_analysis(result: &ObfuscationResult) {
+/// Prints detailed analysis of the camouflage process
+pub fn print_camouflage_analysis(result: &CamouflageResult) {
     // Print input analysis if unknown opcodes were found
     if result.unknown_opcodes_count > 0 {
         println!("Input Analysis:");
@@ -906,7 +906,7 @@ pub fn print_obfuscation_analysis(result: &ObfuscationResult) {
         );
         println!("Unknown types found: {:?}", result.unknown_opcode_types);
         println!("   → These will be preserved as raw bytes in the output.");
-        println!("   → If the original contract works, the obfuscated version should too.");
+        println!("   → If the original contract works, the camouflaged version should too.");
         println!();
     }
 
@@ -927,7 +927,7 @@ pub fn print_obfuscation_analysis(result: &ObfuscationResult) {
     }
     if result.metadata.constructor_args_obfuscated {
         println!(
-            "Constructor arguments: {} bytes obfuscated, {} decoder bytes",
+            "Constructor arguments: {} bytes camouflaged, {} decoder bytes",
             result.metadata.constructor_argument_bytes, result.metadata.constructor_decoder_bytes
         );
     }
@@ -935,11 +935,11 @@ pub fn print_obfuscation_analysis(result: &ObfuscationResult) {
     // Print success summary
     if result.unknown_opcodes_count > 0 {
         println!(
-            "Obfuscation complete with {} unknown opcodes preserved",
+            "Camouflage complete with {} unknown opcodes preserved",
             result.unknown_opcodes_count
         );
     } else {
-        println!("Obfuscation complete");
+        println!("Camouflage complete");
     }
 
     println!(
@@ -949,8 +949,8 @@ pub fn print_obfuscation_analysis(result: &ObfuscationResult) {
     println!();
 }
 
-/// Creates a gas report from obfuscation results
-pub fn create_gas_report(result: &ObfuscationResult) -> serde_json::Value {
+/// Creates a gas report from camouflage results
+pub fn create_gas_report(result: &CamouflageResult) -> serde_json::Value {
     let gas = |bytes| 32_000 + 200 * bytes as u64;
 
     json!({
@@ -971,7 +971,7 @@ pub fn create_gas_report(result: &ObfuscationResult) -> serde_json::Value {
         "notes": if result.unknown_opcodes_count > 0 {
             "Unknown opcodes were preserved as raw bytes to maintain functionality"
         } else {
-            "All opcodes were standard and successfully obfuscated"
+            "All opcodes were standard and successfully camouflaged"
         }
     })
 }

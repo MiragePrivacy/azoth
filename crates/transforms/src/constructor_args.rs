@@ -1,9 +1,9 @@
-//! Constructor-argument payload obfuscation.
+//! Constructor-argument payload camouflage.
 //!
 //! This pass masks the exact constructor-argument suffix identified from the caller-supplied
 //! runtime and injects seed-derived, straight-line decoding code immediately after the init
 //! code copies that suffix into memory. It does not inspect an ABI or contract source. The
-//! masking is intentionally described as obfuscation rather than encryption: every value needed
+//! masking is intentionally described as camouflage rather than encryption: every value needed
 //! to decode the arguments remains in public creation bytecode and can be recovered by a capable
 //! symbolic or dynamic analyst.
 
@@ -16,9 +16,9 @@ use rand::seq::SliceRandom;
 use rand::{Rng, RngCore, SeedableRng};
 use sha3::{Digest, Sha3_256};
 
-/// Measurements from constructor-argument obfuscation.
+/// Measurements from constructor-argument camouflage.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ConstructorArgsObfuscation {
+pub struct ConstructorArgsCamouflage {
     /// Whether a constructor-argument suffix was present and transformed.
     pub applied: bool,
     /// Number of constructor-argument bytes masked in the creation payload.
@@ -36,23 +36,23 @@ struct InitOp {
     value: Option<usize>,
 }
 
-/// Obfuscates an exactly located constructor-argument suffix and injects its decoder.
+/// Camouflages an exactly located constructor-argument suffix and injects its decoder.
 ///
 /// The function fails closed when constructor arguments exist but the init code does not expose
 /// a supported, unambiguous `CODESIZE - creation_length` copy site. Returning the original
 /// plaintext suffix in that situation would violate the caller's expectation that the pass was
 /// applied.
-pub fn obfuscate_constructor_args(
+pub fn camouflage_constructor_args(
     report: &mut CleanReport,
     seed: &[u8; 32],
-) -> Result<ConstructorArgsObfuscation> {
+) -> Result<ConstructorArgsCamouflage> {
     let Some(args_index) = report.removed.iter().position(|removed| {
         matches!(
             removed.kind,
             azoth_core::detection::SectionKind::ConstructorArgs
         )
     }) else {
-        return Ok(ConstructorArgsObfuscation::default());
+        return Ok(ConstructorArgsCamouflage::default());
     };
     let Some(init_index) = report
         .removed
@@ -66,7 +66,7 @@ pub fn obfuscate_constructor_args(
 
     let argument_bytes = report.removed[args_index].data.len();
     if argument_bytes == 0 {
-        return Ok(ConstructorArgsObfuscation::default());
+        return Ok(ConstructorArgsCamouflage::default());
     }
 
     let runtime_offset = report
@@ -169,7 +169,7 @@ pub fn obfuscate_constructor_args(
     report.removed[init_index].data = rewritten_init.into();
     report.removed[args_index].data = masked_args.into();
 
-    Ok(ConstructorArgsObfuscation {
+    Ok(ConstructorArgsCamouflage {
         applied: true,
         argument_bytes,
         decoder_bytes: decoder.len(),
@@ -420,7 +420,7 @@ fn emit_push_usize(out: &mut Vec<u8>, value: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
+    use crate::camouflage::{camouflage_bytecode, CamouflageConfig};
     use azoth_core::detection::locate_sections;
     use azoth_core::seed::Seed;
     use azoth_core::strip::strip_bytecode;
@@ -459,11 +459,11 @@ mod tests {
         deployment
     }
 
-    fn apply_mask(deployment: &[u8], seed: &Seed) -> (Vec<u8>, ConstructorArgsObfuscation) {
+    fn apply_mask(deployment: &[u8], seed: &Seed) -> (Vec<u8>, ConstructorArgsCamouflage) {
         let runtime = hex::decode(ESCROW_RUNTIME.trim().trim_start_matches("0x")).unwrap();
         let sections = locate_sections(deployment, &[], &runtime).unwrap();
         let (clean, mut report) = strip_bytecode(deployment, &sections).unwrap();
-        let metrics = obfuscate_constructor_args(&mut report, seed.as_bytes()).unwrap();
+        let metrics = camouflage_constructor_args(&mut report, seed.as_bytes()).unwrap();
         (report.reassemble_checked(&clean).unwrap(), metrics)
     }
 
@@ -596,13 +596,10 @@ mod tests {
         let full_hex = format!("0x{}", hex::encode(&full_creation));
         let seed = Seed::from_bytes([0x77; 32]);
 
-        let protected = obfuscate_bytecode(
-            &full_hex,
-            ESCROW_RUNTIME,
-            ObfuscationConfig::with_seed(seed),
-        )
-        .await
-        .unwrap();
+        let protected =
+            camouflage_bytecode(&full_hex, ESCROW_RUNTIME, CamouflageConfig::with_seed(seed))
+                .await
+                .unwrap();
         let protected_creation =
             hex::decode(protected.obfuscated_bytecode.trim_start_matches("0x")).unwrap();
 
@@ -638,10 +635,10 @@ mod tests {
         args.resize(10_000, 0x5a);
         let full_hex = format!("0x{}", hex::encode(creation_with_args(&args)));
 
-        let error = obfuscate_bytecode(
+        let error = camouflage_bytecode(
             &full_hex,
             ESCROW_RUNTIME,
-            ObfuscationConfig::with_seed(Seed::from_bytes([0x88; 32])),
+            CamouflageConfig::with_seed(Seed::from_bytes([0x88; 32])),
         )
         .await
         .unwrap_err();
@@ -651,7 +648,7 @@ mod tests {
 
     #[test]
     #[ignore = "release-mode benchmark; run explicitly with --ignored --nocapture"]
-    fn benchmark_constructor_argument_obfuscation() {
+    fn benchmark_constructor_argument_camouflage() {
         let args = argument_words([0x22; 20], [0x33; 32], [0x44; 32]);
         let original = creation_with_args(&args);
         let (original_runtime, original_gas) = deploy(&original);

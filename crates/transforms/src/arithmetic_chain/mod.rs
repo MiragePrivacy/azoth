@@ -1,4 +1,4 @@
-//! Arithmetic chain obfuscation transform.
+//! Arithmetic chain camouflage transform.
 //!
 //! This transform protects PUSH constants (16-32 bytes) by replacing them with
 //! arithmetic chains that compute the same value at runtime from scattered
@@ -88,7 +88,7 @@ const MIN_PUSH_SIZE: u8 = 16;
 /// Maximum PUSH size to consider for arithmetic chain transformation.
 const MAX_PUSH_SIZE: u8 = 32;
 
-/// Arithmetic chain transform for PUSH constant obfuscation.
+/// Arithmetic chain transform for PUSH constant camouflage.
 ///
 /// This transform replaces PUSH16-PUSH32 instructions with computed values
 /// derived from scattered initial values through arithmetic operation chains.
@@ -357,7 +357,7 @@ impl Transform for ArithmeticChain {
             "Runtime length estimate: base={}, growth={}, total={}",
             base_runtime_length, growth, runtime_length
         );
-        // Record the estimate so obfuscator.rs's post-reindex patch pass can
+        // Record the estimate so camouflage.rs's post-reindex patch pass can
         // correct CODECOPY offsets if dispatcher reapply passes grow the
         // runtime after Step 5 — without this, the data section lands past
         // `runtime_length` in the final encoding and every `CODECOPY` reads

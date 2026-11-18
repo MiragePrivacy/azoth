@@ -1,7 +1,7 @@
-//! Multi-tier function dispatcher obfuscation patterns.
+//! Multi-tier function dispatcher camouflage patterns.
 //!
-//! Implements a layered obfuscation strategy that replaces selectors with derived tokens,
-//! redirects dispatcher jumps to multi-tier controllers, and applies modular obfuscation
+//! Implements a layered camouflage strategy that replaces selectors with derived tokens,
+//! redirects dispatcher jumps to multi-tier controllers, and applies modular camouflage
 //! patterns (byte extraction, storage checks, opaque predicates) within each tier.
 
 mod blueprint;

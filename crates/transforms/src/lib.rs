@@ -1,9 +1,19 @@
 pub mod arithmetic_chain;
+pub mod camouflage;
 pub mod cluster_shuffle;
 pub mod constructor_args;
 pub mod function_dispatcher;
 pub mod jump_address_transformer;
-pub mod obfuscator;
+
+/// Compatibility imports for code written against the original pipeline names.
+pub mod obfuscator {
+    pub use crate::camouflage::{
+        camouflage_bytecode as obfuscate_bytecode, create_gas_report,
+        print_camouflage_analysis as print_obfuscation_analysis,
+        CamouflageConfig as ObfuscationConfig, CamouflageError as ObfuscationError,
+        CamouflageMetadata as ObfuscationMetadata, CamouflageResult as ObfuscationResult,
+    };
+}
 pub mod opaque_predicate;
 pub mod push_split;
 pub mod shuffle;
@@ -46,7 +56,7 @@ pub enum Error {
 /// Transform result type
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Trait for bytecode obfuscation transforms.
+/// Trait for bytecode camouflage transforms.
 pub trait Transform: Send + Sync {
     /// Returns the transform's name for logging and identification.
     fn name(&self) -> &'static str;

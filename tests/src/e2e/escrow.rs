@@ -1,14 +1,14 @@
-//! End-to-end tests for calling obfuscated contract functions.
+//! End-to-end tests for calling camouflaged contract functions.
 //!
-//! These tests verify that obfuscated contracts not only deploy successfully,
-//! but also execute correctly when functions are called using obfuscated tokens
+//! These tests verify that camouflaged contracts not only deploy successfully,
+//! but also execute correctly when functions are called using camouflaged tokens
 //! instead of standard 4-byte selectors.
 
 use super::{
-    mock_token_bytecode, prepare_bytecode, EscrowMappings, ObfuscatedCaller,
+    mock_token_bytecode, prepare_bytecode, CamouflagedCaller, EscrowMappings,
     ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, ESCROW_CONTRACT_RUNTIME_BYTECODE, MOCK_TOKEN_ADDR,
 };
-use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
+use azoth_transform::camouflage::{camouflage_bytecode, CamouflageConfig};
 use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use revm::bytecode::Bytecode;
@@ -68,15 +68,15 @@ impl Inspector<Context<BlockEnv, TxEnv, CfgEnv, InMemoryDB, Journal<InMemoryDB>,
 }
 
 #[tokio::test]
-async fn test_obfuscated_function_calls() -> Result<()> {
+async fn test_camouflaged_function_calls() -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .with_ansi(false)
         .without_time()
         .try_init();
 
-    // TEST: First try deploying the ORIGINAL (non-obfuscated) bytecode to verify test setup
-    println!("\n=== Testing Original (Non-Obfuscated) Deployment ===");
+    // TEST: First try deploying the ORIGINAL (non-camouflaged) bytecode to verify test setup
+    println!("\n=== Testing Original (Non-Camouflaged) Deployment ===");
     let original_bytecode = prepare_bytecode(ESCROW_CONTRACT_DEPLOYMENT_BYTECODE)?;
 
     let mut test_db = InMemoryDB::default();
@@ -133,30 +133,30 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         }
     }
 
-    // obfuscate contract
-    println!("\n=== Proceeding with Obfuscated Deployment ===");
-    let config = ObfuscationConfig::default();
+    // camouflage contract
+    println!("\n=== Proceeding with Camouflaged Deployment ===");
+    let config = CamouflageConfig::default();
 
-    let obfuscation_result = obfuscate_bytecode(
+    let camouflage_result = camouflage_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
         config,
     )
     .await
-    .map_err(|e| eyre!("Failed to obfuscate bytecode: {:?}", e))?;
+    .map_err(|e| eyre!("Failed to camouflage bytecode: {:?}", e))?;
 
     println!(
-        "✓ Contract obfuscated ({} -> {} bytes, {:+.1}%)",
-        obfuscation_result.original_size,
-        obfuscation_result.obfuscated_size,
-        obfuscation_result.size_increase_percentage
+        "✓ Contract camouflaged ({} -> {} bytes, {:+.1}%)",
+        camouflage_result.original_size,
+        camouflage_result.obfuscated_size,
+        camouflage_result.size_increase_percentage
     );
 
     // extracting selector mappings
-    let selector_mapping = obfuscation_result
+    let selector_mapping = camouflage_result
         .selector_mapping
         .as_ref()
-        .ok_or_else(|| eyre!("No selector mapping found in obfuscation result"))?;
+        .ok_or_else(|| eyre!("No selector mapping found in camouflage result"))?;
     println!("✓ Extracted {} selector mappings", selector_mapping.len());
 
     println!("Selectors found:");
@@ -164,10 +164,10 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         println!("  0x{:08x} -> 0x{}", selector, hex::encode(token));
     }
 
-    let escrow_mappings = EscrowMappings::from_obfuscator_output(selector_mapping)
+    let escrow_mappings = EscrowMappings::from_camouflage_tool_output(selector_mapping)
         .map_err(|e| eyre!("Failed to create escrow mappings: {}", e))?;
 
-    println!("✓ Created EscrowMappings with obfuscated tokens");
+    println!("✓ Created EscrowMappings with camouflaged tokens");
 
     // setup EVM with mock token contract
     let mut db = InMemoryDB::default();
@@ -193,7 +193,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         },
     );
 
-    let obfuscated_bytecode = prepare_bytecode(&obfuscation_result.obfuscated_bytecode)?;
+    let obfuscated_bytecode = prepare_bytecode(&camouflage_result.obfuscated_bytecode)?;
 
     let trace_deploy = std::env::var("TRACE_DEPLOY").is_ok();
     let mut evm = Context::mainnet()
@@ -299,7 +299,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         }
     };
 
-    println!("✓ Obfuscated contract deployed at: {}", contract_address);
+    println!("✓ Camouflaged contract deployed at: {}", contract_address);
 
     // Validate all PUSH+JUMP pairs in deployed bytecode
     println!("\n=== Validating Deployed Bytecode ===");
@@ -330,7 +330,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         .collect();
 
     println!(
-        "Obfuscated deployed bytecode has {} JUMPDESTs",
+        "Camouflaged deployed bytecode has {} JUMPDESTs",
         jumpdests.len()
     );
 
@@ -360,7 +360,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
         }
     }
 
-    println!("Obfuscated deployed bytecode jump statistics:");
+    println!("Camouflaged deployed bytecode jump statistics:");
     println!("  Total jumps: {}", valid_jumps + invalid_jumps.len());
     println!("  Valid jumps: {}", valid_jumps);
     println!("  Invalid jumps: {}", invalid_jumps.len());
@@ -398,11 +398,11 @@ async fn test_obfuscated_function_calls() -> Result<()> {
 
     println!("✓ All PUSH+JUMP pairs target valid JUMPDESTs\n");
 
-    let caller = ObfuscatedCaller::new(escrow_mappings);
+    let caller = CamouflagedCaller::new(escrow_mappings);
 
     let is_bonded_calldata = caller.is_bonded_call_data();
     println!(
-        "  Calldata (obfuscated): 0x{}",
+        "  Calldata (camouflaged): 0x{}",
         hex::encode(&is_bonded_calldata)
     );
 
@@ -450,7 +450,7 @@ async fn test_obfuscated_function_calls() -> Result<()> {
     let payment_amount = U256::from(5000);
     let fund_calldata = caller.fund_call_data(reward_amount, payment_amount);
     println!(
-        "  Calldata (obfuscated): 0x{} (reward: {}, payment: {})",
+        "  Calldata (camouflaged): 0x{} (reward: {}, payment: {})",
         hex::encode(&fund_calldata),
         reward_amount,
         payment_amount
@@ -529,7 +529,10 @@ async fn test_obfuscated_function_calls() -> Result<()> {
 
     let bond_amount = U256::from(2500);
     let bond_calldata = caller.bond_call_data(bond_amount);
-    println!("  Calldata (obfuscated): 0x{}", hex::encode(&bond_calldata));
+    println!(
+        "  Calldata (camouflaged): 0x{}",
+        hex::encode(&bond_calldata)
+    );
 
     let bond_tx = TxEnv {
         caller: deployer,
@@ -612,12 +615,12 @@ async fn test_obfuscated_function_calls() -> Result<()> {
 
     println!("  Result after bonding: is_bonded = {}", is_bonded);
 
-    println!("✓ bond() executed successfully on obfuscated contract");
+    println!("✓ bond() executed successfully on camouflaged contract");
 
-    println!("\n✓ Obfuscated contract executes correctly");
+    println!("\n✓ Camouflaged contract executes correctly");
     println!("✓ Valid tokens route to correct functions");
     println!("✓ Token extraction works with function arguments (bond with uint256)");
-    println!("✓ State changes are preserved through obfuscation");
+    println!("✓ State changes are preserved through camouflage");
 
     Ok(())
 }

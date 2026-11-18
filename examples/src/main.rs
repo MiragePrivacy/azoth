@@ -1,7 +1,7 @@
-//! Mirage Privacy Protocol - Obfuscation Workflow
+//! Mirage Privacy Protocol - Camouflage Workflow
 
 use azoth_core::seed::Seed;
-use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig, ObfuscationResult};
+use azoth_transform::camouflage::{camouflage_bytecode, CamouflageConfig, CamouflageResult};
 use serde_json::json;
 use std::fs;
 
@@ -10,7 +10,7 @@ const MIRAGE_ESCROW_RUNTIME_PATH: &str = "escrow-bytecode/artifacts/erc20_runtim
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("Mirage Privacy Protocol - Obfuscation Workflow");
+    println!("Mirage Privacy Protocol - Camouflage Workflow");
     println!("=================================================");
 
     // Load contract bytecode (both deployment and runtime)
@@ -24,12 +24,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         runtime_bytecode.len()
     );
 
-    // SENDER: Compile with obfuscation O(S, K2)
-    println!("\nSENDER: Compiling contract with obfuscation...");
-    let obfuscation_result =
-        apply_mirage_obfuscation(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
+    // SENDER: Compile with camouflage O(S, K2)
+    println!("\nSENDER: Compiling contract with camouflage...");
+    let camouflage_result =
+        apply_mirage_camouflage(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
     let obfuscated_bytecode = hex::decode(
-        obfuscation_result
+        camouflage_result
             .obfuscated_bytecode
             .trim_start_matches("0x"),
     )?;
@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         calculate_percentage_increase(original_bytecode.len(), obfuscated_bytecode.len());
     println!("   Original:   {} bytes", original_bytecode.len());
     println!(
-        "   Obfuscated: {} bytes (+{:.1}%)",
+        "   Camouflaged: {} bytes (+{:.1}%)",
         obfuscated_bytecode.len(),
         size_increase
     );
@@ -46,19 +46,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Print transform information
     println!(
         "   Transforms applied: {:?}",
-        obfuscation_result.metadata.transforms_applied
+        camouflage_result.metadata.transforms_applied
     );
-    if obfuscation_result.unknown_opcodes_count > 0 {
+    if camouflage_result.unknown_opcodes_count > 0 {
         println!(
             "   Unknown opcodes preserved: {}",
-            obfuscation_result.unknown_opcodes_count
+            camouflage_result.unknown_opcodes_count
         );
     }
 
     // VERIFIER: Verify bytecode integrity
     println!("\nVERIFIER: Verifying deterministic compilation with K2...");
     let recompilation_result =
-        apply_mirage_obfuscation(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
+        apply_mirage_camouflage(&original_bytecode, &runtime_bytecode, &seed_k2).await?;
     let recompiled_bytecode = hex::decode(
         recompilation_result
             .obfuscated_bytecode
@@ -72,12 +72,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     println!("   Deterministic compilation VERIFIED");
 
-    // Check 2: Effective obfuscation (original ≠ obfuscated)
-    let obfuscation_applied = verify_obfuscation_applied(&original_bytecode, &obfuscated_bytecode);
-    if !obfuscation_applied {
-        return Err("No obfuscation detected - bytecode unchanged".into());
+    // Check 2: Effective camouflage (original ≠ camouflaged)
+    let camouflage_applied = verify_camouflage_applied(&original_bytecode, &obfuscated_bytecode);
+    if !camouflage_applied {
+        return Err("No camouflage detected - bytecode unchanged".into());
     }
-    println!("   Obfuscation transformation VERIFIED");
+    println!("   Camouflage transformation VERIFIED");
 
     // Check 3: Functional equivalence
     let functional_equivalence =
@@ -94,8 +94,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         gas_analysis.original_gas
     );
     println!(
-        "   Obfuscated deployment: {} gas",
-        gas_analysis.obfuscated_gas
+        "   Camouflaged deployment: {} gas",
+        gas_analysis.camouflaged_gas
     );
     println!("   Gas overhead: {:.2}%", gas_analysis.overhead_percentage);
 
@@ -108,9 +108,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         &original_bytecode,
         &obfuscated_bytecode,
         &gas_analysis,
-        &obfuscation_result,
+        &camouflage_result,
         deterministic_verified,
-        obfuscation_applied,
+        camouflage_applied,
         functional_equivalence,
     );
 
@@ -118,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("\nMIRAGE WORKFLOW COMPLETED SUCCESSFULLY");
     println!("   Deterministic compilation: VERIFIED");
-    println!("   Obfuscation applied: VERIFIED");
+    println!("   Camouflage applied: VERIFIED");
     println!("   Functional equivalence: VERIFIED");
     println!("   Gas overhead: {:.2}%", gas_analysis.overhead_percentage);
     println!("   Size overhead: {size_increase:.1}%");
@@ -160,26 +160,26 @@ fn load_mirage_contract() -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Erro
     Ok((deployment, runtime))
 }
 
-/// Apply Mirage obfuscation transforms using the unified pipeline
-async fn apply_mirage_obfuscation(
+/// Apply Mirage camouflage transforms using the unified pipeline
+async fn apply_mirage_camouflage(
     bytecode: &[u8],
     runtime_bytecode: &[u8],
     seed_k2: &Seed,
-) -> Result<ObfuscationResult, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<CamouflageResult, Box<dyn std::error::Error + Send + Sync>> {
     let hex_input = format!("0x{}", hex::encode(bytecode));
     let runtime_hex = format!("0x{}", hex::encode(runtime_bytecode));
 
     // Create Mirage-specific transform configuration
     let config = create_mirage_config(seed_k2);
 
-    // Use the unified obfuscation pipeline
-    obfuscate_bytecode(&hex_input, &runtime_hex, config)
+    // Use the unified camouflage pipeline
+    camouflage_bytecode(&hex_input, &runtime_hex, config)
         .await
         .map_err(|e| e.into())
 }
 
-/// Create Mirage-specific obfuscation configuration
-fn create_mirage_config(seed_k2: &Seed) -> ObfuscationConfig {
+/// Create Mirage-specific camouflage configuration
+fn create_mirage_config(seed_k2: &Seed) -> CamouflageConfig {
     // Build Mirage-specific transforms (function_dispatcher is added automatically)
     let transforms = vec![
         Box::new(azoth_transform::shuffle::Shuffle) as Box<dyn azoth_transform::Transform>,
@@ -187,22 +187,22 @@ fn create_mirage_config(seed_k2: &Seed) -> ObfuscationConfig {
         Box::new(azoth_transform::opaque_predicate::OpaquePredicate::new()),
     ];
 
-    ObfuscationConfig {
+    CamouflageConfig {
         seed: seed_k2.clone(),
         transforms,
         preserve_unknown_opcodes: true,
     }
 }
 
-/// Verify that obfuscation was actually applied (original ≠ obfuscated)
-fn verify_obfuscation_applied(original: &[u8], obfuscated: &[u8]) -> bool {
-    original != obfuscated
+/// Verify that camouflage was actually applied (original ≠ camouflaged)
+fn verify_camouflage_applied(original: &[u8], camouflaged: &[u8]) -> bool {
+    original != camouflaged
 }
 
 /// Verify functional equivalence by testing contract behavior
 async fn verify_functional_equivalence(
     _original: &[u8],
-    _obfuscated: &[u8],
+    _camouflaged: &[u8],
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     println!("   Functional equivalence testing not yet implemented");
     println!("   Using placeholder verification for development");
@@ -220,19 +220,19 @@ async fn verify_functional_equivalence(
 #[derive(Debug, Clone)]
 struct GasAnalysis {
     original_gas: u64,
-    obfuscated_gas: u64,
+    camouflaged_gas: u64,
     overhead_percentage: f64,
 }
 
 /// Analyze gas costs for deployment
-fn analyze_gas_costs(original: &[u8], obfuscated: &[u8]) -> GasAnalysis {
+fn analyze_gas_costs(original: &[u8], camouflaged: &[u8]) -> GasAnalysis {
     let original_gas = calculate_deployment_gas(original);
-    let obfuscated_gas = calculate_deployment_gas(obfuscated);
-    let overhead_percentage = calculate_gas_percentage_increase(original_gas, obfuscated_gas);
+    let camouflaged_gas = calculate_deployment_gas(camouflaged);
+    let overhead_percentage = calculate_gas_percentage_increase(original_gas, camouflaged_gas);
 
     GasAnalysis {
         original_gas,
-        obfuscated_gas,
+        camouflaged_gas,
         overhead_percentage,
     }
 }
@@ -264,8 +264,8 @@ async fn verify_deterministic_compilation_test(
     runtime_bytecode: &[u8],
     seed: &Seed,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let result1 = apply_mirage_obfuscation(bytecode, runtime_bytecode, seed).await?;
-    let result2 = apply_mirage_obfuscation(bytecode, runtime_bytecode, seed).await?;
+    let result1 = apply_mirage_camouflage(bytecode, runtime_bytecode, seed).await?;
+    let result2 = apply_mirage_camouflage(bytecode, runtime_bytecode, seed).await?;
 
     if result1.obfuscated_bytecode != result2.obfuscated_bytecode {
         return Err("Same seed produced different bytecode - not deterministic!".into());
@@ -274,7 +274,7 @@ async fn verify_deterministic_compilation_test(
 
     // Test different seeds produce different results
     let different_seed = Seed::generate();
-    let diff_result = apply_mirage_obfuscation(bytecode, runtime_bytecode, &different_seed).await?;
+    let diff_result = apply_mirage_camouflage(bytecode, runtime_bytecode, &different_seed).await?;
     if result1.obfuscated_bytecode == diff_result.obfuscated_bytecode {
         return Err("Different seeds produced identical bytecode!".into());
     }
@@ -287,72 +287,72 @@ async fn verify_deterministic_compilation_test(
 #[allow(clippy::too_many_arguments)]
 fn generate_workflow_report(
     original: &[u8],
-    obfuscated: &[u8],
+    camouflaged: &[u8],
     gas_analysis: &GasAnalysis,
-    obfuscation_result: &ObfuscationResult,
+    camouflage_result: &CamouflageResult,
     deterministic_verified: bool,
-    obfuscation_applied: bool,
+    camouflage_applied: bool,
     functional_equivalence: bool,
 ) -> serde_json::Value {
     json!({
-        "mirage_obfuscation_workflow": {
+        "mirage_camouflage_workflow": {
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "bytecode_analysis": {
                 "original_bytes": original.len(),
-                "obfuscated_bytes": obfuscated.len(),
-                "size_increase_bytes": obfuscated.len() - original.len(),
-                "size_increase_percentage": calculate_percentage_increase(original.len(), obfuscated.len()),
-                "obfuscation_applied": obfuscation_applied,
-                "unknown_opcodes_preserved": obfuscation_result.unknown_opcodes_count,
-                "blocks_created": obfuscation_result.blocks_created,
-                "instructions_added": obfuscation_result.instructions_added
+                "obfuscated_bytes": camouflaged.len(),
+                "size_increase_bytes": camouflaged.len() - original.len(),
+                "size_increase_percentage": calculate_percentage_increase(original.len(), camouflaged.len()),
+                "camouflage_applied": camouflage_applied,
+                "unknown_opcodes_preserved": camouflage_result.unknown_opcodes_count,
+                "blocks_created": camouflage_result.blocks_created,
+                "instructions_added": camouflage_result.instructions_added
             },
             "gas_analysis": {
                 "original_deployment_gas": gas_analysis.original_gas,
-                "obfuscated_deployment_gas": gas_analysis.obfuscated_gas,
-                "gas_increase": (gas_analysis.obfuscated_gas as i64 - gas_analysis.original_gas as i64),
+                "camouflaged_deployment_gas": gas_analysis.camouflaged_gas,
+                "gas_increase": (gas_analysis.camouflaged_gas as i64 - gas_analysis.original_gas as i64),
                 "gas_overhead_percentage": gas_analysis.overhead_percentage
             },
             "verification_results": {
                 "deterministic_compilation": deterministic_verified,
-                "obfuscation_transformation_applied": obfuscation_applied,
+                "camouflage_transformation_applied": camouflage_applied,
                 "functional_equivalence_verified": functional_equivalence,
-                "overall_verification_passed": deterministic_verified && obfuscation_applied && functional_equivalence,
+                "overall_verification_passed": deterministic_verified && camouflage_applied && functional_equivalence,
                 "verification_level": "preliminary_functional_testing",
                 "formal_verification_status": "pending_implementation"
             },
             "security_properties": {
-                "statistical_indistinguishability": obfuscation_applied,
-                "transforms_applied": obfuscation_result.metadata.transforms_applied,
+                "statistical_indistinguishability": camouflage_applied,
+                "transforms_applied": camouflage_result.metadata.transforms_applied,
                 "verification_completeness": "basic_structural_validation"
             },
             "mirage_protocol": {
-                "sender_workflow": if obfuscation_applied { "Contract successfully obfuscated with seed K2" } else { "ERROR: No obfuscation applied" },
+                "sender_workflow": if camouflage_applied { "Contract successfully camouflaged with seed K2" } else { "ERROR: No camouflage applied" },
                 "executor_workflow": if deterministic_verified { "Bytecode determinism verified with K2" } else { "ERROR: Non-deterministic compilation" },
-                "anonymity_set": if obfuscation_applied { "Blends with unverified contract deployments" } else { "WARNING: Unchanged bytecode may be recognizable" },
+                "anonymity_set": if camouflage_applied { "Blends with unverified contract deployments" } else { "WARNING: Unchanged bytecode may be recognizable" },
                 "production_readiness": "requires_formal_verification"
             },
-            "obfuscation_details": {
-                "size_limit_exceeded": obfuscation_result.metadata.size_limit_exceeded,
-                "unknown_opcodes_preserved": obfuscation_result.metadata.unknown_opcodes_preserved,
-                "total_instructions_processed": obfuscation_result.total_instructions
+            "camouflage_details": {
+                "size_limit_exceeded": camouflage_result.metadata.size_limit_exceeded,
+                "unknown_opcodes_preserved": camouflage_result.metadata.unknown_opcodes_preserved,
+                "total_instructions_processed": camouflage_result.total_instructions
             },
             "recommendations": {
                 "immediate": [
                     "Current verification provides basic confidence for development",
                     "Functional testing validates structural integrity",
                     "Deterministic compilation ensures Mirage protocol compatibility",
-                    "Function dispatcher obfuscation automatically applied for baseline security"
+                    "Function dispatcher camouflage automatically applied for baseline security"
                 ],
                 "before_production": [
                     "Implement formal verification (see GitHub issue)",
                     "Deploy test contracts with identical transaction sequences",
                     "Validate all ERC standard compliance",
-                    "Security audit of obfuscated contracts",
+                    "Security audit of camouflaged contracts",
                     "Gas optimization analysis"
                 ],
                 "monitoring": [
-                    "Track obfuscation effectiveness metrics",
+                    "Track camouflage effectiveness metrics",
                     "Monitor gas overhead in production",
                     "Verify deterministic compilation in CI/CD"
                 ]

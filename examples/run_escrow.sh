@@ -2,7 +2,7 @@
 
 set -e
 
-echo "🚀 Running Mirage Obfuscation Workflow for Escrow"
+echo "🚀 Running Mirage Camouflage Workflow for Escrow"
 echo "================================================"
 echo ""
 
@@ -37,9 +37,9 @@ if ! cargo build; then
     exit 1
 fi
 
-# Run the obfuscation demo
+# Run the camouflage demo
 echo ""
-echo "🔨 Running obfuscation demo..."
+echo "🔨 Running camouflage demo..."
 cargo run --bin azoth-examples
 
 echo ""

@@ -1,7 +1,7 @@
-//! Token generation for function dispatcher obfuscation.
+//! Token generation for function dispatcher camouflage.
 //!
 //! This module provides cryptographically-derived token generation for mapping
-//! original function selectors to obfuscated tokens. The tokens maintain the same
+//! original function selectors to camouflaged tokens. The tokens maintain the same
 //! byte width as original selectors to preserve dispatcher structure.
 
 use crate::{Error, Result};

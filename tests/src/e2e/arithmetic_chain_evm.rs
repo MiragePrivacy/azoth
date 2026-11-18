@@ -1,6 +1,6 @@
 //! Differential test: ArithmeticChain Rust model vs real EVM semantics.
 //!
-//! Background. A `collect()` invocation obfuscated under seed
+//! Background. A `collect()` invocation camouflaged under seed
 //! `b1314f5c5063267ec70a9b9bb6f3d6b0cfb96b0f54773b3e534f54cd92caa5b4`
 //! reverted on mainnet with `WrongEventSignature()`: the ERC20 `Transfer`
 //! event topic constant the contract compares against

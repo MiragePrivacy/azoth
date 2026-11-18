@@ -413,7 +413,7 @@ impl Transform for FunctionDispatcher {
             debug!(
                 runtime_len,
                 selectors = selector_count,
-                "Using lightweight dispatcher obfuscation path"
+                "Using lightweight dispatcher camouflage path"
             );
             let preserve_bytes = HashMap::new();
             let seed = self.seed.as_ref().ok_or_else(|| {
@@ -473,7 +473,7 @@ impl Transform for FunctionDispatcher {
             ir.stub_patches = Some(plan.stub_patches);
             ir.decoy_patches = Some(plan.decoy_patches);
             ir.controller_patches = Some(plan.controller_patches);
-            debug!("Function dispatcher obfuscated via multi-tier layout");
+            debug!("Function dispatcher camouflaged via multi-tier layout");
             Ok(true)
         } else {
             debug!("Dispatcher mapping produced no changes");

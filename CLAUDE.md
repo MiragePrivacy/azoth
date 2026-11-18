@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Azoth is a research-grade toolchain for Ethereum smart-contract obfuscation. The project follows a three-stage pipeline:
+Azoth is a research-grade toolchain for Ethereum smart-contract camouflage. The project follows a three-stage pipeline:
 
-**Repository**: https://github.com/MiragePrivacy/obfuscator
+**Repository**: https://github.com/MiragePrivacy/camouflage tool
 
 1. **Pre-processing/Analysis**: Isolate runtime bytecode and measure structure
-2. **Obfuscation Passes**: Apply reversible transforms to raise analyst effort
+2. **Camouflage Passes**: Apply reversible transforms to raise analyst effort
 3. **Re-assembly & Validation**: Splice segments back and validate equivalence
 
 ## Architecture
@@ -17,11 +17,11 @@ Azoth is a research-grade toolchain for Ethereum smart-contract obfuscation. The
 This is a Rust workspace with six main crates:
 
 - **`crates/core/`**: Core functionality including bytecode decoder, encoder, section detector, bytecode stripper, and CFG-IR generation. The detection module includes section isolation (`detection/sections.rs`) and dispatcher pattern detection (`detection/dispatcher.rs`)
-- **`crates/analysis/`**: Analysis utilities for measuring bytecode complexity and obfuscation quality through comprehensive metrics
-- **`crates/transforms/`**: Obfuscation passes including opaque predicates, control flow shuffling, function dispatcher obfuscation, and jump address transformation. The `obfuscator.rs` module orchestrates all transforms
+- **`crates/analysis/`**: Analysis utilities for measuring bytecode complexity and camouflage quality through comprehensive metrics
+- **`crates/transforms/`**: Camouflage passes including opaque predicates, control flow shuffling, function dispatcher camouflage, and jump address transformation. The `camouflage tool.rs` module orchestrates all transforms
 - **`crates/verification/`**: Formal verification engine providing mathematical proofs of semantic equivalence using Z3 SMT solver, plus practical testing with REVM. Supports multiple verification levels and generates cryptographic certificates
 - **`crates/utils/`**: Shared utilities including deterministic seed generation and error types
-- **`crates/cli/`**: Command-line interface (`azoth` binary) with subcommands for decode, strip, cfg, and obfuscate
+- **`crates/cli/`**: Command-line interface (`azoth` binary) with subcommands for decode, strip, cfg, and camouflage
 
 ### Additional Workspace Members
 - **`tests/`**: Workspace-level integration and end-to-end tests organized by component (core, transforms, analysis, verification, e2e)
@@ -76,8 +76,8 @@ cargo run --bin azoth -- strip <bytecode>
 # Generate and visualize CFG-IR
 cargo run --bin azoth -- cfg <bytecode>
 
-# Apply obfuscation transforms
-cargo run --bin azoth -- obfuscate <bytecode>
+# Apply camouflage transforms
+cargo run --bin azoth -- camouflage <bytecode>
 ```
 
 ### Input Formats
@@ -115,7 +115,7 @@ Write documentation in clear, professional prose rather than fragmented bullet p
 ///
 /// This function performs the core transformation from linear bytecode instructions
 /// into a structured graph representation that enables sophisticated analysis and
-/// obfuscation transforms. The resulting CFG maintains semantic equivalence while
+/// camouflage transforms. The resulting CFG maintains semantic equivalence while
 /// providing the structural information necessary for advanced code analysis.
 ///
 /// The construction process involves several phases: basic block identification
@@ -131,7 +131,7 @@ Write documentation in clear, professional prose rather than fragmented bullet p
 /// * `sections` - Detected bytecode sections that define the boundaries between
 ///   initialization code, runtime code, and auxiliary data.
 /// * `clean_report` - Stripping report containing PC mappings and section information
-///   required for proper reassembly after obfuscation transforms.
+///   required for proper reassembly after camouflage transforms.
 ///
 /// # Returns
 ///
@@ -173,7 +173,7 @@ This documentation style provides comprehensive information while maintaining re
 
 - **CFG IR**: Control Flow Graph intermediate representation in `crates/core/src/cfg_ir.rs`
 - **Opcodes**: EVM opcode definitions and utilities in `crates/core/src/opcode.rs`
-- **Transform Passes**: Obfuscation transforms implementing a common pass interface
+- **Transform Passes**: Camouflage transforms implementing a common pass interface
 
 ## Git Workflow and GitHub Integration
 
@@ -234,7 +234,7 @@ When creating GitHub issues, always assign appropriate labels to ensure proper c
 
 **Component Labels:**
 - `component:core` - Issues related to core bytecode processing
-- `component:transforms` - Obfuscation transform implementations
+- `component:transforms` - Camouflage transform implementations
 - `component:analysis` - Metrics and analytical functionality
 - `component:verification` - Formal verification and testing
 - `component:utils` - Shared utilities and helpers

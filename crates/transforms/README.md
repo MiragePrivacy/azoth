@@ -1,13 +1,13 @@
 # Azoth Transforms
 
-The `azoth-transform` crate implements the obfuscation transformations that enhance bytecode complexity and resistance to analysis. This crate provides a pluggable architecture for applying various obfuscation techniques while maintaining semantic equivalence.
+The `azoth-transform` crate implements the camouflage transformations that enhance bytecode complexity and resistance to analysis. This crate provides a pluggable architecture for applying various camouflage techniques while maintaining semantic equivalence.
 
 ## Architecture
 
 The transforms crate implements a pass-based architecture where each transformation operates on the CFG/IR representation:
 
 1. **Pass Interface** - Standardized transformation interface for modularity
-2. **Transformation Passes** - Individual obfuscation techniques
+2. **Transformation Passes** - Individual camouflage techniques
 3. **Metrics Integration** - Continuous evaluation during transformation
 4. **Rollback Support** - Automatic rejection of ineffective passes
 
@@ -17,7 +17,7 @@ The transforms crate implements a pass-based architecture where each transformat
 
 When the deployment payload contains bytes after the exact caller-supplied runtime, the pipeline masks every byte of that suffix and injects a seed-varied init-code decoder. Detection uses the complete runtime as an authoritative boundary and does not inspect the ABI, source, address shapes, or zero padding. Unsupported or ambiguous constructor copy layouts fail closed instead of returning plaintext arguments. This pass is automatic and is reported as `ConstructorArgs` in result metadata.
 
-The bytecode contains everything required to reverse the mask, so this is obfuscation against literal/static recovery rather than encryption. Trampoline form, chunk order, arithmetic mask synthesis, and constants vary with the seed; no marker or fixed decoder byte string is emitted.
+The bytecode contains everything required to reverse the mask, so this is camouflage against literal/static recovery rather than encryption. Trampoline form, chunk order, arithmetic mask synthesis, and constants vary with the seed; no marker or fixed decoder byte string is emitted.
 
 ### Shuffle (`shuffle.rs`)
 
@@ -111,7 +111,7 @@ Replaces Solidity-style dispatchers with a cryptographically hardened version th
 #### Key Features
 
 * **Token Derivation**: Uses cryptographic `keccak256(secret || selector)[:4]` to generate fixed 4-byte tokens
-* **Disguised Extraction**: Replaces obvious calldata patterns with obfuscated arithmetic (e.g., `XOR`, `SUB`, `MOD`, `MSTORE/MLOAD`)
+* **Disguised Extraction**: Replaces obvious calldata patterns with camouflaged arithmetic (e.g., `XOR`, `SUB`, `MOD`, `MSTORE/MLOAD`)
 * **SHR-Based Extraction**: Extracts tokens using right-shift operations that work correctly even when calldata includes function arguments
 * **Comparison Replacement**: Replaces all `PUSH4 <selector>` checks with `PUSH4 <token>`
 * **Shuffled Order**: Randomizes comparison order to prevent pattern recognition
@@ -163,7 +163,7 @@ PUSH1 0x21
 JUMPI
 ```
 
-**Obfuscated dispatcher:**
+**Camouflaged dispatcher:**
 
 ```assembly
 PUSH1 0x39

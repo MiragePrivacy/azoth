@@ -1,4 +1,4 @@
-//! Chain generation for arithmetic chain obfuscation.
+//! Chain generation for arithmetic chain camouflage.
 //!
 //! This module handles the generation of arithmetic operation chains that
 //! compute a target constant value from scattered initial values.

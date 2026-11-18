@@ -1,11 +1,11 @@
 //! Decompiled difference metrics.
 //!
-//! Uses Heimdall's decompilation on before and after bytecodes to quantify obfuscation level
-//! by computing structured diff results that can be aggregated across multiple obfuscation runs.
+//! Uses Heimdall's decompilation on before and after bytecodes to quantify camouflage level
+//! by computing structured diff results that can be aggregated across multiple camouflage runs.
 //!
 //! The structured diff mode parses decompiled Solidity output and groups changes semantically:
 //! - **Storage block**: State variables declared at the contract level
-//! - **Functions**: Paired using the selector mapping from obfuscation (original → remapped)
+//! - **Functions**: Paired using the selector mapping from camouflage (original → remapped)
 //! - **Header/Footer**: Contract declaration and closing
 //!
 //! Each structure item gets its own line-based diff for focused comparison.
@@ -36,7 +36,7 @@ pub enum DecompileDiffError {
 pub struct Replacement {
     /// Lines that were removed (from original).
     pub before: Vec<String>,
-    /// Lines that were added (in obfuscated).
+    /// Lines that were added (in camouflaged).
     pub after: Vec<String>,
 }
 
@@ -47,7 +47,7 @@ pub struct DiffStats {
     pub hunk_count: usize,
     /// Number of lines removed from original.
     pub lines_removed: usize,
-    /// Number of lines added in obfuscated.
+    /// Number of lines added in camouflaged.
     pub lines_added: usize,
     /// Number of lines unchanged.
     pub lines_unchanged: usize,
@@ -305,7 +305,7 @@ impl UnifiedDiffPrinter for PlainDiffPrinter<'_> {
 /// # Parameters
 ///
 /// * `pre_source` - The decompiled source of the original bytecode.
-/// * `post_source` - The decompiled source of the obfuscated bytecode.
+/// * `post_source` - The decompiled source of the camouflaged bytecode.
 ///
 /// # Returns
 ///
@@ -377,8 +377,8 @@ pub fn compare_sources(pre_source: &str, post_source: &str) -> DiffResult {
 ///
 /// # Parameters
 ///
-/// * `pre` - The original bytecode before obfuscation.
-/// * `post` - The obfuscated bytecode.
+/// * `pre` - The original bytecode before camouflage.
+/// * `post` - The camouflaged bytecode.
 ///
 /// # Returns
 ///
@@ -418,22 +418,22 @@ pub enum StructureKind {
     Storage,
     /// A function paired by selector mapping.
     Function {
-        /// Original selector (from pre-obfuscation).
+        /// Original selector (from pre-camouflage).
         original_selector: u32,
-        /// Obfuscated selector (computed from token).
-        obfuscated_selector: u32,
+        /// Camouflaged selector (computed from token).
+        camouflaged_selector: u32,
         /// Function name from original.
         name: String,
     },
-    /// Function from original with no match in obfuscated.
+    /// Function from original with no match in camouflaged.
     UnmatchedOriginal {
         /// The selector.
         selector: u32,
         /// Function name.
         name: String,
     },
-    /// Function from obfuscated with no match in original (decoy or new).
-    UnmatchedObfuscated {
+    /// Function from camouflaged with no match in original (decoy or new).
+    UnmatchedCamouflaged {
         /// The selector.
         selector: u32,
         /// Function name.
@@ -448,19 +448,19 @@ impl fmt::Display for StructureKind {
             StructureKind::Storage => write!(f, "Storage"),
             StructureKind::Function {
                 original_selector,
-                obfuscated_selector,
+                camouflaged_selector,
                 name,
             } => {
                 write!(
                     f,
                     "Function {} (0x{:08x} → 0x{:08x})",
-                    name, original_selector, obfuscated_selector
+                    name, original_selector, camouflaged_selector
                 )
             }
             StructureKind::UnmatchedOriginal { selector, name } => {
                 write!(f, "Removed: {} (0x{:08x})", name, selector)
             }
-            StructureKind::UnmatchedObfuscated { selector, name } => {
+            StructureKind::UnmatchedCamouflaged { selector, name } => {
                 write!(f, "Added: {} (0x{:08x})", name, selector)
             }
         }
@@ -474,8 +474,8 @@ pub struct StructuredDiffItem {
     pub kind: StructureKind,
     /// The content from the original source.
     pub original: String,
-    /// The content from the obfuscated source.
-    pub obfuscated: String,
+    /// The content from the camouflaged source.
+    pub camouflaged: String,
     /// Line-based diff result for this structure.
     pub diff: DiffResult,
 }
@@ -492,7 +492,7 @@ impl StructuredDiffItem {
 pub struct StructuredDiffResult {
     /// Individual diff items for each structure.
     pub items: Vec<StructuredDiffItem>,
-    /// Mapping from original selectors to obfuscated tokens.
+    /// Mapping from original selectors to camouflaged tokens.
     pub selector_mapping: HashMap<u32, Vec<u8>>,
 }
 
@@ -547,7 +547,7 @@ impl StructuredDiffResult {
     }
 }
 
-/// Computes the obfuscated selector from a token.
+/// Computes the camouflaged selector from a token.
 ///
 /// The token bytes replace the original 4-byte selector. We interpret the first
 /// 4 bytes (zero-padded if shorter) as the selector for lookup purposes.
@@ -573,8 +573,8 @@ pub fn compare_sources_structured(
 
     let mut items = Vec::new();
 
-    // Build forward mapping: original_selector -> obfuscated_selector
-    let selector_to_obfuscated: HashMap<u32, u32> = selector_mapping
+    // Build forward mapping: original_selector -> camouflaged_selector
+    let selector_to_camouflaged: HashMap<u32, u32> = selector_mapping
         .iter()
         .map(|(orig, token)| (*orig, token_to_selector(token)))
         .collect();
@@ -584,7 +584,7 @@ pub fn compare_sources_structured(
     items.push(StructuredDiffItem {
         kind: StructureKind::Header,
         original: pre_parsed.header.clone(),
-        obfuscated: post_parsed.header.clone(),
+        camouflaged: post_parsed.header.clone(),
         diff: header_diff,
     });
 
@@ -593,7 +593,7 @@ pub fn compare_sources_structured(
     items.push(StructuredDiffItem {
         kind: StructureKind::Storage,
         original: pre_parsed.storage.clone(),
-        obfuscated: post_parsed.storage.clone(),
+        camouflaged: post_parsed.storage.clone(),
         diff: storage_diff,
     });
 
@@ -601,19 +601,19 @@ pub fn compare_sources_structured(
     let mut matched_post_selectors: HashSet<u32> = HashSet::new();
 
     for (original_selector, pre_func) in &pre_parsed.functions {
-        if let Some(&obfuscated_selector) = selector_to_obfuscated.get(original_selector) {
-            // Found mapping - look for function with obfuscated selector
-            if let Some(post_func) = post_parsed.functions.get(&obfuscated_selector) {
-                matched_post_selectors.insert(obfuscated_selector);
+        if let Some(&camouflaged_selector) = selector_to_camouflaged.get(original_selector) {
+            // Found mapping - look for function with camouflaged selector
+            if let Some(post_func) = post_parsed.functions.get(&camouflaged_selector) {
+                matched_post_selectors.insert(camouflaged_selector);
                 let func_diff = compare_sources(&pre_func.content, &post_func.content);
                 items.push(StructuredDiffItem {
                     kind: StructureKind::Function {
                         original_selector: *original_selector,
-                        obfuscated_selector,
+                        camouflaged_selector,
                         name: pre_func.name.clone(),
                     },
                     original: pre_func.content.clone(),
-                    obfuscated: post_func.content.clone(),
+                    camouflaged: post_func.content.clone(),
                     diff: func_diff,
                 });
             } else {
@@ -625,7 +625,7 @@ pub fn compare_sources_structured(
                         name: pre_func.name.clone(),
                     },
                     original: pre_func.content.clone(),
-                    obfuscated: String::new(),
+                    camouflaged: String::new(),
                     diff: func_diff,
                 });
             }
@@ -637,11 +637,11 @@ pub fn compare_sources_structured(
                 items.push(StructuredDiffItem {
                     kind: StructureKind::Function {
                         original_selector: *original_selector,
-                        obfuscated_selector: *original_selector,
+                        camouflaged_selector: *original_selector,
                         name: pre_func.name.clone(),
                     },
                     original: pre_func.content.clone(),
-                    obfuscated: post_func.content.clone(),
+                    camouflaged: post_func.content.clone(),
                     diff: func_diff,
                 });
             } else {
@@ -653,24 +653,24 @@ pub fn compare_sources_structured(
                         name: pre_func.name.clone(),
                     },
                     original: pre_func.content.clone(),
-                    obfuscated: String::new(),
+                    camouflaged: String::new(),
                     diff: func_diff,
                 });
             }
         }
     }
 
-    // 4. Unmatched functions from obfuscated (decoys or genuinely new)
+    // 4. Unmatched functions from camouflaged (decoys or genuinely new)
     for (post_selector, post_func) in &post_parsed.functions {
         if !matched_post_selectors.contains(post_selector) {
             let func_diff = compare_sources("", &post_func.content);
             items.push(StructuredDiffItem {
-                kind: StructureKind::UnmatchedObfuscated {
+                kind: StructureKind::UnmatchedCamouflaged {
                     selector: *post_selector,
                     name: post_func.name.clone(),
                 },
                 original: String::new(),
-                obfuscated: post_func.content.clone(),
+                camouflaged: post_func.content.clone(),
                 diff: func_diff,
             });
         }

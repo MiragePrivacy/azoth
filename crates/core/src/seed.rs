@@ -36,14 +36,15 @@ impl Seed {
         format!("0x{}", hex::encode(self.inner))
     }
 
-    /// Create a deterministic RNG for bytecode obfuscation transforms
-    /// This ensures the same seed always produces identical obfuscated bytecode
+    /// Create a deterministic RNG for bytecode camouflage transforms
+    /// This ensures the same seed always produces identical camouflaged bytecode
     ///
     /// Basically, it uses whatever bytes are already stored in that Seed, regardless of how those
     /// bytes were created (randomly via generate(), from hex, from legacy u64, etc.).
     pub fn create_deterministic_rng(&self) -> StdRng {
         // Hash the seed to create RNG seed
         let mut hasher = Sha3_256::new();
+        // Preserve the seed domain so existing deployments remain reproducible.
         hasher.update(b"AZOTH_BYTECODE_OBFUSCATION");
         hasher.update(self.inner);
         let seed_hash = hasher.finalize();

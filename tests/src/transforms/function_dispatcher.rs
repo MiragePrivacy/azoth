@@ -4,8 +4,8 @@ use azoth_core::detection::SectionKind;
 use azoth_core::normalize_hex_string;
 use azoth_core::process_bytecode_to_cfg;
 use azoth_core::seed::Seed;
-use azoth_transform::obfuscator::obfuscate_bytecode;
-use azoth_transform::obfuscator::ObfuscationConfig;
+use azoth_transform::camouflage::camouflage_bytecode;
+use azoth_transform::camouflage::CamouflageConfig;
 
 const SIMPLE_BYTECODE: &str =
     "0x60003560e01c80637ff36ab514601e578063a9059cbb14602357600080fd5b600080fd5b600080fd";
@@ -57,21 +57,21 @@ async fn test_dispatcher_transformation_and_determinism() {
             panic!("No dispatcher detected in test bytecode");
         };
 
-    // Obfuscation with deterministic seed
+    // Camouflage with deterministic seed
     let seed = Seed::generate();
-    let config1 = ObfuscationConfig::with_seed(seed.clone());
-    let config2 = ObfuscationConfig::with_seed(seed.clone());
+    let config1 = CamouflageConfig::with_seed(seed.clone());
+    let config2 = CamouflageConfig::with_seed(seed.clone());
 
-    let result1 = obfuscate_bytecode(SIMPLE_BYTECODE, SIMPLE_BYTECODE, config1)
+    let result1 = camouflage_bytecode(SIMPLE_BYTECODE, SIMPLE_BYTECODE, config1)
         .await
         .unwrap();
-    let result2 = obfuscate_bytecode(SIMPLE_BYTECODE, SIMPLE_BYTECODE, config2)
+    let result2 = camouflage_bytecode(SIMPLE_BYTECODE, SIMPLE_BYTECODE, config2)
         .await
         .unwrap();
 
     println!("\nTransformation result:");
     println!("  Original: {} bytes", result1.original_size);
-    println!("  Obfuscated: {} bytes", result1.obfuscated_size);
+    println!("  Camouflaged: {} bytes", result1.obfuscated_size);
     println!(
         "  Size: {} → {} bytes ({:+.1}%)",
         result1.original_size, result1.obfuscated_size, result1.size_increase_percentage
@@ -92,24 +92,27 @@ async fn test_dispatcher_transformation_and_determinism() {
 
     assert_eq!(
         result1.obfuscated_bytecode, result2.obfuscated_bytecode,
-        "Same seed should produce identical obfuscated bytecode"
+        "Same seed should produce identical camouflaged bytecode"
     );
     assert_eq!(
         result1.selector_mapping, result2.selector_mapping,
         "Same seed should produce identical selector mappings"
     );
-    println!("✓ Deterministic obfuscation verified");
+    println!("✓ Deterministic camouflage verified");
 
-    println!("\nObfuscated bytecode hex: {}", result1.obfuscated_bytecode);
+    println!(
+        "\nCamouflaged bytecode hex: {}",
+        result1.obfuscated_bytecode
+    );
 
-    // Decode obfuscated bytecode
-    let (obfuscated_instructions, _, _, _) =
+    // Decode camouflaged bytecode
+    let (camouflaged_instructions, _, _, _) =
         decoder::decode_bytecode(&result1.obfuscated_bytecode, false)
             .await
             .unwrap();
 
-    println!("\nObfuscated dispatcher structure:");
-    for (i, instruction) in obfuscated_instructions.iter().enumerate() {
+    println!("\nCamouflaged dispatcher structure:");
+    for (i, instruction) in camouflaged_instructions.iter().enumerate() {
         println!(
             "  [{}] {} {}",
             i,
@@ -119,7 +122,7 @@ async fn test_dispatcher_transformation_and_determinism() {
     }
 
     // Original selectors are completely removed
-    let original_selector_found = obfuscated_instructions.iter().any(|instruction| {
+    let original_selector_found = camouflaged_instructions.iter().any(|instruction| {
         if let Some(immediate) = &instruction.imm {
             original_selectors.iter().any(|&selector| {
                 format!("{:08x}", selector) == *immediate || format!("{:x}", selector) == *immediate
@@ -130,7 +133,7 @@ async fn test_dispatcher_transformation_and_determinism() {
     });
     assert!(
         !original_selector_found,
-        "Original selectors still present in obfuscated bytecode"
+        "Original selectors still present in camouflaged bytecode"
     );
     println!("✓ Original selectors completely removed");
 
@@ -198,13 +201,13 @@ async fn test_counter_dispatcher_detection() {
         "Expected four selectors in Counter dispatcher"
     );
 
-    let result = obfuscate_bytecode(
+    let result = camouflage_bytecode(
         COUNTER_BYTECODE,
         counter_runtime,
-        ObfuscationConfig::default(),
+        CamouflageConfig::default(),
     )
     .await
-    .expect("obfuscator should succeed");
+    .expect("camouflage tool should succeed");
 
     assert!(
         result
@@ -226,7 +229,7 @@ async fn test_counter_dispatcher_detection() {
         .to_ascii_lowercase();
     assert_ne!(
         sanitized_output, normalized_input,
-        "Obfuscated bytecode should differ once dispatcher transform runs"
+        "Camouflaged bytecode should differ once dispatcher transform runs"
     );
 
     let mapping = result

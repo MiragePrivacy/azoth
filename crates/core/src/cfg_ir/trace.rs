@@ -86,7 +86,7 @@ pub struct CfgIrSnapshot {
     pub selector_mapping: Option<HashMap<u32, Vec<u8>>>,
     pub original_bytecode: Bytes,
     pub runtime_bounds: Option<(usize, usize)>,
-    /// Encoded runtime bytecode after obfuscation (only present in Finalize snapshots).
+    /// Encoded runtime bytecode after camouflage (only present in Finalize snapshots).
     #[serde(default)]
     pub encoded_runtime: Option<Bytes>,
     /// Detected function dispatcher info (blocks that form the selector dispatch table).

@@ -10,7 +10,7 @@
 //!    code paths, typically combined with opaque predicates.
 //!
 //! The choice between strategies affects gas cost, bytecode size, and
-//! obfuscation strength.
+//! camouflage strength.
 
 use super::types::{ArithmeticChainDef, ScatterContext, ScatterStrategy};
 use azoth_core::cfg_ir::CfgIrBundle;

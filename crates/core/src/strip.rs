@@ -1,5 +1,5 @@
 //! Module for stripping EVM bytecode to extract the runtime blob and prepare it for
-//! obfuscation.
+//! camouflage.
 
 use crate::{
     detection::{Section, SectionKind},
@@ -194,7 +194,7 @@ fn patch_constructor_arg_base(
 impl CleanReport {
     /// Updates init code CODECOPY and RETURN parameters to reflect new runtime length and offset.
     ///
-    /// After obfuscation modifies the runtime bytecode, the init code's CODECOPY instruction
+    /// After camouflage modifies the runtime bytecode, the init code's CODECOPY instruction
     /// must be updated to copy the correct number of bytes from the correct offset. The typical
     /// init code pattern is:
     ///
@@ -393,7 +393,7 @@ impl CleanReport {
                 original_creation_len,
                 new_creation_len,
             )?;
-            // A caller may obfuscate bare creation bytecode and append its constructor
+            // A caller may camouflage bare creation bytecode and append its constructor
             // arguments afterwards. Patch a supported constructor-copy base whenever it is
             // present, but only require it when this payload already contains arguments.
             if patched == 0 && has_constructor_args {
@@ -446,7 +446,7 @@ impl CleanReport {
     /// Patch immutable reference offsets in the init code.
     ///
     /// The Solidity compiler's init code writes immutable variable values into the
-    /// runtime bytecode at hardcoded byte offsets. When obfuscation transforms change
+    /// runtime bytecode at hardcoded byte offsets. When camouflage transforms change
     /// the runtime layout (e.g., PushSplit growing blocks), these offsets become stale.
     /// This method detects the pattern `PUSH2 <offset>; ... ADD` in the init code and
     /// updates each offset using the supplied byte-offset remapping closure.
@@ -554,7 +554,7 @@ impl CleanReport {
 
     /// Reassemble bytecode and return an error if changed init-code constants cannot be patched.
     ///
-    /// Obfuscation pipelines should use this checked form so a layout Azoth cannot safely lower
+    /// Camouflage pipelines should use this checked form so a layout Azoth cannot safely lower
     /// is rejected instead of producing deployment bytecode with stale offsets.
     pub fn reassemble_checked(&mut self, clean: &[u8]) -> Result<Vec<u8>, String> {
         let original_runtime_len = self.clean_len;

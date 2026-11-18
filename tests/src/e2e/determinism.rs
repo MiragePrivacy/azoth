@@ -2,7 +2,7 @@ use super::{
     deploy_contract, ESCROW_CONTRACT_DEPLOYMENT_BYTECODE, ESCROW_CONTRACT_RUNTIME_BYTECODE,
 };
 use azoth_core::seed::Seed;
-use azoth_transform::obfuscator::{obfuscate_bytecode, ObfuscationConfig};
+use azoth_transform::camouflage::{camouflage_bytecode, CamouflageConfig};
 use color_eyre::Result;
 
 const FIXED_SEED: &str = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -16,16 +16,16 @@ fn runtime_preview_hex(bytes: &[u8]) -> String {
 async fn test_same_seed_produces_same_deployed_runtime() -> Result<()> {
     let seed = Seed::from_hex(FIXED_SEED).unwrap();
 
-    let result_a = obfuscate_bytecode(
+    let result_a = camouflage_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
-        ObfuscationConfig::with_seed(seed.clone()),
+        CamouflageConfig::with_seed(seed.clone()),
     )
     .await?;
-    let result_b = obfuscate_bytecode(
+    let result_b = camouflage_bytecode(
         ESCROW_CONTRACT_DEPLOYMENT_BYTECODE,
         ESCROW_CONTRACT_RUNTIME_BYTECODE,
-        ObfuscationConfig::with_seed(seed),
+        CamouflageConfig::with_seed(seed),
     )
     .await?;
 
@@ -45,11 +45,11 @@ async fn test_same_seed_produces_same_deployed_runtime() -> Result<()> {
 
     assert_eq!(
         result_a.obfuscated_bytecode, result_b.obfuscated_bytecode,
-        "same seed should produce identical obfuscated deployment bytecode"
+        "same seed should produce identical camouflaged deployment bytecode"
     );
     assert_eq!(
         result_a.obfuscated_runtime, result_b.obfuscated_runtime,
-        "same seed should produce identical obfuscated runtime template"
+        "same seed should produce identical camouflaged runtime template"
     );
     assert_eq!(
         deployed_a.runtime, deployed_b.runtime,

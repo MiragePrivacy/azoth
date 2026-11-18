@@ -159,7 +159,7 @@ pub struct CfgIrBundle {
     pub arithmetic_chain_data: Option<Vec<u8>>,
     /// Runtime-length estimate used by `ArithmeticChain` when it emitted its
     /// CODECOPY offset PUSHes. After Step 5 dispatcher reapply passes in the
-    /// obfuscator pipeline, the actual runtime can grow past this estimate
+    /// camouflage tool pipeline, the actual runtime can grow past this estimate
     /// (some PUSHes widen when a decoy/stub target requires more bytes). The
     /// post-reindex patch pass uses this field to compute the delta and
     /// rewrite every AC-emitted offset PUSH so CODECOPY still points into
